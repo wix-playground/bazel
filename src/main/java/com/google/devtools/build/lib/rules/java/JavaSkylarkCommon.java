@@ -460,17 +460,21 @@ public class JavaSkylarkCommon {
   }
 
   private static StrictDepsMode getStrictDepsMode(String strictDepsMode) {
-    switch (strictDepsMode) {
+    switch (strictDepsMode.toUpperCase()) {
       case "OFF":
         return StrictDepsMode.OFF;
       case "ERROR":
         return StrictDepsMode.ERROR;
+      case "WARN":
+        return StrictDepsMode.WARN;
+      case "DEFAULT":
+        return StrictDepsMode.DEFAULT;
       default:
         throw new IllegalArgumentException(
             "StrictDepsMode "
                 + strictDepsMode
                 + " not allowed."
-                + " Only OFF and ERROR values are accepted.");
+                + " Only OFF, ERROR, WARN and DEFAULT values are accepted.");
     }
   }
 
