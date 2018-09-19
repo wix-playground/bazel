@@ -15,6 +15,7 @@
 
 load("@bazel_tools//tools/build_defs/repo:utils.bzl", "patch", "workspace_and_buildfile")
 
+
 def _clone_or_update(ctx):
     if ((not ctx.attr.tag and not ctx.attr.commit and not ctx.attr.branch) or
         (ctx.attr.tag and ctx.attr.commit) or
@@ -112,17 +113,25 @@ set -ex
     return {"commit": actual_commit, "shallow_since": shallow_date}
 
 def _clone_cache_directory(ctx, bash_exe, ref):
+
+    cache_repo_dir_name = ctx.execute([
+        bash_exe,
+        "-c",
+        "echo '{remote}' | shasum -a 256".format(remote = ctx.attr.remote)],
+       environment=ctx.os.environ)
+
     # TODO - get from argument or ENV
-    cache_directory = "/tmp/bazel_cache/" + ctx.attr.name
+    cache_directory = "/tmp/bazel_cache/" + cache_repo_dir_name.stdout[0:64]
+
+
     clone_to_cache_dir = ctx.execute([bash_exe, "-c", """
-                if ! ( cd '{directory}' && [[ "$(git rev-parse --git-dir)" == '.git' ]] ) >/dev/null 2>&1; then
-                  git clone '{remote}' '{directory}' 
-                elif ! ( cd '{directory}' && git cat-file -t {ref}) >/dev/null 2>&1; then
-                  git -C '{directory}' pull
-                fi
-            """.format(
+        if ! ( cd '{directory}' && [[ "$(git rev-parse --git-dir)" == '.git' ]] ) >/dev/null 2>&1; then
+          git clone '{remote}' '{directory}'
+        elif ! ( cd '{directory}' && git cat-file -t {ref}) >/dev/null 2>&1; then
+          git -C '{directory}' pull
+        fi""".format(
         remote=ctx.attr.remote,
-        directory=cache_directory,
+        directory= cache_directory,
         ref=ref
     )], environment=ctx.os.environ)
 

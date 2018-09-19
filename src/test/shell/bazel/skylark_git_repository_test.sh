@@ -133,7 +133,9 @@ function test_git_repository() {
 # 4. Make sure worksapce can be built and repository cache is updated
 function test_git_repositry_cache_is_updated() {
   local pluto_repo_dir=$TEST_TMPDIR/repos/pluto
-  local cache_dir=/tmp/bazel_cache/pluto
+  local repo_cache_folder=$(echo $pluto_repo_dir | shasum -a 256 | cut -b 1-64)
+  local cache_dir=/tmp/bazel_cache/$repo_cache_folder
+
 
   do_git_repository_test "52f9a3f87a2dd17ae0e5847bbae9734f09354afd"
 
