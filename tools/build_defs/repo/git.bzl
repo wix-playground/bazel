@@ -53,15 +53,17 @@ def _clone_or_update(ctx):
     if ctx.attr.init_submodules:
         # the cache feature isn't supported for submodules
         remote = ctx.attr.remote
+        shared = ""
     else:
         remote = _clone_cache_directory(ctx, bash_exe, ref)
+        shared = "--shared"
 
     st = ctx.execute([bash_exe, "-c", """
 set -ex
 ( cd {working_dir} &&
     if ! ( cd '{dir_link}' && [[ "$(git rev-parse --git-dir)" == '.git' ]] ) >/dev/null 2>&1; then
       rm -rf '{directory}' '{dir_link}'
-      git clone {shallow} '{remote}' '{directory}' || git clone '{remote}' '{directory}'
+      git clone {shared} {shallow} '{remote}' '{directory}' || git clone '{remote}' '{directory}'
     fi
     git -C '{directory}' reset --hard {ref} || \
     ((git -C '{directory}' fetch {shallow} origin {ref}:{ref} || \
@@ -74,6 +76,7 @@ set -ex
         remote = remote,
         ref = ref,
         shallow = shallow,
+        shared = shared
     )], environment = ctx.os.environ)
 
     if st.return_code:
@@ -125,14 +128,20 @@ def _clone_cache_directory(ctx, bash_exe, ref):
 
 
     clone_to_cache_dir = ctx.execute([bash_exe, "-c", """
-        if ! ( cd '{directory}' && [[ "$(git rev-parse --git-dir)" == '.git' ]] ) >/dev/null 2>&1; then
-          git clone '{remote}' '{directory}'
-        elif ! ( cd '{directory}' && git cat-file -t {ref}) >/dev/null 2>&1; then
-          git -C '{directory}' pull
-        fi""".format(
+      if ! ( cd '{directory}' && [[ "$(git rev-parse --git-dir)" == '.git' ]] ) >/dev/null 2>&1; then
+        rm -rf '{directory}'
+        git clone '{remote}' '{directory}'
+      else
+        echo "trying to fetch" '{remote}' >> "/tmp/bazel_cache_log/fetch_log.txt"
+        git -C '{directory}' pull --rebase
+        git -C '{directory}' reset --hard HEAD
+        cp -r '{remote}' /tmp/remote/
+        echo "    -- success" "\n" >> "/tmp/bazel_cache_log/fetch_log.txt"
+      fi
+    """.format(
         remote=ctx.attr.remote,
         directory= cache_directory,
-        ref=ref
+        ref=ref,
     )], environment=ctx.os.environ)
 
     if clone_to_cache_dir.return_code:
