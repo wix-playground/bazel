@@ -15,7 +15,6 @@
 
 load("@bazel_tools//tools/build_defs/repo:utils.bzl", "patch", "workspace_and_buildfile")
 
-
 def _clone_or_update(ctx):
     if ((not ctx.attr.tag and not ctx.attr.commit and not ctx.attr.branch) or
         (ctx.attr.tag and ctx.attr.commit) or
@@ -117,10 +116,7 @@ set -ex
 
 def _clone_cache_directory(ctx, bash_exe, ref):
 
-    cache_repo_dir_name = ctx.execute([
-        bash_exe,
-        "-c",
-        "echo '{remote}' | shasum -a 256".format(remote = ctx.attr.remote)],
+    cache_repo_dir_name = ctx.execute([bash_exe, "-c", "echo '{remote}' | shasum -a 256".format(remote = ctx.attr.remote)],
        environment=ctx.os.environ)
 
     cache_directory = ctx.os.environ["BAZEL_CACHE_DIR"] + cache_repo_dir_name.stdout[0:64]
@@ -130,15 +126,12 @@ def _clone_cache_directory(ctx, bash_exe, ref):
         rm -rf '{directory}'
         git clone '{remote}' '{directory}'
       else
-        echo "trying to fetch" '{remote}' >> "/tmp/bazel_cache_log/fetch_log.txt"
         git -C '{directory}' pull --rebase
         git -C '{directory}' reset --hard HEAD
-        cp -r '{remote}' /tmp/remote/
-        echo "    -- success" "\n" >> "/tmp/bazel_cache_log/fetch_log.txt"
       fi
     """.format(
         remote=ctx.attr.remote,
-        directory= cache_directory,
+        directory=cache_directory,
         ref=ref,
     )], environment=ctx.os.environ)
 

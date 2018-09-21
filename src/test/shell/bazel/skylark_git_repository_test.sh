@@ -133,17 +133,13 @@ function test_git_repositry_cache_is_updated() {
   local pluto_repo_dir=$TEST_TMPDIR/repos/pluto
   local repo_cache_folder=$(echo $pluto_repo_dir | shasum -a 256 | cut -b 1-64)
   local cache_dir=$BAZEL_CACHE_DIR/$repo_cache_folder
-  echo $pluto_repo_dir > "/tmp/bazel_cache_log/pluto_remote_git_log.txt"
 
   do_git_repository_test "52f9a3f87a2dd17ae0e5847bbae9734f09354afd"
 
   cd $pluto_repo_dir
-  git log > "/tmp/bazel_cache_log/pluto_repo_dir_git_log.txt"
-
   git revert 8753495c2536c9e24fa764f06bf3015758461dd4 --no-edit
   git revert dbf9236251a9ea01b7a2eb563ca8e911060fc97c --no-edit
   commit_hash="$(git log -1 --pretty=format:%H)"
-  git log > "/tmp/bazel_cache_log/pluto_repo_reverted_dir_git_log.txt"
 
   cd $WORKSPACE_DIR
   sed -i '' -e "s/52f9a3f87a2dd17ae0e5847bbae9734f09354afd/$commit_hash/g" WORKSPACE
@@ -153,7 +149,6 @@ function test_git_repositry_cache_is_updated() {
   expect_log "Pluto is a dwarf planet"
 
   cd $cache_dir
-  git log > "/tmp/bazel_cache_log/cache_dir_git_log.txt"
   cache_commit_hash="$(git log -1 --pretty=format:%H)"
   assert_equals $commit_hash $cache_commit_hash
 }
