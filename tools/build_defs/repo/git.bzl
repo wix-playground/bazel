@@ -123,9 +123,7 @@ def _clone_cache_directory(ctx, bash_exe, ref):
         "echo '{remote}' | shasum -a 256".format(remote = ctx.attr.remote)],
        environment=ctx.os.environ)
 
-    # TODO - get from argument or ENV
-    cache_directory = "/tmp/bazel_cache/" + cache_repo_dir_name.stdout[0:64]
-
+    cache_directory = ctx.os.environ["BAZEL_CACHE_DIR"] + cache_repo_dir_name.stdout[0:64]
 
     clone_to_cache_dir = ctx.execute([bash_exe, "-c", """
       if ! ( cd '{directory}' && [[ "$(git rev-parse --git-dir)" == '.git' ]] ) >/dev/null 2>&1; then

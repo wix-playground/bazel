@@ -41,16 +41,14 @@ function set_up() {
   tar zxf outer-planets-repo.tar.gz
   tar zxf refetch-repo.tar.gz
 
-  # TODO - get from argument or ENV
-  local cache_dir=/tmp/bazel_cache
-  rm -rf $cache_dir/pluto
-  rm -rf $cache_dir/outer_planets
-
   # Fix environment variables for a hermetic use of git.
   export GIT_CONFIG_NOSYSTEM=1
   export GIT_CONFIG_NOGLOBAL=1
   export HOME=
   export XDG_CONFIG_HOME=
+  export BAZEL_CACHE_DIR="/tmp/local_bazel_cache/"
+
+  rm -rf $BAZEL_CACHE_DIR
 }
 
 # Test cloning a Git repository using the git_repository rule.
@@ -134,7 +132,7 @@ function test_git_repository() {
 function test_git_repositry_cache_is_updated() {
   local pluto_repo_dir=$TEST_TMPDIR/repos/pluto
   local repo_cache_folder=$(echo $pluto_repo_dir | shasum -a 256 | cut -b 1-64)
-  local cache_dir=/tmp/bazel_cache/$repo_cache_folder
+  local cache_dir=$BAZEL_CACHE_DIR/$repo_cache_folder
   echo $pluto_repo_dir > "/tmp/bazel_cache_log/pluto_remote_git_log.txt"
 
   do_git_repository_test "52f9a3f87a2dd17ae0e5847bbae9734f09354afd"
