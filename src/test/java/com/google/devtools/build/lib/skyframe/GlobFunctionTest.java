@@ -17,6 +17,7 @@ import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.fail;
 
 import com.google.common.base.Functions;
+import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -35,11 +36,13 @@ import com.google.devtools.build.lib.events.NullEventHandler;
 import com.google.devtools.build.lib.packages.PackageFactory;
 import com.google.devtools.build.lib.packages.PackageFactory.EnvironmentExtension;
 import com.google.devtools.build.lib.packages.RuleClassProvider;
+import com.google.devtools.build.lib.packages.WorkspaceFileValue;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
+import com.google.devtools.build.lib.rules.repository.RepositoryDelegatorFunction;
 import com.google.devtools.build.lib.skyframe.ExternalFilesHelper.ExternalFileAction;
 import com.google.devtools.build.lib.skyframe.GlobValue.InvalidGlobPatternException;
 import com.google.devtools.build.lib.skyframe.PackageLookupFunction.CrossRepositoryLabelViolationStrategy;
-import com.google.devtools.build.lib.syntax.SkylarkSemantics;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import com.google.devtools.build.lib.testutil.ManualClock;
 import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
@@ -53,6 +56,7 @@ import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.lib.vfs.UnixGlob;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 import com.google.devtools.build.skyframe.ErrorInfo;
+import com.google.devtools.build.skyframe.EvaluationContext;
 import com.google.devtools.build.skyframe.EvaluationResult;
 import com.google.devtools.build.skyframe.InMemoryMemoizingEvaluator;
 import com.google.devtools.build.skyframe.MemoizingEvaluator;
@@ -78,6 +82,13 @@ import org.junit.runners.JUnit4;
  * Tests for {@link GlobFunction}.
  */
 public abstract class GlobFunctionTest {
+  private static final EvaluationContext EVALUATION_OPTIONS =
+      EvaluationContext.newBuilder()
+          .setKeepGoing(false)
+          .setNumThreads(SkyframeExecutor.DEFAULT_THREAD_COUNT)
+          .setEventHander(NullEventHandler.INSTANCE)
+          .build();
+
   @RunWith(JUnit4.class)
   public static class GlobFunctionAlwaysUseDirListingTest extends GlobFunctionTest {
     @Override
@@ -126,7 +137,9 @@ public abstract class GlobFunctionTest {
     driver = new SequentialBuildDriver(evaluator);
     PrecomputedValue.BUILD_ID.set(differencer, UUID.randomUUID());
     PrecomputedValue.PATH_PACKAGE_LOCATOR.set(differencer, pkgLocator.get());
-    PrecomputedValue.SKYLARK_SEMANTICS.set(differencer, SkylarkSemantics.DEFAULT_SEMANTICS);
+    PrecomputedValue.STARLARK_SEMANTICS.set(differencer, StarlarkSemantics.DEFAULT_SEMANTICS);
+    RepositoryDelegatorFunction.RESOLVED_FILE_INSTEAD_OF_WORKSPACE.set(
+        differencer, Optional.<RootedPath>absent());
 
     createTestFiles();
   }
@@ -150,7 +163,8 @@ public abstract class GlobFunctionTest {
     skyFunctions.put(SkyFunctions.GLOB, new GlobFunction(alwaysUseDirListing()));
     skyFunctions.put(
         SkyFunctions.DIRECTORY_LISTING_STATE,
-        new DirectoryListingStateFunction(externalFilesHelper));
+        new DirectoryListingStateFunction(
+            externalFilesHelper, new AtomicReference<>(UnixGlob.DEFAULT_SYSCALLS)));
     skyFunctions.put(SkyFunctions.DIRECTORY_LISTING, new DirectoryListingFunction());
     skyFunctions.put(
         SkyFunctions.PACKAGE_LOOKUP,
@@ -165,18 +179,21 @@ public abstract class GlobFunctionTest {
     skyFunctions.put(
         FileStateValue.FILE_STATE,
         new FileStateFunction(
-            new AtomicReference<TimestampGranularityMonitor>(), externalFilesHelper));
+            new AtomicReference<TimestampGranularityMonitor>(),
+            new AtomicReference<>(UnixGlob.DEFAULT_SYSCALLS),
+            externalFilesHelper));
     skyFunctions.put(FileValue.FILE, new FileFunction(pkgLocator));
     skyFunctions.put(SkyFunctions.DIRECTORY_LISTING, new DirectoryListingFunction());
     skyFunctions.put(
         SkyFunctions.DIRECTORY_LISTING_STATE,
-        new DirectoryListingStateFunction(externalFilesHelper));
+        new DirectoryListingStateFunction(
+            externalFilesHelper, new AtomicReference<>(UnixGlob.DEFAULT_SYSCALLS)));
 
     AnalysisMock analysisMock = AnalysisMock.get();
     RuleClassProvider ruleClassProvider = analysisMock.createRuleClassProvider();
     skyFunctions.put(SkyFunctions.WORKSPACE_AST, new WorkspaceASTFunction(ruleClassProvider));
     skyFunctions.put(
-        SkyFunctions.WORKSPACE_FILE,
+        WorkspaceFileValue.WORKSPACE_FILE,
         new WorkspaceFileFunction(
             ruleClassProvider,
             analysisMock
@@ -184,8 +201,9 @@ public abstract class GlobFunctionTest {
                 .setEnvironmentExtensions(
                     ImmutableList.<EnvironmentExtension>of(
                         new PackageFactory.EmptyEnvironmentExtension()))
-                .build(ruleClassProvider),
-            directories));
+                .build(ruleClassProvider, fs),
+            directories,
+            /*skylarkImportLookupFunctionForInlining=*/ null));
     skyFunctions.put(SkyFunctions.EXTERNAL_PACKAGE, new ExternalPackageFunction());
     skyFunctions.put(SkyFunctions.LOCAL_REPOSITORY_LOOKUP, new LocalRepositoryLookupFunction());
     return skyFunctions;
@@ -392,10 +410,6 @@ public abstract class GlobFunctionTest {
     assertGlobMatches(false, pattern, expecteds);
   }
 
-  private void assertGlobWithoutDirsMatches(String pattern, String... expecteds) throws Exception {
-    assertGlobMatches(true, pattern, expecteds);
-  }
-
   private void assertGlobMatches(boolean excludeDirs, String pattern, String... expecteds)
       throws Exception {
     // The order requirement is not strictly necessary -- a change to GlobFunction semantics that
@@ -407,7 +421,12 @@ public abstract class GlobFunctionTest {
     assertThat(
             Iterables.transform(
                 runGlob(excludeDirs, pattern).getMatches(), Functions.toStringFunction()))
-        .containsExactlyElementsIn(ImmutableList.copyOf(expecteds)).inOrder();
+        .containsExactlyElementsIn(ImmutableList.copyOf(expecteds))
+        .inOrder();
+  }
+
+  private void assertGlobWithoutDirsMatches(String pattern, String... expecteds) throws Exception {
+    assertGlobMatches(true, pattern, expecteds);
   }
 
   private void assertGlobsEqual(String pattern1, String pattern2) throws Exception {
@@ -423,11 +442,7 @@ public abstract class GlobFunctionTest {
         GlobValue.key(
             PKG_ID, Root.fromPath(root), pattern, excludeDirs, PathFragment.EMPTY_FRAGMENT);
     EvaluationResult<SkyValue> result =
-        driver.evaluate(
-            ImmutableList.of(skyKey),
-            false,
-            SkyframeExecutor.DEFAULT_THREAD_COUNT,
-            NullEventHandler.INSTANCE);
+        driver.evaluate(ImmutableList.of(skyKey), EVALUATION_OPTIONS);
     if (result.hasError()) {
       throw result.getError().getException();
     }
@@ -647,17 +662,18 @@ public abstract class GlobFunctionTest {
     RootedPath pkgRootedPath = RootedPath.toRootedPath(Root.fromPath(root), pkgPath);
     FileStateValue pkgDirFileStateValue = FileStateValue.create(pkgRootedPath, null);
     FileValue pkgDirValue =
-        FileValue.value(pkgRootedPath, pkgDirFileStateValue, pkgRootedPath, pkgDirFileStateValue);
+        FileValue.value(
+            ImmutableList.of(pkgRootedPath),
+            pkgRootedPath,
+            pkgDirFileStateValue,
+            pkgRootedPath,
+            pkgDirFileStateValue);
     differencer.inject(ImmutableMap.of(FileValue.key(pkgRootedPath), pkgDirValue));
     String expectedMessage = "/root/workspace/pkg is no longer an existing directory";
     SkyKey skyKey =
         GlobValue.key(PKG_ID, Root.fromPath(root), "*/foo", false, PathFragment.EMPTY_FRAGMENT);
     EvaluationResult<GlobValue> result =
-        driver.evaluate(
-            ImmutableList.of(skyKey),
-            false,
-            SkyframeExecutor.DEFAULT_THREAD_COUNT,
-            NullEventHandler.INSTANCE);
+        driver.evaluate(ImmutableList.of(skyKey), EVALUATION_OPTIONS);
     assertThat(result.hasError()).isTrue();
     ErrorInfo errorInfo = result.getError(skyKey);
     assertThat(errorInfo.getException()).isInstanceOf(InconsistentFilesystemException.class);
@@ -681,11 +697,7 @@ public abstract class GlobFunctionTest {
     SkyKey skyKey =
         GlobValue.key(PKG_ID, Root.fromPath(root), "**/wiz", false, PathFragment.EMPTY_FRAGMENT);
     EvaluationResult<GlobValue> result =
-        driver.evaluate(
-            ImmutableList.of(skyKey),
-            false,
-            SkyframeExecutor.DEFAULT_THREAD_COUNT,
-            NullEventHandler.INSTANCE);
+        driver.evaluate(ImmutableList.of(skyKey), EVALUATION_OPTIONS);
     assertThat(result.hasError()).isTrue();
     ErrorInfo errorInfo = result.getError(skyKey);
     assertThat(errorInfo.getException()).isInstanceOf(InconsistentFilesystemException.class);
@@ -756,11 +768,7 @@ public abstract class GlobFunctionTest {
         GlobValue.key(
             PKG_ID, Root.fromPath(root), "foo/bar/wiz/*", false, PathFragment.EMPTY_FRAGMENT);
     EvaluationResult<GlobValue> result =
-        driver.evaluate(
-            ImmutableList.of(skyKey),
-            false,
-            SkyframeExecutor.DEFAULT_THREAD_COUNT,
-            NullEventHandler.INSTANCE);
+        driver.evaluate(ImmutableList.of(skyKey), EVALUATION_OPTIONS);
     assertThat(result.hasError()).isTrue();
     ErrorInfo errorInfo = result.getError(skyKey);
     assertThat(errorInfo.getException()).isInstanceOf(InconsistentFilesystemException.class);
@@ -789,11 +797,11 @@ public abstract class GlobFunctionTest {
     }
 
     @Override
-    public FileStatus stat(Path path, boolean followSymlinks) throws IOException {
+    public FileStatus statIfFound(Path path, boolean followSymlinks) throws IOException {
       if (stubbedStats.containsKey(path)) {
         return stubbedStats.get(path);
       }
-      return super.stat(path, followSymlinks);
+      return super.statIfFound(path, followSymlinks);
     }
   }
 }

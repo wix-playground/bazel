@@ -32,7 +32,7 @@ import javax.annotation.Nullable;
  * true, and with {@link SkylarkConstructor} for the info type it constructs.
  */
 @Immutable
-public abstract class BuiltinProvider<T extends Info> implements Provider {
+public abstract class BuiltinProvider<T extends InfoInterface> implements Provider {
   private final NativeKey key;
   private final String name;
   private final Class<T> valueClass;
@@ -96,7 +96,7 @@ public abstract class BuiltinProvider<T extends Info> implements Provider {
    */
   protected T throwUnsupportedConstructorException(Location loc) throws EvalException {
     throw new EvalException(
-        loc, String.format("'%s' cannot be constructed from Skylark", getPrintableName()));
+        loc, String.format("'%s' cannot be constructed from Starlark", getPrintableName()));
   }
 
   /**

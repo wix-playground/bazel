@@ -35,7 +35,6 @@ namespace blaze_util {
 using bazel::windows::AutoHandle;
 using bazel::windows::GetLongPath;
 using bazel::windows::HasUncPrefix;
-using bazel::windows::OpenDirectory;
 using std::basic_string;
 using std::pair;
 using std::string;
@@ -43,10 +42,13 @@ using std::unique_ptr;
 using std::vector;
 using std::wstring;
 
+static constexpr DWORD kAllShare =
+    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+
 // Returns true if `path` refers to a directory or (non-dangling) junction.
 // `path` must be a normalized Windows path, with UNC prefix (and absolute) if
 // necessary.
-static bool IsDirectoryW(const wstring& path);
+bool IsDirectoryW(const wstring& path);
 
 // Returns true the file or junction at `path` is successfully deleted.
 // Returns false otherwise, or if `path` doesn't exist or is a directory.
@@ -260,7 +262,7 @@ static bool OpenFileForReading(const string& filename, HANDLE* result) {
   *result = ::CreateFileW(
       /* lpFileName */ wfilename.c_str(),
       /* dwDesiredAccess */ GENERIC_READ,
-      /* dwShareMode */ FILE_SHARE_READ,
+      /* dwShareMode */ kAllShare,
       /* lpSecurityAttributes */ NULL,
       /* dwCreationDisposition */ OPEN_EXISTING,
       /* dwFlagsAndAttributes */ FILE_ATTRIBUTE_NORMAL,
@@ -427,126 +429,36 @@ bool UnlinkPath(const string& file_path) {
   return UnlinkPathW(wpath);
 }
 
-class JunctionResolver {
- public:
-  JunctionResolver();
-
-  // Resolves junctions, or simply checks file existence (if not a junction).
-  //
-  // Returns true if `path` is not a junction and it exists.
-  // Returns true if `path` is a junction and can be successfully resolved and
-  // its target exists.
-  // Returns false otherwise.
-  //
-  // If `result` is not nullptr and the method returned false, then this will be
-  // reset to point to a new WCHAR buffer containing the final resolved path.
-  // If `path` was a junction, this will be the fully resolved path, otherwise
-  // it will be a copy of `path`.
-  bool Resolve(const WCHAR* path, std::unique_ptr<WCHAR[]>* result);
-
- private:
-  static const int kMaximumJunctionDepth;
-
-  // This struct is a simplified version of REPARSE_DATA_BUFFER, defined by
-  // the <Ntifs.h> header file, which is not available on some systems.
-  // This struct removes the original one's union keeping only
-  // MountPointReparseBuffer, while also renames some fields to reflect how
-  // ::DeviceIoControl actually uses them when reading junction data.
-  typedef struct _ReparseMountPointData {
-    static const int kSize = MAXIMUM_REPARSE_DATA_BUFFER_SIZE;
-
-    ULONG ReparseTag;
-    USHORT Dummy1;
-    USHORT Dummy2;
-    USHORT Dummy3;
-    USHORT Dummy4;
-    // Length of string in PathBuffer, in WCHARs, including the "\??\" prefix
-    // and the null-terminator.
-    //
-    // Reparse points use the "\??\" prefix instead of "\\?\", presumably
-    // because the junction is resolved by the kernel and it points to a Device
-    // Object path (which is what the kernel understands), and "\??" is a device
-    // path. ("\??" is shorthand for "\DosDevices" under which disk drives
-    // reside, e.g. "C:" is a symlink to "\DosDevices\C:" aka "\??\C:").
-    // See (on 2017-01-04):
-    // https://msdn.microsoft.com/en-us/library/windows/hardware/ff565384(v=vs.85).aspx
-    // https://msdn.microsoft.com/en-us/library/windows/hardware/ff557762(v=vs.85).aspx
-    USHORT Size;
-    USHORT Dummy5;
-    // First character of the string returned by ::DeviceIoControl. The rest of
-    // the string follows this in memory, that's why the caller must allocate
-    // kSize bytes and cast that data to ReparseMountPointData.
-    WCHAR PathBuffer[1];
-  } ReparseMountPointData;
-
-  uint8_t reparse_buffer_bytes_[ReparseMountPointData::kSize];
-  ReparseMountPointData* reparse_buffer_;
-
-  bool Resolve(const WCHAR* path, std::unique_ptr<WCHAR[]>* result,
-               int max_junction_depth);
-};
-
-// Maximum reparse point depth on Windows 8 and above is 63.
-// Source (on 2016-12-20):
-// https://msdn.microsoft.com/en-us/library/windows/desktop/aa365503(v=vs.85).aspx
-const int JunctionResolver::kMaximumJunctionDepth = 63;
-
-JunctionResolver::JunctionResolver()
-    : reparse_buffer_(
-          reinterpret_cast<ReparseMountPointData*>(reparse_buffer_bytes_)) {
-  reparse_buffer_->ReparseTag = IO_REPARSE_TAG_MOUNT_POINT;
-}
-
-bool JunctionResolver::Resolve(const WCHAR* path, unique_ptr<WCHAR[]>* result,
-                               int max_junction_depth) {
-  DWORD attributes = ::GetFileAttributesW(path);
-  if (attributes == INVALID_FILE_ATTRIBUTES) {
-    // `path` does not exist.
+static bool RealPath(const WCHAR* path, unique_ptr<WCHAR[]>* result = nullptr) {
+  // Attempt opening the path, which may be anything -- a file, a directory, a
+  // symlink, even a dangling symlink is fine.
+  // Follow reparse points, getting us that much closer to the real path.
+  AutoHandle h(CreateFileW(path, 0, kAllShare, NULL, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS, NULL));
+  if (!h.IsValid()) {
+    // Path does not exist or it's a dangling junction/symlink.
     return false;
-  } else {
-    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-      // `path` is a junction. GetFileAttributesW succeeds for these even if
-      // their target does not exist. We need to resolve the target and check if
-      // that exists. (There seems to be no API function for this.)
-      if (max_junction_depth <= 0) {
-        // Too many levels of junctions. Simply say this file doesn't exist.
-        return false;
-      }
-      // Get a handle to the directory.
-      AutoHandle handle(OpenDirectory(path, /* read_write */ false));
-      if (!handle.IsValid()) {
-        // Opening the junction failed for whatever reason. For all intents and
-        // purposes we can treat this file as if it didn't exist.
-        return false;
-      }
-      // Read out the junction data.
-      DWORD bytes_returned;
-      BOOL ok = ::DeviceIoControl(
-          handle, FSCTL_GET_REPARSE_POINT, NULL, 0, reparse_buffer_,
-          MAXIMUM_REPARSE_DATA_BUFFER_SIZE, &bytes_returned, NULL);
-      if (!ok) {
-        // Reading the junction data failed. For all intents and purposes we can
-        // treat this file as if it didn't exist.
-        return false;
-      }
-      reparse_buffer_->PathBuffer[reparse_buffer_->Size - 1] = UNICODE_NULL;
-      // Check if the junction target exists.
-      return Resolve(reparse_buffer_->PathBuffer, result,
-                     max_junction_depth - 1);
-    }
   }
-  // `path` is a normal file or directory.
-  if (result) {
-    size_t len = wcslen(path) + 1;
-    result->reset(new WCHAR[len]);
-    memcpy(result->get(), path, len * sizeof(WCHAR));
-  }
-  return true;
-}
 
-bool JunctionResolver::Resolve(const WCHAR* path, unique_ptr<WCHAR[]>* result) {
-  return Resolve(path, result, kMaximumJunctionDepth);
+  if (!result) {
+    // The caller is only interested in whether the file exists, they aren't
+    // interested in its real path. Since we just successfully opened the file
+    // we already know it exists.
+    // Also, GetFinalPathNameByHandleW is slow so avoid calling it if we can.
+    return true;
+  }
+
+  // kMaxPath value: according to MSDN, maximum path length is 32767, and with
+  // an extra null terminator that's exactly 0x8000.
+  static constexpr size_t kMaxPath = 0x8000;
+  std::unique_ptr<WCHAR[]> buf(new WCHAR[kMaxPath]);
+  DWORD res = GetFinalPathNameByHandleW(h, buf.get(), kMaxPath, 0);
+  if (res > 0 && res < kMaxPath) {
+    *result = std::move(buf);
+    return true;
+  } else {
+    return false;
+  }
 }
 
 bool ReadDirectorySymlink(const string& name, string* result) {
@@ -559,7 +471,7 @@ bool ReadDirectorySymlink(const string& name, string* result) {
     return false;
   }
   unique_ptr<WCHAR[]> result_ptr;
-  if (!JunctionResolver().Resolve(wname.c_str(), &result_ptr)) {
+  if (!RealPath(wname.c_str(), &result_ptr)) {
     return false;
   }
   *result = WstringToCstring(RemoveUncPrefixMaybe(result_ptr.get())).get();
@@ -581,17 +493,18 @@ bool PathExists(const string& path) {
         << "): AsAbsoluteWindowsPath failed: " << error;
     return false;
   }
-  return JunctionResolver().Resolve(wpath.c_str(), nullptr);
+  return RealPath(wpath.c_str(), nullptr);
 }
 
 string MakeCanonical(const char* path) {
   if (IsDevNull(path)) {
     return "NUL";
   }
-  wstring wpath;
   if (path == nullptr || path[0] == 0) {
     return "";
   }
+
+  std::wstring wpath;
   string error;
   if (!AsAbsoluteWindowsPath(path, &wpath, &error)) {
     BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
@@ -599,69 +512,8 @@ string MakeCanonical(const char* path) {
         << "): AsAbsoluteWindowsPath failed: " << error;
   }
 
-  // Resolve all segments of the path. Do this from leaf to root, so we always
-  // know that the path's tail is resolved and junctions may be found only in
-  // its head.
-  std::vector<wstring> realpath_reversed;
-  while (true) {
-    // Resolve the last segment.
-    unique_ptr<WCHAR[]> realpath;
-    if (!JunctionResolver().Resolve(wpath.c_str(), &realpath)) {
-      // The path doesn't exist or there are too many levels of indirection,
-      // so just give up.
-      return "";
-    }
-    // The last segment is surely not a junction anymore. Split it off the path
-    // and keep resolving its ancestors until we reach the root directory.
-    pair<wstring, wstring> split(SplitPathW(realpath.get()));
-    if (split.second.empty()) {
-      // `wpath` was a root directory, we're done.
-      realpath_reversed.push_back(split.first);
-      break;
-    } else {
-      // `wpath` was not yet a root directory, split off the last segment and
-      // store it in the stack, keep resolving the rest.
-      realpath_reversed.push_back(split.second);
-      wpath = split.first;
-    }
-  }
-
-  // Concatenate the segments in reverse order.
-  int segment_cnt = 0;
-  std::wstringstream builder;
-  for (auto segment = realpath_reversed.crbegin();
-       segment != realpath_reversed.crend(); ++segment) {
-    if (segment_cnt < 2) {
-      segment_cnt++;
-    } else {
-      // Start appending '\' separator after not the first but the second
-      // segment, since the first segment is a drive name "c:\" and already
-      // has the separator.
-      builder << L"\\";
-    }
-    builder << *segment;
-  }
-  wstring realpath(builder.str());
-  if (HasUncPrefix(realpath.c_str())) {
-    // `realpath` has an UNC prefix if `path` did, or if `path` contained
-    // junctions.
-    // In the first case, the UNC prefix is the usual "\\?\", but in the second
-    // case it is "\??\", because that's what the junction resolution yields,
-    // because that's the prefix the filesystem uses for storing junction
-    // values.
-    // Since "\??\" is only meaningful for the kernel and not for usermode
-    // Win32 API functions, we need to replace this prefix with the usual "\\?\"
-    // one.
-    realpath[1] = L'\\';
-  }
-
-  // Resolve all 8dot3 style segments of the path, if any. The input path may
-  // have had some. Junctions may also refer to 8dot3 names.
-  unique_ptr<WCHAR[]> long_realpath;
-  wstring werror(GetLongPath(realpath.c_str(), &long_realpath));
-  if (!werror.empty()) {
-    // TODO(laszlocsomor): refactor MakeCanonical to return an error message,
-    // return `werror` here.
+  std::unique_ptr<WCHAR[]> long_realpath;
+  if (!RealPath(wpath.c_str(), &long_realpath)) {
     return "";
   }
 
@@ -679,22 +531,8 @@ string MakeCanonical(const char* path) {
 }
 
 static bool CanReadFileW(const wstring& path) {
-  DWORD attrs = ::GetFileAttributesW(path.c_str());
-  if ((attrs == INVALID_FILE_ATTRIBUTES) ||
-      (attrs & FILE_ATTRIBUTE_DIRECTORY)) {
-    // The path doesn't exist or is a directory/junction.
-    return false;
-  }
-  // The only easy way to find out if a file is readable is to attempt to open
-  // it for reading.
-  AutoHandle handle(::CreateFileW(
-      /* lpFileName */ path.c_str(),
-      /* dwDesiredAccess */ GENERIC_READ,
-      /* dwShareMode */ FILE_SHARE_READ,
-      /* lpSecurityAttributes */ NULL,
-      /* dwCreationDisposition */ OPEN_EXISTING,
-      /* dwFlagsAndAttributes */ FILE_ATTRIBUTE_NORMAL,
-      /* hTemplateFile */ NULL));
+  AutoHandle handle(CreateFileW(path.c_str(), GENERIC_READ, kAllShare, NULL,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL));
   return handle.IsValid();
 }
 
@@ -754,7 +592,7 @@ bool CanAccessDirectory(const std::string& path) {
   HANDLE handle = ::CreateFileW(
       /* lpFileName */ dummy_path.c_str(),
       /* dwDesiredAccess */ GENERIC_WRITE | GENERIC_READ,
-      /* dwShareMode */ FILE_SHARE_READ | FILE_SHARE_WRITE,
+      /* dwShareMode */ kAllShare,
       /* lpSecurityAttributes */ NULL,
       /* dwCreationDisposition */ OPEN_ALWAYS,
       /* dwFlagsAndAttributes */ FILE_ATTRIBUTE_NORMAL,
@@ -776,11 +614,16 @@ bool CanAccessDirectory(const std::string& path) {
   return true;
 }
 
-static bool IsDirectoryW(const wstring& path) {
-  DWORD attrs = ::GetFileAttributesW(path.c_str());
-  return (attrs != INVALID_FILE_ATTRIBUTES) &&
-         (attrs & FILE_ATTRIBUTE_DIRECTORY) &&
-         JunctionResolver().Resolve(path.c_str(), nullptr);
+bool IsDirectoryW(const wstring& path) {
+  // Attempt opening the path, which may be anything -- a file, a directory, a
+  // symlink, even a dangling symlink is fine.
+  // Follow reparse points in order to return false for dangling ones.
+  AutoHandle h(CreateFileW(path.c_str(), 0, kAllShare, NULL, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS, NULL));
+  BY_HANDLE_FILE_INFORMATION info;
+  return h.IsValid() && GetFileInformationByHandle(h, &info) &&
+         info.dwFileAttributes != INVALID_FILE_ATTRIBUTES &&
+         (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
 }
 
 bool IsDirectory(const string& path) {
@@ -807,19 +650,26 @@ bool MakeDirectoriesW(const wstring& path, unsigned int mode) {
   if (path.empty()) {
     return false;
   }
-  if (IsRootDirectoryW(path) || IsDirectoryW(path)) {
-    return true;
-  }
-  wstring parent = SplitPathW(path).first;
-  if (parent.empty()) {
-    // Since `path` is not a root directory, there should have been at least one
-    // directory above it.
+  std::wstring abs_path;
+  std::string error;
+  if (!AsAbsoluteWindowsPath(path, &abs_path, &error)) {
     BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
         << "MakeDirectoriesW(" << blaze_util::WstringToString(path)
+        << "): " << error;
+  }
+  if (IsRootDirectoryW(abs_path) || IsDirectoryW(abs_path)) {
+    return true;
+  }
+  wstring parent = SplitPathW(abs_path).first;
+  if (parent.empty()) {
+    // Since `abs_path` is not a root directory, there should have been at least
+    // one directory above it.
+    BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
+        << "MakeDirectoriesW(" << blaze_util::WstringToString(abs_path)
         << ") could not find dirname: " << GetLastErrorString();
   }
   return MakeDirectoriesW(parent, mode) &&
-         ::CreateDirectoryW(path.c_str(), NULL) == TRUE;
+         ::CreateDirectoryW(abs_path.c_str(), NULL) == TRUE;
 }
 
 bool MakeDirectories(const string& path, unsigned int mode) {
@@ -841,17 +691,36 @@ bool MakeDirectories(const string& path, unsigned int mode) {
   return MakeDirectoriesW(wpath, mode);
 }
 
+static inline void ToLowerW(WCHAR* p) {
+  while (*p) {
+    *p++ = towlower(*p);
+  }
+}
+
 std::wstring GetCwdW() {
-  DWORD len = ::GetCurrentDirectoryW(0, nullptr);
-  unique_ptr<WCHAR[]> cwd(new WCHAR[len]);
-  if (!::GetCurrentDirectoryW(len, cwd.get())) {
+  static constexpr size_t kBufSmall = MAX_PATH;
+  WCHAR buf[kBufSmall];
+  DWORD len = GetCurrentDirectoryW(kBufSmall, buf);
+  if (len == 0) {
+    DWORD err = GetLastError();
     BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
-        << "GetCurrentDirectoryW failed: " << GetLastErrorString();
+        << "GetCurrentDirectoryW failed (error " << err << ")";
   }
-  for (WCHAR* p = cwd.get(); *p != 0; ++p) {
-    *p = towlower(*p);
+
+  if (len < kBufSmall) {
+    ToLowerW(buf);
+    return std::wstring(buf);
   }
-  return std::wstring(cwd.get());
+
+  unique_ptr<WCHAR[]> buf_big(new WCHAR[len]);
+  len = GetCurrentDirectoryW(len, buf_big.get());
+  if (len == 0) {
+    DWORD err = GetLastError();
+    BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
+        << "GetCurrentDirectoryW failed (error " << err << ")";
+  }
+  ToLowerW(buf_big.get());
+  return std::wstring(buf_big.get());
 }
 
 string GetCwd() {

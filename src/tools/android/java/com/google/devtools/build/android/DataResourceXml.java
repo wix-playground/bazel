@@ -238,12 +238,14 @@ public class DataResourceXml implements DataResource {
       case INTERPOLATOR:
       case MENU:
       case MIPMAP:
+      case NAVIGATION:
       case RAW:
       case TRANSITION:
+      case FONT:
       case XML:
         return SimpleXmlResourceValue.from(proto, resourceType);
       default:
-        throw new IllegalArgumentException();
+        throw new IllegalArgumentException("Unhandled type " + resourceType + " from " + proto);
     }
   }
 
@@ -419,7 +421,7 @@ public class DataResourceXml implements DataResource {
 
   @Override
   public String asConflictString() {
-    return source.asConflictString();
+    return xml.asConflictStringWith(source);
   }
 
   @Override

@@ -36,6 +36,7 @@ import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.view.test.TestStatus.BlazeTestStatus;
 import com.google.devtools.build.lib.view.test.TestStatus.FailedTestCasesStatus;
 import com.google.devtools.build.lib.view.test.TestStatus.TestCase;
+import com.google.devtools.build.lib.view.test.TestStatus.TestCase.Type;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -74,6 +75,7 @@ public class TestSummary implements Comparable<TestSummary>, BuildEventWithOrder
       addCoverageFiles(existingSummary.coverageFiles);
       addPassedLogs(existingSummary.passedLogs);
       addFailedLogs(existingSummary.failedLogs);
+      addTotalTestCases(existingSummary.totalTestCases);
 
       if (existingSummary.failedTestCasesStatus != null) {
         addFailedTestCases(existingSummary.getFailedTestCases(),
@@ -137,9 +139,27 @@ public class TestSummary implements Comparable<TestSummary>, BuildEventWithOrder
       return this;
     }
 
+    public Builder addPassedLog(Path passedLog) {
+      checkMutation(passedLog);
+      summary.passedLogs.add(passedLog);
+      return this;
+    }
+
     public Builder addFailedLogs(List<Path> failedLogs) {
       checkMutation(failedLogs);
       summary.failedLogs.addAll(failedLogs);
+      return this;
+    }
+
+    public Builder addFailedLog(Path failedLog) {
+      checkMutation(failedLog);
+      summary.failedLogs.add(failedLog);
+      return this;
+    }
+
+    public Builder addTotalTestCases(int totalTestCases) {
+      checkMutation(totalTestCases);
+      summary.totalTestCases += totalTestCases;
       return this;
     }
 
@@ -167,18 +187,29 @@ public class TestSummary implements Comparable<TestSummary>, BuildEventWithOrder
           return this;
         }
 
-        String name = testCase.getName();
-        String className = testCase.getClassName();
-        if (name == null || className == null) {
-          // A test case detail is not really interesting if we cannot tell which
-          // one it is.
-          this.summary.failedTestCasesStatus = FailedTestCasesStatus.PARTIAL;
-          return this;
-        }
-
         this.summary.failedTestCases.add(testCase);
       }
       return this;
+    }
+
+    public Builder countTotalTestCases(TestCase testCase) {
+      if (testCase != null) {
+        summary.totalTestCases = traverseCountTotalTestCases(testCase);
+      }
+      return this;
+    }
+
+    private int traverseCountTotalTestCases(TestCase testCase) {
+      if (testCase.getChildCount() > 0) {
+        // don't count container of test cases as test
+        int res = 0;
+        for (TestCase child : testCase.getChildList()) {
+          res += traverseCountTotalTestCases(child);
+        }
+        return res;
+      } else {
+        return testCase.getType() == Type.TEST_CASE ? 1 : 0;
+      }
     }
 
     public Builder addFailedTestCases(List<TestCase> testCases, FailedTestCasesStatus status) {
@@ -324,6 +355,7 @@ public class TestSummary implements Comparable<TestSummary>, BuildEventWithOrder
   private List<Path> coverageFiles = new ArrayList<>();
   private List<Long> testTimes = new ArrayList<>();
   private FailedTestCasesStatus failedTestCasesStatus = null;
+  private int totalTestCases;
 
   // Don't allow public instantiation; go through the Builder.
   private TestSummary() {
@@ -334,15 +366,6 @@ public class TestSummary implements Comparable<TestSummary>, BuildEventWithOrder
    */
   public static Builder newBuilder() {
     return new Builder();
-  }
-
-  /**
-   * Creates a new Builder initialized with a copy of the existing object's values.
-   */
-  public static Builder newBuilderFromExisting(TestSummary existing) {
-    Builder builder = new Builder();
-    builder.mergeFrom(existing);
-    return builder;
   }
 
   public Label getLabel() {
@@ -411,6 +434,10 @@ public class TestSummary implements Comparable<TestSummary>, BuildEventWithOrder
     return failedTestCases;
   }
 
+  public int getTotalTestCases() {
+    return totalTestCases;
+  }
+
   public List<Path> getCoverageFiles() {
     return coverageFiles;
   }
@@ -448,6 +475,7 @@ public class TestSummary implements Comparable<TestSummary>, BuildEventWithOrder
         .compare(
             this.getTarget().getConfigurationChecksum(),
             that.getTarget().getConfigurationChecksum())
+        .compare(this.getTotalTestCases(), that.getTotalTestCases())
         .result();
   }
 

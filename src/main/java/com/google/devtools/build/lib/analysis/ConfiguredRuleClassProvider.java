@@ -29,16 +29,18 @@ import com.google.devtools.build.lib.analysis.buildinfo.BuildInfoFactory;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration.Fragment;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
-import com.google.devtools.build.lib.analysis.config.BuildOptions.OptionsDiff;
-import com.google.devtools.build.lib.analysis.config.ComposingRuleTransitionFactory;
 import com.google.devtools.build.lib.analysis.config.ConfigurationFragmentFactory;
-import com.google.devtools.build.lib.analysis.config.DefaultsPackage;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
+import com.google.devtools.build.lib.analysis.config.transitions.ComposingTransitionFactory;
+import com.google.devtools.build.lib.analysis.config.transitions.TransitionFactory;
 import com.google.devtools.build.lib.analysis.constraints.ConstraintSemantics;
+import com.google.devtools.build.lib.analysis.skylark.BazelStarlarkContext;
 import com.google.devtools.build.lib.analysis.skylark.SkylarkModules;
+import com.google.devtools.build.lib.analysis.skylark.SymbolGenerator;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
+import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.graph.Digraph;
 import com.google.devtools.build.lib.graph.Node;
@@ -48,11 +50,10 @@ import com.google.devtools.build.lib.packages.NonconfigurableAttributeMapper;
 import com.google.devtools.build.lib.packages.OutputFile;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.RuleClass;
+import com.google.devtools.build.lib.packages.RuleClass.Builder.ThirdPartyLicenseExistencePolicy;
 import com.google.devtools.build.lib.packages.RuleClassProvider;
 import com.google.devtools.build.lib.packages.RuleErrorConsumer;
-import com.google.devtools.build.lib.packages.RuleTransitionFactory;
 import com.google.devtools.build.lib.packages.Target;
-import com.google.devtools.build.lib.runtime.proto.InvocationPolicyOuterClass.InvocationPolicy;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetAndData;
 import com.google.devtools.build.lib.skylarkbuildapi.Bootstrap;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkInterfaceUtils;
@@ -60,17 +61,21 @@ import com.google.devtools.build.lib.skylarkinterface.SkylarkModule;
 import com.google.devtools.build.lib.syntax.Environment;
 import com.google.devtools.build.lib.syntax.Environment.Extension;
 import com.google.devtools.build.lib.syntax.Environment.GlobalFrame;
-import com.google.devtools.build.lib.syntax.Environment.Phase;
 import com.google.devtools.build.lib.syntax.Mutability;
-import com.google.devtools.build.lib.syntax.SkylarkSemantics;
 import com.google.devtools.build.lib.syntax.SkylarkUtils;
+import com.google.devtools.build.lib.syntax.SkylarkUtils.Phase;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import com.google.devtools.build.lib.syntax.Type;
-import com.google.devtools.common.options.OptionsClassProvider;
+import com.google.devtools.common.options.Option;
+import com.google.devtools.common.options.OptionDefinition;
+import com.google.devtools.common.options.OptionsProvider;
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -86,14 +91,16 @@ import javax.annotation.Nullable;
 public class ConfiguredRuleClassProvider implements RuleClassProvider {
 
   /**
-   * Predicate for determining whether the analysis cache should be cleared, given the new set of
-   * build options and the diff from the old set.
+   * Predicate for determining whether the analysis cache should be cleared, given the new and old
+   * value of an option which has changed and the values of the other new options.
    */
   @FunctionalInterface
   public interface OptionsDiffPredicate {
-    public static final OptionsDiffPredicate ALWAYS_INVALIDATE = (diff, options) -> true;
+    public static final OptionsDiffPredicate ALWAYS_INVALIDATE =
+        (options, option, oldValue, newValue) -> true;
 
-    public boolean apply(OptionsDiff diff, BuildOptions newOptions);
+    public boolean apply(
+        BuildOptions newOptions, OptionDefinition option, Object oldValue, Object newValue);
   }
 
   /**
@@ -233,7 +240,8 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
     private final List<ConfigurationFragmentFactory> configurationFragmentFactories =
         new ArrayList<>();
     private final List<BuildInfoFactory> buildInfoFactories = new ArrayList<>();
-    private final List<Class<? extends FragmentOptions>> configurationOptions = new ArrayList<>();
+    private final Set<Class<? extends FragmentOptions>> configurationOptions =
+        new LinkedHashSet<>();
 
     private final Map<String, RuleClass> ruleClassMap = new HashMap<>();
     private final Map<String, RuleDefinition> ruleDefinitionMap = new HashMap<>();
@@ -244,8 +252,8 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
         new Digraph<>();
     private List<Class<? extends BuildConfiguration.Fragment>> universalFragments =
         new ArrayList<>();
-    @Nullable private RuleTransitionFactory trimmingTransitionFactory;
-    private OptionsDiffPredicate shouldInvalidateCacheForDiff =
+    @Nullable private TransitionFactory<Rule> trimmingTransitionFactory;
+    private OptionsDiffPredicate shouldInvalidateCacheForOptionDiff =
         OptionsDiffPredicate.ALWAYS_INVALIDATE;
     private PrerequisiteValidator prerequisiteValidator;
     private ImmutableList.Builder<Bootstrap> skylarkBootstraps =
@@ -257,13 +265,8 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
         (BuildOptions options) -> ActionEnvironment.EMPTY;
     private ConstraintSemantics constraintSemantics = new ConstraintSemantics();
 
-    // TODO(pcloudy): Remove this field after Bazel rule definitions are not used internally.
-    private String nativeLauncherLabel;
-
-    public Builder setNativeLauncherLabel(String label) {
-      this.nativeLauncherLabel = label;
-      return this;
-    }
+    private ThirdPartyLicenseExistencePolicy thirdPartyLicenseExistencePolicy =
+        ThirdPartyLicenseExistencePolicy.USER_CONTROLLABLE;
 
     public Builder addWorkspaceFilePrefix(String contents) {
       defaultWorkspaceFilePrefix.append(contents);
@@ -272,6 +275,12 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
 
     public Builder addWorkspaceFileSuffix(String contents) {
       defaultWorkspaceFileSuffix.append(contents);
+      return this;
+    }
+
+    @VisibleForTesting
+    public Builder clearWorkspaceFileSuffixForTesting() {
+      defaultWorkspaceFileSuffix.delete(0, defaultWorkspaceFileSuffix.length());
       return this;
     }
 
@@ -322,43 +331,26 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
       return this;
     }
 
-    public Builder addConfigurationOptions(Class<? extends FragmentOptions> configurationOptions) {
-      this.configurationOptions.add(configurationOptions);
-      return this;
-    }
-
     /**
-     * Adds an options class and a corresponding factory. There's usually a 1:1:1 correspondence
-     * between option classes, factories, and fragments, such that the factory depends only on the
-     * options class and creates the fragment. This method provides a convenient way of adding both
-     * the options class and the factory in a single call.
+     * Adds a configuration fragment factory and all build options required by its fragment.
      *
-     * <p>Note that configuration fragments annotated with a Skylark name must have a unique
-     * name; no two different configuration fragments can share the same name.
-     */
-    public Builder addConfig(
-        Class<? extends FragmentOptions> options, ConfigurationFragmentFactory factory) {
-      // Enforce that the factory requires the options.
-      Preconditions.checkState(factory.requiredOptions().contains(options));
-      this.configurationOptions.add(options);
-      this.configurationFragmentFactories.add(factory);
-      return this;
-    }
-
-    public Builder addConfigurationOptions(
-        Collection<Class<? extends FragmentOptions>> optionsClasses) {
-      this.configurationOptions.addAll(optionsClasses);
-      return this;
-    }
-
-    /**
-     * Adds a configuration fragment factory.
-     *
-     * <p>Note that configuration fragments annotated with a Skylark name must have a unique
-     * name; no two different configuration fragments can share the same name.
+     * <p>Note that configuration fragments annotated with a Skylark name must have a unique name;
+     * no two different configuration fragments can share the same name.
      */
     public Builder addConfigurationFragment(ConfigurationFragmentFactory factory) {
+      this.configurationOptions.addAll(factory.requiredOptions());
       configurationFragmentFactories.add(factory);
+      return this;
+    }
+
+    /**
+     * Adds configuration options that aren't required by configuration fragments.
+     *
+     * <p>If {@link #addConfigurationFragment(ConfigurationFragmentFactory)} adds a fragment factory
+     * that also requires these options, this method is redundant.
+     */
+    public Builder addConfigurationOptions(Class<? extends FragmentOptions> configurationOptions) {
+      this.configurationOptions.add(configurationOptions);
       return this;
     }
 
@@ -400,6 +392,15 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
     }
 
     /**
+     * Sets the policy for checking if third_party rules declare <code>licenses()</code>. See {@link
+     * #thirdPartyLicenseExistencePolicy} for the default value.
+     */
+    public Builder setThirdPartyLicenseExistencePolicy(ThirdPartyLicenseExistencePolicy policy) {
+      this.thirdPartyLicenseExistencePolicy = policy;
+      return this;
+    }
+
+    /**
      * Adds a transition factory that produces a trimming transition to be run over all targets
      * after other transitions.
      *
@@ -409,12 +410,14 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
      * feature flags, and support for this transition factory will likely be removed at some point
      * in the future (whenever automatic trimming is sufficiently workable).
      */
-    public Builder addTrimmingTransitionFactory(RuleTransitionFactory factory) {
+    public Builder addTrimmingTransitionFactory(TransitionFactory<Rule> factory) {
+      Preconditions.checkNotNull(factory);
+      Preconditions.checkArgument(!factory.isSplit());
       if (trimmingTransitionFactory == null) {
-        trimmingTransitionFactory = Preconditions.checkNotNull(factory);
+        trimmingTransitionFactory = factory;
       } else {
-        trimmingTransitionFactory = new ComposingRuleTransitionFactory(
-            trimmingTransitionFactory, Preconditions.checkNotNull(factory));
+        trimmingTransitionFactory =
+            ComposingTransitionFactory.of(trimmingTransitionFactory, factory);
       }
       return this;
     }
@@ -422,10 +425,10 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
     /**
      * Overrides the transition factory run over all targets.
      *
-     * @see {@link #addTrimmingTransitionFactory(RuleTransitionFactory)}
+     * @see {@link #addTrimmingTransitionFactory(TransitionFactory<Rule>)}
      */
     @VisibleForTesting(/* for testing trimming transition factories without relying on prod use */ )
-    public Builder overrideTrimmingTransitionFactoryForTesting(RuleTransitionFactory factory) {
+    public Builder overrideTrimmingTransitionFactoryForTesting(TransitionFactory<Rule> factory) {
       trimmingTransitionFactory = null;
       return this.addTrimmingTransitionFactory(factory);
     }
@@ -434,12 +437,12 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
      * Sets the predicate which determines whether the analysis cache should be invalidated for the
      * given options diff.
      */
-    public Builder setShouldInvalidateCacheForDiff(
-        OptionsDiffPredicate shouldInvalidateCacheForDiff) {
+    public Builder setShouldInvalidateCacheForOptionDiff(
+        OptionsDiffPredicate shouldInvalidateCacheForOptionDiff) {
       Preconditions.checkState(
-          this.shouldInvalidateCacheForDiff.equals(OptionsDiffPredicate.ALWAYS_INVALIDATE),
+          this.shouldInvalidateCacheForOptionDiff.equals(OptionsDiffPredicate.ALWAYS_INVALIDATE),
           "Cache invalidation function was already set");
-      this.shouldInvalidateCacheForDiff = shouldInvalidateCacheForDiff;
+      this.shouldInvalidateCacheForOptionDiff = shouldInvalidateCacheForOptionDiff;
       return this;
     }
 
@@ -448,10 +451,10 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
      * the given options diff.
      */
     @VisibleForTesting(/* for testing cache invalidation without relying on prod use */ )
-    public Builder overrideShouldInvalidateCacheForDiffForTesting(
-        OptionsDiffPredicate shouldInvalidateCacheForDiff) {
-      this.shouldInvalidateCacheForDiff = OptionsDiffPredicate.ALWAYS_INVALIDATE;
-      return this.setShouldInvalidateCacheForDiff(shouldInvalidateCacheForDiff);
+    public Builder overrideShouldInvalidateCacheForOptionDiffForTesting(
+        OptionsDiffPredicate shouldInvalidateCacheForOptionDiff) {
+      this.shouldInvalidateCacheForOptionDiff = OptionsDiffPredicate.ALWAYS_INVALIDATE;
+      return this.setShouldInvalidateCacheForOptionDiff(shouldInvalidateCacheForOptionDiff);
     }
 
     private RuleConfiguredTargetFactory createFactory(
@@ -501,6 +504,7 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
       RuleClass.Builder builder = new RuleClass.Builder(
           metadata.name(), metadata.type(), false, ancestorClasses);
       builder.factory(factory);
+      builder.setThirdPartyLicenseExistencePolicy(thirdPartyLicenseExistencePolicy);
       RuleClass ruleClass = instance.build(builder, this);
       ruleMap.put(definitionClass, ruleClass);
       ruleClassMap.put(ruleClass.getName(), ruleClass);
@@ -529,26 +533,19 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
           ImmutableList.copyOf(configurationFragmentFactories),
           ImmutableList.copyOf(universalFragments),
           trimmingTransitionFactory,
-          shouldInvalidateCacheForDiff,
+          shouldInvalidateCacheForOptionDiff,
           prerequisiteValidator,
           skylarkAccessibleTopLevels.build(),
           skylarkBootstraps.build(),
           ImmutableSet.copyOf(reservedActionMnemonics),
           actionEnvironmentProvider,
-          constraintSemantics);
+          constraintSemantics,
+          thirdPartyLicenseExistencePolicy);
     }
 
     @Override
     public Label getToolsLabel(String labelValue) {
       return Label.parseAbsoluteUnchecked(toolsRepository + labelValue);
-    }
-
-    @Override
-    public Label getLauncherLabel() {
-      if (nativeLauncherLabel == null) {
-        return null;
-      }
-      return getToolsLabel(nativeLauncherLabel);
     }
 
     @Override
@@ -606,11 +603,18 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
   /** The set of configuration fragment factories. */
   private final ImmutableList<ConfigurationFragmentFactory> configurationFragmentFactories;
 
+  /**
+   * Maps build option names to matching config fragments. This is used to determine correct
+   * fragment requirements for config_setting rules, which are unique in that their dependencies are
+   * triggered by string representations of option names.
+   */
+  private final Map<String, Class<? extends Fragment>> optionsToFragmentMap;
+
   /** The transition factory used to produce the transition that will trim targets. */
-  @Nullable private final RuleTransitionFactory trimmingTransitionFactory;
+  @Nullable private final TransitionFactory<Rule> trimmingTransitionFactory;
 
   /** The predicate used to determine whether a diff requires the cache to be invalidated. */
-  private final OptionsDiffPredicate shouldInvalidateCacheForDiff;
+  private final OptionsDiffPredicate shouldInvalidateCacheForOptionDiff;
 
   /**
    * Configuration fragments that should be available to all rules even when they don't
@@ -632,6 +636,8 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
 
   private final ConstraintSemantics constraintSemantics;
 
+  private final ThirdPartyLicenseExistencePolicy thirdPartyLicenseExistencePolicy;
+
   private ConfiguredRuleClassProvider(
       Label preludeLabel,
       String runfilesPrefix,
@@ -645,14 +651,15 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
       ImmutableList<Class<? extends FragmentOptions>> configurationOptions,
       ImmutableList<ConfigurationFragmentFactory> configurationFragments,
       ImmutableList<Class<? extends BuildConfiguration.Fragment>> universalFragments,
-      @Nullable RuleTransitionFactory trimmingTransitionFactory,
-      OptionsDiffPredicate shouldInvalidateCacheForDiff,
+      @Nullable TransitionFactory<Rule> trimmingTransitionFactory,
+      OptionsDiffPredicate shouldInvalidateCacheForOptionDiff,
       PrerequisiteValidator prerequisiteValidator,
       ImmutableMap<String, Object> skylarkAccessibleJavaClasses,
       ImmutableList<Bootstrap> skylarkBootstraps,
       ImmutableSet<String> reservedActionMnemonics,
       BuildConfiguration.ActionEnvironmentProvider actionEnvironmentProvider,
-      ConstraintSemantics constraintSemantics) {
+      ConstraintSemantics constraintSemantics,
+      ThirdPartyLicenseExistencePolicy thirdPartyLicenseExistencePolicy) {
     this.preludeLabel = preludeLabel;
     this.runfilesPrefix = runfilesPrefix;
     this.toolsRepository = toolsRepository;
@@ -664,15 +671,48 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
     this.buildInfoFactories = buildInfoFactories;
     this.configurationOptions = configurationOptions;
     this.configurationFragmentFactories = configurationFragments;
+    this.optionsToFragmentMap = computeOptionsToFragmentMap(configurationFragments);
     this.universalFragments = universalFragments;
     this.trimmingTransitionFactory = trimmingTransitionFactory;
-    this.shouldInvalidateCacheForDiff = shouldInvalidateCacheForDiff;
+    this.shouldInvalidateCacheForOptionDiff = shouldInvalidateCacheForOptionDiff;
     this.prerequisiteValidator = prerequisiteValidator;
     this.globals = createGlobals(skylarkAccessibleJavaClasses, skylarkBootstraps);
     this.reservedActionMnemonics = reservedActionMnemonics;
     this.actionEnvironmentProvider = actionEnvironmentProvider;
     this.configurationFragmentMap = createFragmentMap(configurationFragmentFactories);
     this.constraintSemantics = constraintSemantics;
+    this.thirdPartyLicenseExistencePolicy = thirdPartyLicenseExistencePolicy;
+  }
+
+  /**
+   * Computes the option name --> config fragments map. Note that this mapping is technically
+   * one-to-many: a single option may be required by multiple fragments (e.g. Java options are used
+   * by both JavaConfiguration and Jvm). In such cases, we arbitrarily choose one fragment since
+   * that's all that's needed to satisfy the config_setting.
+   */
+  private static Map<String, Class<? extends Fragment>> computeOptionsToFragmentMap(
+      Iterable<ConfigurationFragmentFactory> configurationFragments) {
+    Map<String, Class<? extends Fragment>> result = new LinkedHashMap<>();
+    Map<Class<? extends FragmentOptions>, Integer> visitedOptionsClasses = new HashMap<>();
+    for (ConfigurationFragmentFactory factory : configurationFragments) {
+      Set<Class<? extends FragmentOptions>> requiredOpts = factory.requiredOptions();
+      for (Class<? extends FragmentOptions> optionsClass : requiredOpts) {
+        Integer previousBest = visitedOptionsClasses.get(optionsClass);
+        if (previousBest != null && previousBest <= requiredOpts.size()) {
+          // Multiple config fragments may require the same options class, but we only need one of
+          // them to guarantee that class makes it into the configuration. Pick one that depends
+          // on as few options classes as possible (not necessarily unique).
+          continue;
+        }
+        visitedOptionsClasses.put(optionsClass, requiredOpts.size());
+        for (Field field : optionsClass.getFields()) {
+          if (field.isAnnotationPresent(Option.class)) {
+            result.put(field.getAnnotation(Option.class).name(), factory.creates());
+          }
+        }
+      }
+    }
+    return result;
   }
 
   public PrerequisiteValidator getPrerequisiteValidator() {
@@ -723,21 +763,27 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
     return configurationFragmentFactories;
   }
 
+  @Nullable
+  public Class<? extends Fragment> getConfigurationFragmentForOption(String requiredOption) {
+    return optionsToFragmentMap.get(requiredOption);
+  }
+
   /**
    * Returns the transition factory used to produce the transition to trim targets.
    *
-   * <p>This is a temporary measure for supporting manual trimming of feature flags, and support
-   * for this transition factory will likely be removed at some point in the future (whenever
-   * automatic trimming is sufficiently workable
+   * <p>This is a temporary measure for supporting manual trimming of feature flags, and support for
+   * this transition factory will likely be removed at some point in the future (whenever automatic
+   * trimming is sufficiently workable
    */
   @Nullable
-  public RuleTransitionFactory getTrimmingTransitionFactory() {
+  public TransitionFactory<Rule> getTrimmingTransitionFactory() {
     return trimmingTransitionFactory;
   }
 
-  /** Returns whether the analysis cache should be invalidated for the given options diff. */
-  public boolean shouldInvalidateCacheForDiff(OptionsDiff diff, BuildOptions newOptions) {
-    return shouldInvalidateCacheForDiff.apply(diff, newOptions);
+  /** Returns whether the analysis cache should be invalidated for the given option diff. */
+  public boolean shouldInvalidateCacheForOptionDiff(
+      BuildOptions newOptions, OptionDefinition changedOption, Object oldValue, Object newValue) {
+    return shouldInvalidateCacheForOptionDiff.apply(newOptions, changedOption, oldValue, newValue);
   }
 
   /**
@@ -763,24 +809,9 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
   }
 
   /**
-   * Returns the defaults package for the default settings.
-   */
-  public String getDefaultsPackageContent(InvocationPolicy invocationPolicy) {
-    return DefaultsPackage.getDefaultsPackageContent(configurationOptions, invocationPolicy);
-  }
-
-  /**
-   * Returns the defaults package for the given options taken from an optionsProvider.
-   */
-  public String getDefaultsPackageContent(OptionsClassProvider optionsProvider) {
-    return DefaultsPackage.getDefaultsPackageContent(
-        BuildOptions.of(configurationOptions, optionsProvider));
-  }
-
-  /**
    * Creates a BuildOptions class for the given options taken from an optionsProvider.
    */
-  public BuildOptions createBuildOptions(OptionsClassProvider optionsProvider) {
+  public BuildOptions createBuildOptions(OptionsProvider optionsProvider) {
     return BuildOptions.of(configurationOptions, optionsProvider);
   }
 
@@ -813,22 +844,29 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
 
   private Environment createSkylarkRuleClassEnvironment(
       Mutability mutability,
-      Environment.GlobalFrame globals,
-      SkylarkSemantics skylarkSemantics,
+      GlobalFrame globals,
+      StarlarkSemantics starlarkSemantics,
       EventHandler eventHandler,
       String astFileContentHashCode,
-      Map<String, Extension> importMap) {
+      Map<String, Extension> importMap,
+      ImmutableMap<RepositoryName, RepositoryName> repoMapping,
+      Label callerLabel) {
+    BazelStarlarkContext context =
+        new BazelStarlarkContext(
+            toolsRepository,
+            configurationFragmentMap,
+            repoMapping,
+            new SymbolGenerator<>(callerLabel));
     Environment env =
         Environment.builder(mutability)
             .setGlobals(globals)
-            .setSemantics(skylarkSemantics)
+            .setSemantics(starlarkSemantics)
             .setEventHandler(eventHandler)
             .setFileContentHashCode(astFileContentHashCode)
+            .setStarlarkContext(context)
             .setImportedExtensions(importMap)
-            .setPhase(Phase.LOADING)
             .build();
-    SkylarkUtils.setToolsRepository(env, toolsRepository);
-    SkylarkUtils.setFragmentMap(env, configurationFragmentMap);
+    SkylarkUtils.setPhase(env, Phase.LOADING);
     return env;
   }
 
@@ -836,17 +874,20 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
   public Environment createSkylarkRuleClassEnvironment(
       Label extensionLabel,
       Mutability mutability,
-      SkylarkSemantics skylarkSemantics,
+      StarlarkSemantics starlarkSemantics,
       EventHandler eventHandler,
       String astFileContentHashCode,
-      Map<String, Extension> importMap) {
+      Map<String, Extension> importMap,
+      ImmutableMap<RepositoryName, RepositoryName> repoMapping) {
     return createSkylarkRuleClassEnvironment(
         mutability,
         globals.withLabel(extensionLabel),
-        skylarkSemantics,
+        starlarkSemantics,
         eventHandler,
         astFileContentHashCode,
-        importMap);
+        importMap,
+        repoMapping,
+        extensionLabel);
   }
 
   @Override
@@ -868,9 +909,18 @@ public class ConfiguredRuleClassProvider implements RuleClassProvider {
     return constraintSemantics;
   }
 
+  @Override
+  public ThirdPartyLicenseExistencePolicy getThirdPartyLicenseExistencePolicy() {
+    return thirdPartyLicenseExistencePolicy;
+  }
+
   /** Returns all skylark objects in global scope for this RuleClassProvider. */
   public Map<String, Object> getTransitiveGlobalBindings() {
     return globals.getTransitiveBindings();
+  }
+
+  public Object getGlobalsForConstantRegistration() {
+    return globals;
   }
 
   /** Returns all registered {@link BuildConfiguration.Fragment} classes. */

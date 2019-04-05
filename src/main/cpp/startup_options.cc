@@ -17,6 +17,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "src/main/cpp/blaze_util.h"
 #include "src/main/cpp/blaze_util_platform.h"
@@ -80,6 +81,7 @@ StartupOptions::StartupOptions(const string &product_name,
       batch(false),
       batch_cpu_scheduling(false),
       io_nice_level(-1),
+      shutdown_on_low_sys_mem(false),
       oom_more_eagerly(false),
       oom_more_eagerly_threshold(100),
       write_command_log(true),
@@ -87,17 +89,20 @@ StartupOptions::StartupOptions(const string &product_name,
       fatal_event_bus_exceptions(false),
       command_port(0),
       connect_timeout_secs(30),
-      invocation_policy(NULL),
+      have_invocation_policy_(false),
       client_debug(false),
       java_logging_formatter(
           "com.google.devtools.build.lib.util.SingleLineFormatter"),
       expand_configs_in_place(true),
       digest_function(),
       idle_server_tasks(true),
-      original_startup_options_(std::vector<RcStartupFlag>()) {
-  bool testing = !blaze::GetEnv("TEST_TMPDIR").empty();
-  if (testing) {
-    output_root = blaze_util::MakeAbsolute(blaze::GetEnv("TEST_TMPDIR"));
+      original_startup_options_(std::vector<RcStartupFlag>()),
+#if defined(__APPLE__)
+      macos_qos_class(QOS_CLASS_DEFAULT),
+#endif
+      unlimit_coredumps(false) {
+  if (blaze::IsRunningWithinTest()) {
+    output_root = blaze_util::MakeAbsolute(blaze::GetPathEnv("TEST_TMPDIR"));
     max_idle_secs = 15;
     BAZEL_LOG(USER) << "$TEST_TMPDIR defined: output root default is '"
                     << output_root << "' and max_idle_secs default is '"
@@ -111,7 +116,7 @@ StartupOptions::StartupOptions(const string &product_name,
   }
 
 #if defined(_WIN32) || defined(__CYGWIN__)
-  string windows_unix_root = WindowsUnixRoot(blaze::GetEnv("BAZEL_SH"));
+  string windows_unix_root = DetectBashAndExportBazelSh();
   if (!windows_unix_root.empty()) {
     host_jvm_args.push_back(string("-Dbazel.windows_unix_root=") +
                             windows_unix_root);
@@ -135,21 +140,22 @@ StartupOptions::StartupOptions(const string &product_name,
   RegisterNullaryStartupFlag("fatal_event_bus_exceptions");
   RegisterNullaryStartupFlag("host_jvm_debug");
   RegisterNullaryStartupFlag("idle_server_tasks");
+  RegisterNullaryStartupFlag("shutdown_on_low_sys_mem");
   RegisterNullaryStartupFlag("ignore_all_rc_files");
+  RegisterNullaryStartupFlag("unlimit_coredumps");
   RegisterNullaryStartupFlag("watchfs");
   RegisterNullaryStartupFlag("write_command_log");
   RegisterUnaryStartupFlag("command_port");
   RegisterUnaryStartupFlag("connect_timeout_secs");
   RegisterUnaryStartupFlag("digest_function");
   RegisterUnaryStartupFlag("experimental_oom_more_eagerly_threshold");
-  // TODO(b/5568649): remove this deprecated alias for server_javabase
-  RegisterUnaryStartupFlag("host_javabase");
   RegisterUnaryStartupFlag("server_javabase");
   RegisterUnaryStartupFlag("host_jvm_args");
   RegisterUnaryStartupFlag("host_jvm_profile");
   RegisterUnaryStartupFlag("invocation_policy");
   RegisterUnaryStartupFlag("io_nice_level");
   RegisterUnaryStartupFlag("install_base");
+  RegisterUnaryStartupFlag("macos_qos_class");
   RegisterUnaryStartupFlag("max_idle_secs");
   RegisterUnaryStartupFlag("output_base");
   RegisterUnaryStartupFlag("output_user_root");
@@ -232,12 +238,8 @@ blaze_exit_code::ExitCode StartupOptions::ProcessArg(
              NULL) {
     // TODO(bazel-team): Consider examining the javabase and re-execing in case
     // of architecture mismatch.
-    ProcessServerJavabase(value, rcfile);
-  } else if ((value = GetUnaryOption(arg, next_arg, "--host_javabase")) !=
-             NULL) {
-    ProcessServerJavabase(value, rcfile);
-    BAZEL_LOG(WARNING) << "The startup option --host_javabase is "
-                          "deprecated; prefer --server_javabase.";
+    server_javabase_ = blaze::AbsolutePathFromFlag(value);
+    option_sources["server_javabase"] = rcfile;
   } else if ((value = GetUnaryOption(arg, next_arg, "--host_jvm_args")) !=
              NULL) {
     host_jvm_args.push_back(value);
@@ -293,6 +295,42 @@ blaze_exit_code::ExitCode StartupOptions::ProcessArg(
       return blaze_exit_code::BAD_ARGV;
     }
     option_sources["max_idle_secs"] = rcfile;
+  } else if ((value = GetUnaryOption(arg, next_arg, "--macos_qos_class")) !=
+             NULL) {
+    // We parse the value of this flag on all platforms even if it is
+    // macOS-specific to ensure that rc files mentioning it are valid.
+    if (strcmp(value, "user-interactive") == 0) {
+#if defined(__APPLE__)
+      macos_qos_class = QOS_CLASS_USER_INTERACTIVE;
+#endif
+    } else if (strcmp(value, "user-initiated") == 0) {
+#if defined(__APPLE__)
+      macos_qos_class = QOS_CLASS_USER_INITIATED;
+#endif
+    } else if (strcmp(value, "default") == 0) {
+#if defined(__APPLE__)
+      macos_qos_class = QOS_CLASS_DEFAULT;
+#endif
+    } else if (strcmp(value, "utility") == 0) {
+#if defined(__APPLE__)
+      macos_qos_class = QOS_CLASS_UTILITY;
+#endif
+    } else if (strcmp(value, "background") == 0) {
+#if defined(__APPLE__)
+      macos_qos_class = QOS_CLASS_BACKGROUND;
+#endif
+    } else {
+      blaze_util::StringPrintf(
+          error, "Invalid argument to --macos_qos_class: '%s'.", value);
+      return blaze_exit_code::BAD_ARGV;
+    }
+    option_sources["macos_qos_class"] = rcfile;
+  } else if (GetNullaryOption(arg, "--shutdown_on_low_sys_mem")) {
+    shutdown_on_low_sys_mem = true;
+    option_sources["shutdown_on_low_sys_mem"] = rcfile;
+  } else if (GetNullaryOption(arg, "--noshutdown_on_low_sys_mem")) {
+    shutdown_on_low_sys_mem = false;
+    option_sources["shutdown_on_low_sys_mem"] = rcfile;
   } else if (GetNullaryOption(arg, "--experimental_oom_more_eagerly")) {
     oom_more_eagerly = true;
     option_sources["experimental_oom_more_eagerly"] = rcfile;
@@ -370,7 +408,8 @@ blaze_exit_code::ExitCode StartupOptions::ProcessArg(
     option_sources["command_port"] = rcfile;
   } else if ((value = GetUnaryOption(arg, next_arg, "--invocation_policy")) !=
              NULL) {
-    if (invocation_policy == NULL) {
+    if (!have_invocation_policy_) {
+      have_invocation_policy_ = true;
       invocation_policy = value;
       option_sources["invocation_policy"] = rcfile;
     } else {
@@ -378,6 +417,12 @@ blaze_exit_code::ExitCode StartupOptions::ProcessArg(
           "multiple times.";
       return blaze_exit_code::BAD_ARGV;
     }
+  } else if (GetNullaryOption(arg, "--unlimit_coredumps")) {
+    unlimit_coredumps = true;
+    option_sources["unlimit_coredumps"] = rcfile;
+  } else if (GetNullaryOption(arg, "--nounlimit_coredumps")) {
+    unlimit_coredumps = false;
+    option_sources["unlimit_coredumps"] = rcfile;
   } else {
     bool extra_argument_processed;
     blaze_exit_code::ExitCode process_extra_arg_exit_code = ProcessArgExtra(
@@ -397,12 +442,6 @@ blaze_exit_code::ExitCode StartupOptions::ProcessArg(
 
   *is_space_separated = ((value == next_arg) && (value != NULL));
   return blaze_exit_code::SUCCESS;
-}
-
-void StartupOptions::ProcessServerJavabase(const char *value,
-                                           const string &rcfile) {
-  server_javabase_ = blaze::AbsolutePathFromFlag(value);
-  option_sources["server_javabase"] = rcfile;
 }
 
 blaze_exit_code::ExitCode StartupOptions::ProcessArgs(
@@ -535,29 +574,51 @@ blaze_exit_code::ExitCode StartupOptions::AddJVMArguments(
     const string &server_javabase, std::vector<string> *result,
     const vector<string> &user_options, string *error) const {
   AddJVMLoggingArguments(result);
+
+  // Disable the JVM's own unlimiting of file descriptors.  We do this
+  // ourselves in blaze.cc so we want our setting to propagate to the JVM.
+  //
+  // The reason to do this is that the JVM's unlimiting is suboptimal on
+  // macOS.  Under that platform, the JVM limits the open file descriptors
+  // to the OPEN_MAX constant... which is much lower than the per-process
+  // kernel allowed limit of kern.maxfilesperproc (which is what we set
+  // ourselves to).
+  result->push_back("-XX:-MaxFDLimit");
+
   return AddJVMMemoryArguments(server_javabase, result, user_options, error);
+}
+
+static std::string GetSimpleLogHandlerProps(
+    const std::string &java_log, const std::string &java_logging_formatter) {
+  return "handlers=com.google.devtools.build.lib.util.SimpleLogHandler\n"
+         ".level=INFO\n"
+         "com.google.devtools.build.lib.util.SimpleLogHandler.level=INFO\n"
+         "com.google.devtools.build.lib.util.SimpleLogHandler.prefix=" +
+         java_log +
+         "\n"
+         "com.google.devtools.build.lib.util.SimpleLogHandler.limit=1024000\n"
+         "com.google.devtools.build.lib.util.SimpleLogHandler.total_limit="
+         "20971520\n"  // 20 MB.
+         "com.google.devtools.build.lib.util.SimpleLogHandler.formatter=" +
+         java_logging_formatter + "\n";
 }
 
 void StartupOptions::AddJVMLoggingArguments(std::vector<string> *result) const {
   // Configure logging
-  const string propFile =
-      blaze_util::JoinPath(output_base, "javalog.properties");
-  string java_log(
+  const string propFile = blaze_util::PathAsJvmFlag(
+      blaze_util::JoinPath(output_base, "javalog.properties"));
+  const string java_log(
       blaze_util::PathAsJvmFlag(blaze_util::JoinPath(output_base, "java.log")));
-  if (!blaze_util::WriteFile("handlers=java.util.logging.FileHandler\n"
-                             ".level=INFO\n"
-                             "java.util.logging.FileHandler.level=INFO\n"
-                             "java.util.logging.FileHandler.pattern=" +
-                                 java_log +
-                                 "\n"
-                                 "java.util.logging.FileHandler.limit=1024000\n"
-                                 "java.util.logging.FileHandler.count=1\n"
-                                 "java.util.logging.FileHandler.formatter=" +
-                                 java_logging_formatter + "\n",
-                             propFile)) {
+  const std::string loggingProps =
+      GetSimpleLogHandlerProps(java_log, java_logging_formatter);
+
+  if (!blaze_util::WriteFile(loggingProps, propFile)) {
     perror(("Couldn't write logging file " + propFile).c_str());
   } else {
     result->push_back("-Djava.util.logging.config.file=" + propFile);
+    result->push_back(
+        "-Dcom.google.devtools.build.lib.util.LogHandlerQuerier.class="
+        "com.google.devtools.build.lib.util.SimpleLogHandler$HandlerQuerier");
   }
 }
 
@@ -566,33 +627,5 @@ blaze_exit_code::ExitCode StartupOptions::AddJVMMemoryArguments(
     string *) const {
   return blaze_exit_code::SUCCESS;
 }
-
-#if defined(_WIN32) || defined(__CYGWIN__)
-// Extract the Windows path of "/" from $BAZEL_SH.
-// $BAZEL_SH usually has the form `<prefix>/usr/bin/bash.exe` or
-// `<prefix>/bin/bash.exe`, and this method returns that `<prefix>` part.
-// If $BAZEL_SH doesn't end with "usr/bin/bash.exe" or "bin/bash.exe" then this
-// method returns an empty string.
-string StartupOptions::WindowsUnixRoot(const string &bazel_sh) {
-  if (bazel_sh.empty()) {
-    return string();
-  }
-  std::pair<string, string> split = blaze_util::SplitPath(bazel_sh);
-  if (blaze_util::AsLower(split.second) != "bash.exe") {
-    return string();
-  }
-  split = blaze_util::SplitPath(split.first);
-  if (blaze_util::AsLower(split.second) != "bin") {
-    return string();
-  }
-
-  std::pair<string, string> split2 = blaze_util::SplitPath(split.first);
-  if (blaze_util::AsLower(split2.second) == "usr") {
-    return split2.first;
-  } else {
-    return split.first;
-  }
-}
-#endif  // defined(_WIN32) || defined(__CYGWIN__)
 
 }  // namespace blaze

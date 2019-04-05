@@ -25,15 +25,6 @@
 # Script expects that it will be started in the execution root directory and
 # not in the test's runfiles directory.
 
-if [[ -z "$LCOV_MERGER" ]]; then
-  echo --
-  echo "Coverage collection running in legacy mode."
-  echo "Legacy mode only supports C++ and even then, it's very brittle."
-  COVERAGE_LEGACY_MODE=1
-else
-  COVERAGE_LEGACY_MODE=
-fi
-
 if [[ -z "$COVERAGE_MANIFEST" ]]; then
   echo --
   echo Coverage runner: \$COVERAGE_MANIFEST is not set
@@ -44,7 +35,7 @@ fi
 
 # When collect_coverage.sh is used, test runner must be instructed not to cd
 # to the test's runfiles directory.
-ROOT="$PWD"
+export ROOT="$PWD"
 
 if [[ "$COVERAGE_MANIFEST" != /* ]]; then
   # Canonicalize the path to coverage manifest so that tests can find it.
@@ -74,28 +65,70 @@ export COVERAGE=1
 export BULK_COVERAGE_RUN=1
 
 
-# Only check if file exists when LCOV_MERGER is set
-if [[ ! "$COVERAGE_LEGACY_MODE" ]]; then
-  for name in "$LCOV_MERGER"; do
-    if [[ ! -e $name ]]; then
-      echo --
-      echo Coverage runner: cannot locate file $name
-      exit 1
-    fi
-  done
+for name in "$LCOV_MERGER"; do
+  if [[ ! -e $name ]]; then
+    echo --
+    echo Coverage runner: cannot locate file $name
+    exit 1
+  fi
+done
+
+# Setting up the environment for executing the C++ tests.
+export GCOV_PREFIX_STRIP=3
+export GCOV_PREFIX="${COVERAGE_DIR}"
+export LLVM_PROFILE_FILE="${COVERAGE_DIR}/%h-%p-%m.profraw"
+
+# In coverage mode for Java, we need to merge the runtime classpath before
+# running the tests. JacocoCoverageRunner uses this merged jar in order
+# to get coverage data.
+#
+# Merge the classpath using SingleJar and save it in the environment
+# variable JACOCO_METADATA_JAR. The jars on the runtime classpath are listed
+# in the file $JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE.
+#
+# We need to merge the jars here because the merged jar can be an input
+# too large (the combined merged jars for several big tests in a run
+# can go over 10G). Not merging the jars and making
+# JacocoCoverageRunner read every individual jar goes over the shutdown hook
+# time limit in the coverage runner (~few seconds).
+#
+# SINGLE_JAR_TOOL                     Exec path of SingleJar.
+#
+# JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE Exec path of a file that contains the
+#                                     relative paths of the jars on the runtime
+#                                     classpath delimited by newline.
+if [[ ! -z "${JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE}" ]]; then
+  JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE="${PWD}/${JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE}"
+  SINGLE_JAR_TOOL="${PWD}/${SINGLE_JAR_TOOL}"
+
+  # Create a paramsfile for invoking SingleJar.
+  mkdir -p "${COVERAGE_DIR}"
+  single_jar_params_file="${COVERAGE_DIR}/runtime_classpath.paramsfile"
+  touch "$single_jar_params_file"
+
+  # Export JACOCO_METADATA_JAR in order for JacocoCoverageRunner to be able
+  # to read it.
+  export JACOCO_METADATA_JAR="${COVERAGE_DIR}/coverage-runtime_merged_instr.jar"
+
+  echo -e "--output ${JACOCO_METADATA_JAR}\n--sources" >> "$single_jar_params_file"
+
+  # Append the runfiles prefix to all the relative paths found in
+  # JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE, to invoke SingleJar with the
+  # absolute paths.
+  RUNFILES_PREFIX="$TEST_SRCDIR/$TEST_WORKSPACE/"
+  cat "$JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE" | sed "s@^@$RUNFILES_PREFIX@" >> "$single_jar_params_file"
+
+  # Invoke SingleJar. This will create JACOCO_METADATA_JAR.
+  "${SINGLE_JAR_TOOL}" "@$single_jar_params_file"
 fi
 
-if [[ "$COVERAGE_LEGACY_MODE" ]]; then
-  export GCOV_PREFIX_STRIP=3
-  export GCOV_PREFIX="${COVERAGE_DIR}"
-  export LLVM_PROFILE_FILE="${COVERAGE_DIR}/%h-%p-%m.profraw"
-fi
-
+# TODO(bazel-team): cd should be avoided.
 cd "$TEST_SRCDIR/$TEST_WORKSPACE"
+# Execute the test.
 "$@"
 TEST_STATUS=$?
 
-# always create output files
+# Always create the coverage report.
 touch $COVERAGE_OUTPUT_FILE
 
 if [[ $TEST_STATUS -ne 0 ]]; then
@@ -106,57 +139,48 @@ if [[ $TEST_STATUS -ne 0 ]]; then
   exit $TEST_STATUS
 fi
 
+# TODO(bazel-team): cd should be avoided.
 cd $ROOT
 
-USES_LLVM_COV=
-if stat "${COVERAGE_DIR}"/*.profraw >/dev/null 2>&1; then
-  USES_LLVM_COV=1
+# Call the C++ code coverage collection script.
+if [[ "$CC_CODE_COVERAGE_SCRIPT" ]]; then
+    eval "${CC_CODE_COVERAGE_SCRIPT}"
 fi
 
-if [[ "$USES_LLVM_COV" ]]; then
-  "${COVERAGE_GCOV_PATH}" merge -output "${COVERAGE_OUTPUT_FILE}" "${COVERAGE_DIR}"/*.profraw
-  exit $TEST_STATUS
 
-# If LCOV_MERGER is not set, use the legacy C++-only method to convert coverage files.
-elif [[ "$COVERAGE_LEGACY_MODE" ]]; then
-  cat "${COVERAGE_MANIFEST}" | grep ".gcno$" | while read path; do
-    mkdir -p "${COVERAGE_DIR}/$(dirname ${path})"
-    cp "${ROOT}/${path}" "${COVERAGE_DIR}/${path}"
-  done
+# Export the command line that invokes LcovMerger with the flags:
+# --coverage_dir          The absolute path of the directory where the
+#                         intermediate coverage reports are located.
+#                         CoverageOutputGenerator will search for files with
+#                         the .dat and .gcov extension under this directory and
+#                         will merge everything it found in the output report.
+#
+# --output_file           The absolute path of the merged coverage report.
+#
+# --filter_sources        Filters out the sources that match the given regexes
+#                         from the final coverage report. This is needed
+#                         because some coverage tools (e.g. gcov) do not have
+#                         any way of specifying what sources to exclude when
+#                         generating the code coverage report (in this case the
+#                         syslib sources).
+#
+# --source_file_manifest  The absolute path of the coverage source file
+#                         manifest. CoverageOutputGenerator uses this file to
+#                         keep only the C++ sources found in the manifest.
+#                         For other languages the sources in the manifest are
+#                         ignored.
+LCOV_MERGER_CMD="${LCOV_MERGER} --coverage_dir=${COVERAGE_DIR} \
+  --output_file=${COVERAGE_OUTPUT_FILE} \
+  --filter_sources=/usr/bin/.+ \
+  --filter_sources=/usr/lib/.+ \
+  --filter_sources=/usr/include.+ \
+  --filter_sources=.*external/.+ \
+  --source_file_manifest=${COVERAGE_MANIFEST}"
 
-  # Symlink the gcov tool such with a link called gcov. Clang comes with a tool
-  # called llvm-cov, which behaves like gcov if symlinked in this way (otherwise
-  # we would need to invoke it with "llvm-cov gcov").
-  GCOV="${COVERAGE_DIR}/gcov"
-  ln -s "${COVERAGE_GCOV_PATH}" "${GCOV}"
-
-  # Run lcov over the .gcno and .gcda files to generate the lcov tracefile.
-  # -c                    - Collect coverage data
-  # --no-external         - Do not collect coverage data for system files
-  # --ignore-errors graph - Ignore missing .gcno files; Bazel only instruments some files
-  # -q                    - Quiet mode
-  # --gcov-tool "${GCOV}" - Pass the local symlink to be uses as gcov by lcov
-  # -b /proc/self/cwd     - Use this as a prefix for all source files instead of
-  #                         the current directory
-  # -d "${COVERAGE_DIR}"  - Directory to search for .gcda files
-  # -o "${COVERAGE_OUTPUT_FILE}" - Output file
-  LCOV=$(which lcov)
-  if [[ ! -x $LCOV ]]; then
-    LCOV=/usr/bin/lcov
-  fi
-  $LCOV -c --no-external --ignore-errors graph -q \
-      --gcov-tool "${GCOV}" -b /proc/self/cwd \
-      -d "${COVERAGE_DIR}" -o "${COVERAGE_OUTPUT_FILE}"
-
-  # Fix up the paths to be relative by removing the prefix we specified above.
-  sed -i -e "s*/proc/self/cwd/**g" "${COVERAGE_OUTPUT_FILE}"
-
-  exit $TEST_STATUS
+if [[ $COVERAGE_REPORTED_TO_ACTUAL_SOURCES_FILE ]]; then
+  LCOV_MERGER_CMD="$LCOV_MERGER_CMD\
+  --sources_to_replace_file=$ROOT/$COVERAGE_REPORTED_TO_ACTUAL_SOURCES_FILE"
 fi
-
-export LCOV_MERGER_CMD="${LCOV_MERGER} --coverage_dir=${COVERAGE_DIR} \
---output_file=${COVERAGE_OUTPUT_FILE}"
-
 
 if [[ $DISPLAY_LCOV_CMD ]] ; then
   echo "Running lcov_merger"

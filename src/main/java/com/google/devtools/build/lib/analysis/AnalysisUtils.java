@@ -19,20 +19,17 @@ import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Multimap;
-import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.BuildConfigurationCollection;
 import com.google.devtools.build.lib.analysis.config.ConfigurationResolver;
 import com.google.devtools.build.lib.analysis.config.TransitionResolver;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.config.transitions.ConfigurationTransition;
+import com.google.devtools.build.lib.analysis.config.transitions.NoTransition;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.collect.nestedset.NestedSet;
-import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
-import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
-import com.google.devtools.build.lib.packages.Info;
+import com.google.devtools.build.lib.packages.InfoInterface;
 import com.google.devtools.build.lib.packages.NativeProvider;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.packages.TriState;
@@ -94,7 +91,7 @@ public final class AnalysisUtils {
    * Returns the list of declared providers (native and Skylark) of the specified Skylark key from a
    * set of transitive info collections.
    */
-  public static <T extends Info> Iterable<T> getProviders(
+  public static <T extends InfoInterface> Iterable<T> getProviders(
       Iterable<? extends TransitiveInfoCollection> prerequisites,
       final NativeProvider<T> skylarkKey) {
     ImmutableList.Builder<T> result = ImmutableList.builder();
@@ -111,7 +108,7 @@ public final class AnalysisUtils {
    * Returns the list of declared providers (native and Skylark) of the specified Skylark key from a
    * set of transitive info collections.
    */
-  public static <T extends Info> Iterable<T> getProviders(
+  public static <T extends InfoInterface> Iterable<T> getProviders(
       Iterable<? extends TransitiveInfoCollection> prerequisites,
       final BuiltinProvider<T> skylarkKey) {
     ImmutableList.Builder<T> result = ImmutableList.builder();
@@ -133,8 +130,8 @@ public final class AnalysisUtils {
   }
 
   /** Returns the iterable of collections that have the specified provider. */
-  public static <S extends TransitiveInfoCollection, C extends Info> Iterable<S> filterByProvider(
-      Iterable<S> prerequisites, final NativeProvider<C> provider) {
+  public static <S extends TransitiveInfoCollection, C extends InfoInterface> Iterable<S>
+      filterByProvider(Iterable<S> prerequisites, final NativeProvider<C> provider) {
     return Iterables.filter(prerequisites, target -> target.get(provider) != null);
   }
 
@@ -147,22 +144,6 @@ public final class AnalysisUtils {
     PathFragment manifestDir = filesetDir.replaceName("_" + filesetDir.getBaseName());
     PathFragment outputManifestFrag = manifestDir.getRelative("MANIFEST");
     return outputManifestFrag;
-  }
-
-  /**
-   * Returns the middleman artifact on the specified attribute of the specified rule for the
-   * specified mode, or an empty set if it does not exist.
-   */
-  public static NestedSet<Artifact> getMiddlemanFor(RuleContext rule, String attribute, Mode mode) {
-    TransitiveInfoCollection prereq = rule.getPrerequisite(attribute, mode);
-    if (prereq == null) {
-      return NestedSetBuilder.emptySet(Order.STABLE_ORDER);
-    }
-    MiddlemanProvider provider = prereq.getProvider(MiddlemanProvider.class);
-    if (provider == null) {
-      return NestedSetBuilder.emptySet(Order.STABLE_ORDER);
-    }
-    return provider.getMiddlemanArtifact();
   }
 
   /**
@@ -208,7 +189,7 @@ public final class AnalysisUtils {
     LinkedHashSet<TargetAndConfiguration> nodes = new LinkedHashSet<>(targets.size());
     for (BuildConfiguration config : configurations.getTargetConfigurations()) {
       for (Target target : targets) {
-        nodes.add(new TargetAndConfiguration(target, target.isConfigurable() ? config : null));
+        nodes.add(new TargetAndConfiguration(target, config));
       }
     }
 
@@ -229,13 +210,18 @@ public final class AnalysisUtils {
     Multimap<BuildConfiguration, Dependency> asDeps =
         ArrayListMultimap.<BuildConfiguration, Dependency>create();
     for (TargetAndConfiguration targetAndConfig : nodes) {
+      ConfigurationTransition transition =
+          TransitionResolver.evaluateTransition(
+              targetAndConfig.getConfiguration(),
+              NoTransition.INSTANCE,
+              targetAndConfig.getTarget(),
+              ruleClassProvider.getTrimmingTransitionFactory());
       if (targetAndConfig.getConfiguration() != null) {
         asDeps.put(
             targetAndConfig.getConfiguration(),
             Dependency.withTransitionAndAspects(
                 targetAndConfig.getLabel(),
-                TransitionResolver.evaluateTopLevelTransition(
-                    targetAndConfig, ruleClassProvider.getTrimmingTransitionFactory()),
+                transition,
                 // TODO(bazel-team): support top-level aspects
                 AspectCollection.EMPTY));
       }

@@ -28,7 +28,12 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
+import com.google.devtools.build.lib.actions.ActionInputHelper;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.Artifact.SpecialArtifact;
+import com.google.devtools.build.lib.actions.Artifact.SpecialArtifactType;
+import com.google.devtools.build.lib.actions.Artifact.TreeFileArtifact;
+import com.google.devtools.build.lib.actions.ArtifactOwner;
 import com.google.devtools.build.lib.actions.ArtifactRoot;
 import com.google.devtools.build.lib.actions.ArtifactSkyKey;
 import com.google.devtools.build.lib.actions.FileArtifactValue;
@@ -42,6 +47,7 @@ import com.google.devtools.build.lib.analysis.ServerDirectories;
 import com.google.devtools.build.lib.analysis.util.AnalysisMock;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.events.NullEventHandler;
+import com.google.devtools.build.lib.packages.WorkspaceFileValue;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
 import com.google.devtools.build.lib.skyframe.ExternalFilesHelper.ExternalFileAction;
 import com.google.devtools.build.lib.skyframe.PackageLookupFunction.CrossRepositoryLabelViolationStrategy;
@@ -56,8 +62,10 @@ import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.RootedPath;
+import com.google.devtools.build.lib.vfs.UnixGlob;
 import com.google.devtools.build.skyframe.AbstractSkyKey;
 import com.google.devtools.build.skyframe.ErrorInfo;
+import com.google.devtools.build.skyframe.EvaluationContext;
 import com.google.devtools.build.skyframe.EvaluationProgressReceiver;
 import com.google.devtools.build.skyframe.EvaluationResult;
 import com.google.devtools.build.skyframe.InMemoryMemoizingEvaluator;
@@ -96,6 +104,7 @@ public final class RecursiveFilesystemTraversalFunctionTest extends FoundationTe
   private SequentialBuildDriver driver;
   private RecordingDifferencer differencer;
   private AtomicReference<PathPackageLocator> pkgLocator;
+  private NonHermeticArtifactFakeFunction artifactFunction;
 
   @Before
   public final void setUp() {
@@ -121,12 +130,16 @@ public final class RecursiveFilesystemTraversalFunctionTest extends FoundationTe
     Map<SkyFunctionName, SkyFunction> skyFunctions = new HashMap<>();
     skyFunctions.put(
         FileStateValue.FILE_STATE,
-        new FileStateFunction(new AtomicReference<>(), externalFilesHelper));
+        new FileStateFunction(
+            new AtomicReference<>(),
+            new AtomicReference<>(UnixGlob.DEFAULT_SYSCALLS),
+            externalFilesHelper));
     skyFunctions.put(FileValue.FILE, new FileFunction(pkgLocator));
     skyFunctions.put(SkyFunctions.DIRECTORY_LISTING, new DirectoryListingFunction());
     skyFunctions.put(
         SkyFunctions.DIRECTORY_LISTING_STATE,
-        new DirectoryListingStateFunction(externalFilesHelper));
+        new DirectoryListingStateFunction(
+            externalFilesHelper, new AtomicReference<>(UnixGlob.DEFAULT_SYSCALLS)));
     skyFunctions.put(
         SkyFunctions.RECURSIVE_FILESYSTEM_TRAVERSAL, new RecursiveFilesystemTraversalFunction());
     skyFunctions.put(
@@ -143,13 +156,14 @@ public final class RecursiveFilesystemTraversalFunctionTest extends FoundationTe
         new PackageFunction(null, null, null, null, null, null, null));
     skyFunctions.put(SkyFunctions.WORKSPACE_AST, new WorkspaceASTFunction(ruleClassProvider));
     skyFunctions.put(
-        SkyFunctions.WORKSPACE_FILE,
+        WorkspaceFileValue.WORKSPACE_FILE,
         new WorkspaceFileFunction(
             ruleClassProvider,
             analysisMock
                 .getPackageFactoryBuilderForTesting(directories)
-                .build(ruleClassProvider),
-            directories));
+                .build(ruleClassProvider, fileSystem),
+            directories,
+            /*skylarkImportLookupFunctionForInlining=*/ null));
     skyFunctions.put(SkyFunctions.EXTERNAL_PACKAGE, new ExternalPackageFunction());
     skyFunctions.put(SkyFunctions.LOCAL_REPOSITORY_LOOKUP, new LocalRepositoryLookupFunction());
     skyFunctions.put(
@@ -161,7 +175,8 @@ public final class RecursiveFilesystemTraversalFunctionTest extends FoundationTe
     // could have the artifact depend on the corresponding FileValue, but that would not cover the
     // case of a generated directory, which we have test coverage for.
     skyFunctions.put(Artifact.ARTIFACT, new ArtifactFakeFunction());
-    skyFunctions.put(NONHERMETIC_ARTIFACT, new NonHermeticArtifactFakeFunction());
+    artifactFunction = new NonHermeticArtifactFakeFunction();
+    skyFunctions.put(NONHERMETIC_ARTIFACT, artifactFunction);
 
     progressReceiver = new RecordingEvaluationProgressReceiver();
     differencer = new SequencedRecordingDifferencer();
@@ -180,6 +195,22 @@ public final class RecursiveFilesystemTraversalFunctionTest extends FoundationTe
     return new Artifact(
         PathFragment.create(path),
         ArtifactRoot.asSourceRoot(Root.fromPath(rootDirectory.getRelative(packagePath))));
+  }
+
+  private SpecialArtifact treeArtifact(String path) {
+    SpecialArtifact treeArtifact = new SpecialArtifact(
+        ArtifactRoot.asDerivedRoot(rootDirectory, rootDirectory.getRelative("out")),
+        PathFragment.create("out/" + path),
+        ArtifactOwner.NullArtifactOwner.INSTANCE,
+        SpecialArtifactType.TREE);
+    assertThat(treeArtifact.isTreeArtifact()).isTrue();
+    return treeArtifact;
+  }
+
+  private void addNewTreeFileArtifact(SpecialArtifact parent, String relatedPath)
+      throws IOException {
+    TreeFileArtifact treeFileArtifact = ActionInputHelper.treeFileArtifact(parent, relatedPath);
+    artifactFunction.addNewTreeFileArtifact(treeFileArtifact);
   }
 
   private Artifact derivedArtifact(String path) {
@@ -267,11 +298,13 @@ public final class RecursiveFilesystemTraversalFunctionTest extends FoundationTe
   }
 
   private <T extends SkyValue> EvaluationResult<T> eval(SkyKey key) throws Exception {
-    return driver.evaluate(
-        ImmutableList.of(key),
-        false,
-        SkyframeExecutor.DEFAULT_THREAD_COUNT,
-        NullEventHandler.INSTANCE);
+    EvaluationContext evaluationContext =
+        EvaluationContext.newBuilder()
+            .setKeepGoing(false)
+            .setNumThreads(SkyframeExecutor.DEFAULT_THREAD_COUNT)
+            .setEventHander(NullEventHandler.INSTANCE)
+            .build();
+    return driver.evaluate(ImmutableList.of(key), evaluationContext);
   }
 
   private RecursiveFilesystemTraversalValue evalTraversalRequest(TraversalRequest params)
@@ -359,14 +392,14 @@ public final class RecursiveFilesystemTraversalFunctionTest extends FoundationTe
     differencer.invalidate(ImmutableList.of(DirectoryListingStateValue.key(path)));
   }
 
+  private void invalidateDirectory(Artifact directoryArtifact) {
+    invalidateDirectory(rootedPath(directoryArtifact));
+  }
+
   private void invalidateOutputArtifact(Artifact output) {
     assertThat(output.isSourceArtifact()).isFalse();
     differencer.invalidate(
         ImmutableList.of(new NonHermeticArtifactSkyKey(ArtifactSkyKey.key(output, true))));
-  }
-
-  private void invalidateDirectory(Artifact directoryArtifact) {
-    invalidateDirectory(rootedPath(directoryArtifact));
   }
 
   private static final class RecordingEvaluationProgressReceiver
@@ -522,7 +555,14 @@ public final class RecursiveFilesystemTraversalFunctionTest extends FoundationTe
     // in the 2nd case, it is: RootedPath(/root, execroot/relative).
     // Creating the files will also create the parent directories.
     RootedPath file1 = createFile(childOf(directoryArtifact, "bar.txt"));
-    RootedPath file2 = createFile(childOf(directoryArtifact, "baz/qux.txt"));
+    RootedPath file2;
+    if (directoryArtifact.isTreeArtifact()) {
+      file2 = createFile(childOf(directoryArtifact, "qux.txt"));
+      addNewTreeFileArtifact((SpecialArtifact) directoryArtifact, "bar.txt");
+      addNewTreeFileArtifact((SpecialArtifact) directoryArtifact, "qux.txt");
+    } else {
+      file2 = createFile(childOf(directoryArtifact, "baz/qux.txt"));
+    }
 
     TraversalRequest traversalRoot = fileLikeRoot(directoryArtifact, DONT_CROSS);
 
@@ -539,6 +579,9 @@ public final class RecursiveFilesystemTraversalFunctionTest extends FoundationTe
     TimestampGranularityUtils.waitForTimestampGranularity(
         directoryArtifact.getPath().stat().getLastChangeTime(), OutErr.SYSTEM_OUT_ERR);
     RootedPath file3 = createFile(childOf(directoryArtifact, "foo.txt"));
+    if (directoryArtifact.isTreeArtifact()) {
+      addNewTreeFileArtifact((SpecialArtifact) directoryArtifact, "foo.txt");
+    }
     if (directoryArtifact.isSourceArtifact()) {
       invalidateDirectory(directoryArtifact);
     } else {
@@ -588,6 +631,11 @@ public final class RecursiveFilesystemTraversalFunctionTest extends FoundationTe
   @Test
   public void testTraversalOfSourceDirectory() throws Exception {
     assertTraversalOfDirectory(sourceArtifact("dir"));
+  }
+
+  @Test
+  public void testTraversalOfSourceTreeArtifact() throws Exception {
+    assertTraversalOfDirectory(treeArtifact("dir"));
   }
 
   // Note that in actual Bazel derived artifact directories are not checked for modifications on
@@ -946,12 +994,19 @@ public final class RecursiveFilesystemTraversalFunctionTest extends FoundationTe
   }
 
   private static class NonHermeticArtifactFakeFunction implements SkyFunction {
+
+    private final Map<TreeFileArtifact, FileArtifactValue> allTreeFiles = new HashMap<>();
+
     @Nullable
     @Override
     public SkyValue compute(SkyKey skyKey, Environment env)
         throws SkyFunctionException, InterruptedException {
       try {
-        return FileArtifactValue.create(
+        if (skyKey.argument() instanceof Artifact
+            && ((Artifact) skyKey.argument()).isTreeArtifact()) {
+          return TreeArtifactValue.create(allTreeFiles);
+        }
+        return FileArtifactValue.createShareable(
             ArtifactSkyKey.artifact((SkyKey) skyKey.argument()).getPath());
       } catch (IOException e) {
         throw new SkyFunctionException(e, Transience.PERSISTENT){};
@@ -962,6 +1017,10 @@ public final class RecursiveFilesystemTraversalFunctionTest extends FoundationTe
     @Override
     public String extractTag(SkyKey skyKey) {
       return null;
+    }
+
+    public void addNewTreeFileArtifact(TreeFileArtifact input) throws IOException {
+      allTreeFiles.put(input, FileArtifactValue.createShareable(input.getPath()));
     }
   }
 

@@ -14,6 +14,10 @@
 #ifndef BAZEL_SRC_MAIN_CPP_STARTUP_OPTIONS_H_
 #define BAZEL_SRC_MAIN_CPP_STARTUP_OPTIONS_H_
 
+#if defined(__APPLE__)
+#include <sys/qos.h>
+#endif
+
 #include <map>
 #include <memory>
 #include <set>
@@ -109,10 +113,6 @@ class StartupOptions {
                                        const std::string &rcfile,
                                        bool *is_space_separated,
                                        std::string *error);
-
-  // Processes the --server_javabase flag, or its deprecated alias
-  // --host_javabase.
-  void ProcessServerJavabase(const char *value, const std::string &rcfile);
 
   // Process an ordered list of RcStartupFlags using ProcessArg.
   blaze_exit_code::ExitCode ProcessArgs(
@@ -253,6 +253,8 @@ class StartupOptions {
 
   int max_idle_secs;
 
+  bool shutdown_on_low_sys_mem;
+
   bool oom_more_eagerly;
 
   int oom_more_eagerly_threshold;
@@ -287,8 +289,10 @@ class StartupOptions {
   // Connection timeout for each gRPC connection attempt.
   int connect_timeout_secs;
 
-  // Invocation policy proto. May be NULL.
-  const char *invocation_policy;
+  // Invocation policy proto, or an empty string.
+  std::string invocation_policy;
+  // Invocation policy can only be specified once.
+  bool have_invocation_policy_;
 
   // Whether to output addition debugging information in the client.
   bool client_debug;
@@ -307,6 +311,14 @@ class StartupOptions {
   // their origin. This is populated by ProcessArgs.
   std::vector<RcStartupFlag> original_startup_options_;
 
+  // Whether to raise the soft coredump limit to the hard one or not.
+  bool unlimit_coredumps;
+
+#if defined(__APPLE__)
+  // The QoS class to apply to the Bazel server process.
+  qos_class_t macos_qos_class;
+#endif
+
  protected:
   // Constructor for subclasses only so that site-specific extensions of this
   // class can override the product name.  The product_name must be the
@@ -323,10 +335,6 @@ class StartupOptions {
   std::string default_server_javabase_;
   // Contains the collection of startup flags that Bazel accepts.
   std::set<std::unique_ptr<StartupFlag>> valid_startup_flags;
-
-#if defined(_WIN32) || defined(__CYGWIN__)
-  static std::string WindowsUnixRoot(const std::string &bazel_sh);
-#endif
 };
 
 }  // namespace blaze

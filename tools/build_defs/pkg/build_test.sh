@@ -1,4 +1,5 @@
 #!/bin/bash
+# -*- coding: utf-8 -*-
 
 # Copyright 2015 The Bazel Authors. All rights reserved.
 #
@@ -155,13 +156,13 @@ function test_tar() {
   check_eq "./
 ./not-etc/
 ./not-etc/mapped-filename.conf" "$(get_tar_listing test-tar-files_dict.tar)"
-  check_eq "drwxr-xr-x 0/0               0 1970-01-01 00:00 ./
--rwxrwxrwx 0/0               0 1970-01-01 00:00 ./a
--rwxrwxrwx 0/0               0 1970-01-01 00:00 ./b" \
+  check_eq "drwxr-xr-x 0/0               0 2000-01-01 00:00 ./
+-rwxrwxrwx 0/0               0 2000-01-01 00:00 ./a
+-rwxrwxrwx 0/0               0 2000-01-01 00:00 ./b" \
       "$(get_tar_verbose_listing test-tar-empty_files.tar)"
-  check_eq "drwxr-xr-x 0/0               0 1970-01-01 00:00 ./
-drwxrwxrwx 0/0               0 1970-01-01 00:00 ./tmp/
-drwxrwxrwx 0/0               0 1970-01-01 00:00 ./pmt/" \
+  check_eq "drwxr-xr-x 0/0               0 2000-01-01 00:00 ./
+drwxrwxrwx 0/0               0 2000-01-01 00:00 ./tmp/
+drwxrwxrwx 0/0               0 2000-01-01 00:00 ./pmt/" \
       "$(get_tar_verbose_listing test-tar-empty_dirs.tar)"
 }
 
@@ -181,8 +182,9 @@ function test_deb() {
   check_eq "-rwxr-xr-x" "$(get_deb_permission test-deb.deb ./usr/titi)"
   check_eq "-rw-r--r--" "$(get_deb_permission test-deb.deb ./etc/nsswitch.conf)"
   get_deb_description test-deb.deb >$TEST_log
-  expect_log "Description: toto"
+  expect_log "Description: toto ®, Й, ק ,م, ๗, あ, 叶, 葉, 말, ü and é"
   expect_log "Package: titi"
+  expect_log "soméone@somewhere.com"
   expect_log "Depends: dep1, dep2"
 
   get_changes titi_test_all.changes >$TEST_log

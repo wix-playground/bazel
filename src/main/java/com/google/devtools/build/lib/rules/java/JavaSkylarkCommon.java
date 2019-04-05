@@ -14,10 +14,9 @@
 package com.google.devtools.build.lib.rules.java;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.analysis.ConfiguredTarget;
-import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.PlatformOptions;
+import com.google.devtools.build.lib.analysis.platform.ToolchainInfo;
 import com.google.devtools.build.lib.analysis.skylark.SkylarkActionFactory;
 import com.google.devtools.build.lib.analysis.skylark.SkylarkRuleContext;
 import com.google.devtools.build.lib.cmdline.Label;
@@ -31,12 +30,19 @@ import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.syntax.Runtime;
 import com.google.devtools.build.lib.syntax.SkylarkList;
 import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
-import com.google.devtools.build.lib.syntax.Type;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
+import java.util.List;
 import javax.annotation.Nullable;
 
 /** A module that contains Skylark utilities for Java support. */
-public class JavaSkylarkCommon implements JavaCommonApi<Artifact, JavaInfo, SkylarkRuleContext,
-    ConfiguredTarget, SkylarkActionFactory> {
+public class JavaSkylarkCommon
+    implements JavaCommonApi<
+        Artifact,
+        JavaInfo,
+        JavaToolchainProvider,
+        JavaRuntimeInfo,
+        SkylarkRuleContext,
+        SkylarkActionFactory> {
   private final JavaSemantics javaSemantics;
 
   @Override
@@ -45,7 +51,7 @@ public class JavaSkylarkCommon implements JavaCommonApi<Artifact, JavaInfo, Skyl
       Object compileTimeJars,
       Object runtimeJars,
       Boolean useIjar,
-      @Nullable Object javaToolchainUnchecked,
+      @Nullable Object javaToolchain,
       Object transitiveCompileTimeJars,
       Object transitiveRuntimeJars,
       Object sourceJars,
@@ -53,11 +59,10 @@ public class JavaSkylarkCommon implements JavaCommonApi<Artifact, JavaInfo, Skyl
       Environment environment)
       throws EvalException {
     if (environment.getSemantics().incompatibleDisallowLegacyJavaInfo()) {
-      throw new EvalException(
+      checkCallPathInWhitelistedPackages(
+          environment.getSemantics(),
           location,
-          "create_provider is deprecated and cannot be used when "
-              + "--incompatible_disallow_legacy_javainfo is set. "
-              + "Please migrate to the JavaInfo constructor.");
+          environment.getCallerLabel().getPackageFragment().toString());
     }
     return JavaInfoBuildHelper.getInstance()
         .create(
@@ -65,10 +70,11 @@ public class JavaSkylarkCommon implements JavaCommonApi<Artifact, JavaInfo, Skyl
             asArtifactNestedSet(compileTimeJars),
             asArtifactNestedSet(runtimeJars),
             useIjar,
-            javaToolchainUnchecked,
+            javaToolchain == Runtime.NONE ? null : (JavaToolchainProvider) javaToolchain,
             asArtifactNestedSet(transitiveCompileTimeJars),
             asArtifactNestedSet(transitiveRuntimeJars),
             asArtifactNestedSet(sourceJars),
+            environment.getSemantics(),
             location);
   }
 
@@ -87,18 +93,21 @@ public class JavaSkylarkCommon implements JavaCommonApi<Artifact, JavaInfo, Skyl
       SkylarkList<Artifact> sourceJars,
       SkylarkList<Artifact> sourceFiles,
       Artifact outputJar,
+      Object outputSourceJar,
       SkylarkList<String> javacOpts,
       SkylarkList<JavaInfo> deps,
       SkylarkList<JavaInfo> exports,
       SkylarkList<JavaInfo> plugins,
       SkylarkList<JavaInfo> exportedPlugins,
       String strictDepsMode,
-      ConfiguredTarget javaToolchain,
-      ConfiguredTarget hostJavabase,
+      JavaToolchainProvider javaToolchain,
+      JavaRuntimeInfo hostJavabase,
       SkylarkList<Artifact> sourcepathEntries,
       SkylarkList<Artifact> resources,
       Boolean neverlink,
-      Environment environment) throws EvalException, InterruptedException {
+      Location location,
+      Environment environment)
+      throws EvalException, InterruptedException {
 
     return JavaInfoBuildHelper.getInstance()
         .createJavaCompileAction(
@@ -106,6 +115,7 @@ public class JavaSkylarkCommon implements JavaCommonApi<Artifact, JavaInfo, Skyl
             sourceJars,
             sourceFiles,
             outputJar,
+            outputSourceJar == Runtime.NONE ? null : (Artifact) outputSourceJar,
             javacOpts,
             deps,
             exports,
@@ -118,6 +128,7 @@ public class JavaSkylarkCommon implements JavaCommonApi<Artifact, JavaInfo, Skyl
             resources,
             neverlink,
             javaSemantics,
+            location,
             environment);
   }
 
@@ -126,18 +137,30 @@ public class JavaSkylarkCommon implements JavaCommonApi<Artifact, JavaInfo, Skyl
       SkylarkActionFactory actions,
       Artifact jar,
       Object targetLabel,
-      ConfiguredTarget javaToolchain)
+      JavaToolchainProvider javaToolchain,
+      Location location,
+      StarlarkSemantics semantics)
       throws EvalException {
     return JavaInfoBuildHelper.getInstance()
         .buildIjar(
-            actions, jar, targetLabel != Runtime.NONE ? (Label) targetLabel : null, javaToolchain);
+            actions,
+            jar,
+            targetLabel != Runtime.NONE ? (Label) targetLabel : null,
+            javaToolchain,
+            location);
   }
 
   @Override
   public Artifact stampJar(
-      SkylarkActionFactory actions, Artifact jar, Label targetLabel, ConfiguredTarget javaToolchain)
+      SkylarkActionFactory actions,
+      Artifact jar,
+      Label targetLabel,
+      JavaToolchainProvider javaToolchain,
+      Location location,
+      StarlarkSemantics semantics)
       throws EvalException {
-    return JavaInfoBuildHelper.getInstance().stampJar(actions, jar, targetLabel, javaToolchain);
+    return JavaInfoBuildHelper.getInstance()
+        .stampJar(actions, jar, targetLabel, javaToolchain, location);
   }
 
   @Override
@@ -146,34 +169,30 @@ public class JavaSkylarkCommon implements JavaCommonApi<Artifact, JavaInfo, Skyl
       Artifact outputJar,
       SkylarkList<Artifact> sourceFiles,
       SkylarkList<Artifact> sourceJars,
-      ConfiguredTarget javaToolchain,
-      ConfiguredTarget hostJavabase)
+      JavaToolchainProvider javaToolchain,
+      JavaRuntimeInfo hostJavabase,
+      Location location,
+      StarlarkSemantics semantics)
       throws EvalException {
     return JavaInfoBuildHelper.getInstance()
-        .packSourceFiles(actions, outputJar, sourceFiles, sourceJars, javaToolchain, hostJavabase);
+        .packSourceFiles(
+            actions,
+            outputJar,
+            /* outputSourceJar= */ null,
+            sourceFiles,
+            sourceJars,
+            javaToolchain,
+            hostJavabase,
+            location);
   }
 
   @Override
   // TODO(b/78512644): migrate callers to passing explicit javacopts or using custom toolchains, and
   // delete
   public ImmutableList<String> getDefaultJavacOpts(
-      SkylarkRuleContext skylarkRuleContext, String javaToolchainAttr) throws EvalException {
-    RuleContext ruleContext = skylarkRuleContext.getRuleContext();
-    ConfiguredTarget javaToolchainConfigTarget =
-        (ConfiguredTarget) skylarkRuleContext.getAttr().getValue(javaToolchainAttr);
-    JavaToolchainProvider toolchain =
-        JavaInfoBuildHelper.getInstance().getJavaToolchainProvider(javaToolchainConfigTarget);
-    ImmutableList<String> javacOptsFromAttr;
-    if (ruleContext.getRule().isAttrDefined("javacopts", Type.STRING_LIST)) {
-      javacOptsFromAttr = ruleContext.getExpander().withDataLocations().tokenized("javacopts");
-    } else {
-      // This can also be called from Skylark rules that may or may not have an appropriate
-      // javacopts attribute.
-      javacOptsFromAttr = ImmutableList.of();
-    }
-    return ImmutableList.copyOf(Iterables.concat(
-        toolchain.getJavacOptions(),
-        javacOptsFromAttr));
+      JavaToolchainProvider javaToolchain, Location location) throws EvalException {
+    // We don't have a rule context if the default_javac_opts.java_toolchain parameter is set
+    return ((JavaToolchainProvider) javaToolchain).getJavacOptions(/* ruleContext= */ null);
   }
 
   @Override
@@ -193,10 +212,14 @@ public class JavaSkylarkCommon implements JavaCommonApi<Artifact, JavaInfo, Skyl
         .build();
   }
 
+  @Override
+  public Provider getJavaToolchainProvider() {
+    return ToolchainInfo.PROVIDER;
+  }
 
   @Override
   public Provider getJavaRuntimeProvider() {
-    return JavaRuntimeInfo.PROVIDER;
+    return ToolchainInfo.PROVIDER;
   }
 
   /**
@@ -209,5 +232,32 @@ public class JavaSkylarkCommon implements JavaCommonApi<Artifact, JavaInfo, Skyl
         : NestedSetBuilder.<Artifact>naiveLinkOrder()
             .addAll(((SkylarkList<?>) o).getContents(Artifact.class, /*description=*/ null))
             .build();
+  }
+
+  /**
+   * Throws an {@link EvalException} if the given {@code callPath} is not listed under the {@code
+   * --experimental_java_common_create_provider_enabled_packages} flag.
+   */
+  private static void checkCallPathInWhitelistedPackages(
+      StarlarkSemantics semantics, Location location, String callPath) throws EvalException {
+    List<String> whitelistedPackagesList =
+        semantics.experimentalJavaCommonCreateProviderEnabledPackages();
+    if (whitelistedPackagesList.stream().noneMatch(path -> callPath.startsWith(path))) {
+      throw new EvalException(
+          location,
+          "java_common.create_provider is deprecated and cannot be used when "
+              + "--incompatible_disallow_legacy_javainfo is set. "
+              + "Please migrate to the JavaInfo constructor.");
+    }
+  }
+
+  @Override
+  public boolean isJavaToolchainResolutionEnabled(SkylarkRuleContext ruleContext)
+      throws EvalException {
+    return ruleContext
+        .getConfiguration()
+        .getOptions()
+        .get(PlatformOptions.class)
+        .useToolchainResolutionForJavaRules;
   }
 }

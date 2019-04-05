@@ -28,29 +28,24 @@ from src.create_embedded_tools_lib import copy_zip_to_zip
 from src.create_embedded_tools_lib import is_executable
 
 output_paths = [
-    ('*tools/jdk/BUILD*', lambda x: 'tools/jdk/BUILD'),
+    ('*tools/jdk/BUILD', lambda x: 'tools/jdk/BUILD'),
+    ('*tools/build_defs/repo/BUILD.repo',
+     lambda x: 'tools/build_defs/repo/BUILD'),
     ('*tools/platforms/platforms.BUILD', lambda x: 'platforms/BUILD'),
     ('*tools/platforms/*', lambda x: 'platforms/' + os.path.basename(x)),
-    ('*JavaBuilder*_deploy.jar', lambda x: 'tools/jdk/' + os.path.basename(x)),
-    ('*JacocoCoverage*_deploy.jar',
-     lambda x: 'tools/jdk/JacocoCoverage_deploy.jar'),
-    ('*turbine_deploy.jar', lambda x: 'tools/jdk/turbine_deploy.jar'),
-    ('*javac-9+181-r4173-1.jar',
-     lambda x: 'third_party/java/jdk/langtools/javac-9+181-r4173-1.jar'),
-    ('*bazel-singlejar_deploy.jar',
-     lambda x: 'tools/jdk/singlejar/bazel-singlejar_deploy.jar'),
-    ('*GenClass_deploy.jar', lambda x: 'tools/jdk/GenClass_deploy.jar'),
-    ('*ExperimentalRunner_deploy.jar',
-     lambda x: 'tools/jdk/ExperimentalTestRunner_deploy.jar'),
-    ('*Runner_deploy.jar', lambda x: 'tools/jdk/TestRunner_deploy.jar'),
+    ('*tools/cpp/runfiles/generated_*',
+     lambda x: 'tools/cpp/runfiles/' + os.path.basename(x)[len('generated_'):]),
+    ('*jarjar_command_deploy.jar',
+     lambda x: 'tools/jdk/jarjar_command_deploy.jar'),
+    ('*BUILD.java_langtools', lambda x: 'third_party/java/jdk/langtools/BUILD'),
+    ('*singlejar_local.exe', lambda x: 'tools/jdk/singlejar/singlejar.exe'),
     ('*singlejar_local', lambda x: 'tools/jdk/singlejar/singlejar'),
-    ('src/tools/runfiles/runfiles.py', lambda x: 'tools/runfiles/runfiles.py'),
     ('*launcher.exe', lambda x: 'tools/launcher/launcher.exe'),
     ('*def_parser.exe', lambda x: 'tools/def_parser/def_parser.exe'),
-    ('*ijar.exe', lambda x: 'tools/jdk/ijar/ijar.exe'),
-    ('*ijar', lambda x: 'tools/jdk/ijar/ijar'),
     ('*zipper.exe', lambda x: 'tools/zip/zipper/zipper.exe'),
     ('*zipper', lambda x: 'tools/zip/zipper/zipper'),
+    ('*third_party/jarjar/BUILD.tools', lambda x: 'third_party/jarjar/BUILD'),
+    ('*third_party/jarjar/LICENSE', lambda x: 'third_party/jarjar/LICENSE'),
     ('*src/objc_tools/*',
      lambda x: 'tools/objc/precomp_' + os.path.basename(x)),
     ('*xcode*StdRedirect.dylib', lambda x: 'tools/objc/StdRedirect.dylib'),
@@ -63,6 +58,8 @@ output_paths = [
      lambda x: 'tools/objc/' + os.path.basename(x) + '.sh'),
     ('*external/openjdk_*/file/*.tar.gz', lambda x: 'jdk.tar.gz'),
     ('*external/openjdk_*/file/*.zip', lambda x: 'jdk.zip'),
+    ('*src/minimal_jdk.tar.gz', lambda x: 'jdk.tar.gz'),
+    ('*src/minimal_jdk.zip', lambda x: 'jdk.zip'),
     ('*', lambda x: re.sub(r'^.*bazel-out/[^/]*/bin/', '', x, count=1)),
 ]
 
@@ -103,6 +100,7 @@ def get_input_files(argsfile):
 
 
 def copy_jdk_into_archive(output_zip, archive_file, input_file):
+  """Extract the JDK and adds it to the archive under jdk/*."""
 
   def _replace_dirname(filename):
     # Rename the first folder to 'jdk', because Bazel looks for a

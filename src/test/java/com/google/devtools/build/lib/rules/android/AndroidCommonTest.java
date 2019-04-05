@@ -29,6 +29,11 @@ import org.junit.runners.JUnit4;
 public class AndroidCommonTest extends BuildViewTestCase {
 
   @Before
+  public void setupCcToolchain() throws Exception {
+    getAnalysisMock().ccSupport().setupCcToolchainConfigForCpu(mockToolsConfig, "armeabi-v7a");
+  }
+
+  @Before
   public final void createFile() throws Exception {
     scratch.file("java/srcs/a.properties", "foo");
   }

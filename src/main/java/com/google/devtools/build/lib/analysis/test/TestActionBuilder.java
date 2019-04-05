@@ -30,6 +30,7 @@ import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.RunfilesSupport;
 import com.google.devtools.build.lib.analysis.ShToolchain;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
+import com.google.devtools.build.lib.analysis.actions.LazyWriteNestedSetOfPairAction;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.analysis.test.TestProvider.TestParams;
@@ -39,6 +40,7 @@ import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.packages.TargetUtils;
 import com.google.devtools.build.lib.packages.TestSize;
 import com.google.devtools.build.lib.packages.TestTimeout;
+import com.google.devtools.build.lib.util.OS;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.common.options.EnumConverter;
@@ -52,11 +54,28 @@ import javax.annotation.Nullable;
  */
 public final class TestActionBuilder {
 
+  private static final String CC_CODE_COVERAGE_SCRIPT = "CC_CODE_COVERAGE_SCRIPT";
+  private static final String LCOV_MERGER = "LCOV_MERGER";
+  // The coverage tool Bazel uses to generate a code coverage report for C++.
+  private static final String BAZEL_CC_COVERAGE_TOOL = "BAZEL_CC_COVERAGE_TOOL";
+  // A file that contains a mapping between the reported source file path and the actual source
+  // file path, relative to the workspace directory, if the two values are different. If the
+  // reported source file is the same as the actual source path it will not be included in the file.
+  private static final String COVERAGE_REPORTED_TO_ACTUAL_SOURCES_FILE =
+      "COVERAGE_REPORTED_TO_ACTUAL_SOURCES_FILE";
+
+  enum CcCoverageTool {
+    GCOV,
+    LCOV,
+  }
+
+  private static final CcCoverageTool DEFAULT_BAZEL_CC_COVERAGE_TOOL = CcCoverageTool.LCOV;
+
   private final RuleContext ruleContext;
   private RunfilesSupport runfilesSupport;
   private Artifact executable;
   private ExecutionInfo executionRequirements;
-  private InstrumentedFilesProvider instrumentedFiles;
+  private InstrumentedFilesInfo instrumentedFiles;
   private int explicitShardCount;
   private Map<String, String> extraEnv;
 
@@ -106,8 +125,7 @@ public final class TestActionBuilder {
     return this;
   }
 
-  public TestActionBuilder setInstrumentedFiles(
-      @Nullable InstrumentedFilesProvider instrumentedFiles) {
+  public TestActionBuilder setInstrumentedFiles(@Nullable InstrumentedFilesInfo instrumentedFiles) {
     this.instrumentedFiles = instrumentedFiles;
     return this;
   }
@@ -151,19 +169,6 @@ public final class TestActionBuilder {
       }
     },
 
-    EXPERIMENTAL_HEURISTIC {
-      @Override public int getNumberOfShards(boolean isLocal, int shardCountFromAttr,
-          boolean testShardingCompliant, TestSize testSize) {
-        if (shardCountFromAttr >= 0) {
-          return shardCountFromAttr;
-        }
-        if (isLocal || !testShardingCompliant) {
-          return 0;
-        }
-        return testSize.getDefaultShards();
-      }
-    },
-
     DISABLED {
       @Override public int getNumberOfShards(boolean isLocal, int shardCountFromAttr,
           boolean testShardingCompliant, TestSize testSize) {
@@ -189,12 +194,27 @@ public final class TestActionBuilder {
     AnalysisEnvironment env = ruleContext.getAnalysisEnvironment();
     ArtifactRoot root = config.getTestLogsDirectory(ruleContext.getRule().getRepository());
 
+    // TODO(laszlocsomor), TODO(ulfjack): `isExecutedOnWindows` should use the execution platform,
+    // not the host platform. Once Bazel can tell apart these platforms, fix the right side of this
+    // initialization.
+    final boolean isExecutedOnWindows = OS.getCurrent() == OS.WINDOWS;
+
+    final boolean isUsingTestWrapperInsteadOfTestSetupScript =
+        isExecutedOnWindows
+            && ruleContext
+                .getConfiguration()
+                .getFragment(TestConfiguration.class)
+                .isUsingWindowsNativeTestWrapper();
+
     NestedSetBuilder<Artifact> inputsBuilder = NestedSetBuilder.stableOrder();
     inputsBuilder.addTransitive(
         NestedSetBuilder.create(Order.STABLE_ORDER, runfilesSupport.getRunfilesMiddleman()));
-    NestedSet<Artifact> testRuntime = PrerequisiteArtifacts.nestedSet(
-        ruleContext, "$test_runtime", Mode.HOST);
-    inputsBuilder.addTransitive(testRuntime);
+
+    if (!isUsingTestWrapperInsteadOfTestSetupScript) {
+      NestedSet<Artifact> testRuntime =
+          PrerequisiteArtifacts.nestedSet(ruleContext, "$test_runtime", Mode.HOST);
+      inputsBuilder.addTransitive(testRuntime);
+    }
     TestTargetProperties testProperties = new TestTargetProperties(
         ruleContext, executionRequirements);
 
@@ -202,11 +222,17 @@ public final class TestActionBuilder {
     final boolean collectCodeCoverage = config.isCodeCoverageEnabled()
         && instrumentedFiles != null;
 
-    Artifact testSetupScript = ruleContext.getHostPrerequisiteArtifact("$test_setup_script");
-    inputsBuilder.add(testSetupScript);
-    Artifact testXmlGeneratorScript =
-        ruleContext.getHostPrerequisiteArtifact("$xml_generator_script");
-    inputsBuilder.add(testXmlGeneratorScript);
+    Artifact testActionExecutable =
+        isUsingTestWrapperInsteadOfTestSetupScript
+            ? ruleContext.getHostPrerequisiteArtifact("$test_wrapper")
+            : ruleContext.getHostPrerequisiteArtifact("$test_setup_script");
+
+    inputsBuilder.add(testActionExecutable);
+    Artifact testXmlGeneratorExecutable =
+        isUsingTestWrapperInsteadOfTestSetupScript
+            ? ruleContext.getHostPrerequisiteArtifact("$xml_writer")
+            : ruleContext.getHostPrerequisiteArtifact("$xml_generator_script");
+    inputsBuilder.add(testXmlGeneratorExecutable);
 
     Artifact collectCoverageScript = null;
     TreeMap<String, String> extraTestEnv = new TreeMap<>();
@@ -222,13 +248,43 @@ public final class TestActionBuilder {
       inputsBuilder.addTransitive(metadataFiles);
       inputsBuilder.addTransitive(
           PrerequisiteArtifacts.nestedSet(ruleContext, ":coverage_support", Mode.DONT_CHECK));
+
+      if (ruleContext.isAttrDefined("$collect_cc_coverage", LABEL)) {
+        Artifact collectCcCoverage =
+            ruleContext.getHostPrerequisiteArtifact("$collect_cc_coverage");
+        inputsBuilder.add(collectCcCoverage);
+        extraTestEnv.put(CC_CODE_COVERAGE_SCRIPT, collectCcCoverage.getExecPathString());
+      }
+
+      if (!instrumentedFiles.getReportedToActualSources().isEmpty()) {
+        Artifact reportedToActualSourcesArtifact =
+            ruleContext.getUniqueDirectoryArtifact(
+                "_coverage_helpers", "reported_to_actual_sources.txt");
+        ruleContext.registerAction(
+            new LazyWriteNestedSetOfPairAction(
+                ruleContext.getActionOwner(),
+                reportedToActualSourcesArtifact,
+                instrumentedFiles.getReportedToActualSources()));
+        inputsBuilder.add(reportedToActualSourcesArtifact);
+        extraTestEnv.put(
+            COVERAGE_REPORTED_TO_ACTUAL_SOURCES_FILE,
+            reportedToActualSourcesArtifact.getExecPathString());
+      }
+
+      // lcov is the default CC coverage tool unless otherwise specified on the command line.
+      extraTestEnv.put(
+          BAZEL_CC_COVERAGE_TOOL,
+          ruleContext.getConfiguration().useGcovCoverage()
+              ? CcCoverageTool.GCOV.toString()
+              : DEFAULT_BAZEL_CC_COVERAGE_TOOL.toString());
+
       // We don't add this attribute to non-supported test target
       if (ruleContext.isAttrDefined("$lcov_merger", LABEL)) {
         TransitiveInfoCollection lcovMerger =
             ruleContext.getPrerequisite("$lcov_merger", Mode.TARGET);
         FilesToRunProvider lcovFilesToRun = lcovMerger.getProvider(FilesToRunProvider.class);
         if (lcovFilesToRun != null) {
-          extraTestEnv.put("LCOV_MERGER", lcovFilesToRun.getExecutable().getExecPathString());
+          extraTestEnv.put(LCOV_MERGER, lcovFilesToRun.getExecutable().getExecPathString());
           inputsBuilder.addTransitive(lcovFilesToRun.getFilesToRun());
         } else {
           NestedSet<Artifact> filesToBuild =
@@ -236,7 +292,7 @@ public final class TestActionBuilder {
 
           if (Iterables.size(filesToBuild) == 1) {
             Artifact lcovMergerArtifact = Iterables.getOnlyElement(filesToBuild);
-            extraTestEnv.put("LCOV_MERGER", lcovMergerArtifact.getExecPathString());
+            extraTestEnv.put(LCOV_MERGER, lcovMergerArtifact.getExecPathString());
             inputsBuilder.add(lcovMergerArtifact);
           } else {
             ruleContext.attributeError("$lcov_merger",
@@ -309,8 +365,9 @@ public final class TestActionBuilder {
             new TestRunnerAction(
                 ruleContext.getActionOwner(),
                 inputs,
-                testSetupScript,
-                testXmlGeneratorScript,
+                testActionExecutable,
+                isUsingTestWrapperInsteadOfTestSetupScript,
+                testXmlGeneratorExecutable,
                 collectCoverageScript,
                 testLog,
                 cacheStatus,

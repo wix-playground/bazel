@@ -24,6 +24,7 @@ import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Artifact.SpecialArtifact;
 import com.google.devtools.build.lib.actions.Artifact.SpecialArtifactType;
+import com.google.devtools.build.lib.actions.ArtifactPathResolver;
 import com.google.devtools.build.lib.actions.ExecException;
 import com.google.devtools.build.lib.actions.UserExecException;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
@@ -50,7 +51,7 @@ public class HeaderThinningTest extends ObjcRuleTestCase {
 
   @Before
   public void beforeEach() throws Exception {
-    MockObjcSupport.createCrosstoolPackage(mockToolsConfig);
+    MockObjcSupport.setupCcToolchainConfig(mockToolsConfig);
     MockObjcSupport.setupAppleSdks(mockToolsConfig);
     useConfiguration(
         "--crosstool_top=" + MockObjcSupport.DEFAULT_OSX_CROSSTOOL,
@@ -73,7 +74,8 @@ public class HeaderThinningTest extends ObjcRuleTestCase {
     HeaderThinning headerThinning = new HeaderThinning(getPotentialHeaders(expectedHeaders));
     writeToHeadersListFile(action, "objc/a.pch", "objc/b.h", "objc/c", "objc/d.hpp");
 
-    Iterable<Artifact> headersFound = headerThinning.determineAdditionalInputs(null, action, null);
+    Iterable<Artifact> headersFound =
+        headerThinning.determineAdditionalInputs(null, action, null, null);
     assertThat(headersFound).containsExactlyElementsIn(expectedHeaders);
   }
 
@@ -87,7 +89,7 @@ public class HeaderThinningTest extends ObjcRuleTestCase {
     writeToHeadersListFile(action, "objc/a.h", "objc/b.h", "objc/c.h");
 
     try {
-      headerThinning.determineAdditionalInputs(null, action, null);
+      headerThinning.determineAdditionalInputs(null, action, null, null);
       fail("Exception was not thrown");
     } catch (ExecException e) {
       assertThat(e).hasMessageThat().containsMatch("(objc/c.h)");
@@ -104,7 +106,8 @@ public class HeaderThinningTest extends ObjcRuleTestCase {
     HeaderThinning headerThinning = new HeaderThinning(getPotentialHeaders(expectedHeaders));
     writeToHeadersListFile(action, "objc/a.h", "tree/dir/c.h");
 
-    Iterable<Artifact> headersFound = headerThinning.determineAdditionalInputs(null, action, null);
+    Iterable<Artifact> headersFound =
+        headerThinning.determineAdditionalInputs(null, action, null, null);
     assertThat(headersFound).containsExactlyElementsIn(expectedHeaders);
   }
 
@@ -125,7 +128,8 @@ public class HeaderThinningTest extends ObjcRuleTestCase {
         HeaderThinning.findRequiredHeaderInputs(
             sourceFile,
             headersListFile,
-            createHeaderFilesMap(getPotentialHeaders(expectedHeaders)));
+            createHeaderFilesMap(getPotentialHeaders(expectedHeaders)),
+            ArtifactPathResolver.IDENTITY);
     assertThat(headersFound).containsExactlyElementsIn(expectedHeaders);
   }
 

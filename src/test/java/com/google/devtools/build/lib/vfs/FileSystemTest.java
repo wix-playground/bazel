@@ -18,6 +18,7 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.Assert.fail;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
 import com.google.common.io.BaseEncoding;
 import com.google.devtools.build.lib.testutil.MoreAsserts;
 import com.google.devtools.build.lib.testutil.TestUtils;
@@ -29,11 +30,16 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.FileAlreadyExistsException;
+import java.util.Collection;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameter;
+import org.junit.runners.Parameterized.Parameters;
 
 /**
  * This class handles the generic tests that any filesystem must pass.
@@ -41,6 +47,7 @@ import org.junit.Test;
  * <p>Each filesystem-test should inherit from this class, thereby obtaining
  * all the tests.
  */
+@RunWith(Parameterized.class)
 public abstract class FileSystemTest {
 
   private long savedTime;
@@ -55,9 +62,22 @@ public abstract class FileSystemTest {
   protected Path xNonEmptyDirectoryFoo;
   protected Path xEmptyDirectory;
 
+  @Parameters(name = "{index}: digestHashFunction={0}")
+  public static Collection<DigestHashFunction[]> hashFunctions() {
+    // TODO(b/112537387): Remove the array-ification and return Collection<DigestHashFunction>. This
+    // is possible in Junit4.12, but 4.11 requires the array. Bazel 0.18 will have Junit4.12, so
+    // this can change then.
+    return DigestHashFunction.getPossibleHashFunctions()
+        .stream()
+        .map(dhf -> new DigestHashFunction[] {dhf})
+        .collect(ImmutableList.toImmutableList());
+  }
+
+  @Parameter public DigestHashFunction digestHashFunction;
+
   @Before
   public final void createDirectories() throws Exception  {
-    testFS = getFreshFileSystem();
+    testFS = getFreshFileSystem(digestHashFunction);
     workingDir = testFS.getPath(getTestTmpDir());
     cleanUpWorkingDirectory(workingDir);
 
@@ -88,7 +108,8 @@ public abstract class FileSystemTest {
   /**
    * Returns an instance of the file system to test.
    */
-  protected abstract FileSystem getFreshFileSystem() throws IOException;
+  protected abstract FileSystem getFreshFileSystem(DigestHashFunction digestHashFunction)
+      throws IOException;
 
   protected boolean isSymbolicLink(File file) {
     return NativePosixFiles.isSymbolicLink(file);
@@ -567,7 +588,7 @@ public abstract class FileSystemTest {
       xFile.createDirectory();
       fail();
     } catch (IOException e) {
-      assertThat(e).hasMessage(xFile + " (File exists)");
+      assertThat(e).hasMessageThat().isEqualTo(xFile + " (File exists)");
     }
   }
 
@@ -590,7 +611,7 @@ public abstract class FileSystemTest {
       xChildOfReadonlyDir.createDirectory();
       fail();
     } catch (IOException e) {
-      assertThat(e).hasMessage(xChildOfReadonlyDir + " (Permission denied)");
+      assertThat(e).hasMessageThat().isEqualTo(xChildOfReadonlyDir + " (Permission denied)");
     }
   }
 
@@ -613,7 +634,7 @@ public abstract class FileSystemTest {
       FileSystemUtils.createEmptyFile(xChildOfReadonlyDir);
       fail();
     } catch (IOException e) {
-      assertThat(e).hasMessage(xChildOfReadonlyDir + " (Permission denied)");
+      assertThat(e).hasMessageThat().isEqualTo(xChildOfReadonlyDir + " (Permission denied)");
     }
   }
 
@@ -668,7 +689,7 @@ public abstract class FileSystemTest {
       if (ex instanceof FileNotFoundException) {
         fail("The method should throw an object of class IOException.");
       }
-      assertThat(ex).hasMessage(xFile + " (Not a directory)");
+      assertThat(ex).hasMessageThat().isEqualTo(xFile + " (Not a directory)");
     }
   }
 
@@ -679,7 +700,7 @@ public abstract class FileSystemTest {
       somePath.getDirectoryEntries();
       fail("FileNotFoundException not thrown.");
     } catch (Exception x) {
-      assertThat(x).hasMessage(somePath + " (No such file or directory)");
+      assertThat(x).hasMessageThat().isEqualTo(somePath + " (No such file or directory)");
     }
   }
 
@@ -753,7 +774,7 @@ public abstract class FileSystemTest {
       xNonEmptyDirectory.delete();
       fail();
     } catch (IOException e) {
-      assertThat(e).hasMessage(xNonEmptyDirectory + " (Directory not empty)");
+      assertThat(e).hasMessageThat().isEqualTo(xNonEmptyDirectory + " (Directory not empty)");
     }
   }
 
@@ -779,6 +800,148 @@ public abstract class FileSystemTest {
     }
 
     assertThat(xNonEmptyDirectoryFoo.isFile()).isTrue();
+  }
+
+  @Test
+  public void testDeleteTreeDeletesContents() throws IOException {
+    Path topDir = absolutize("top-dir");
+    Path file1 = absolutize("top-dir/file-1");
+    Path file2 = absolutize("top-dir/file-2");
+    Path aDir = absolutize("top-dir/a-dir");
+    Path file3 = absolutize("top-dir/a-dir/file-3");
+    Path file4 = absolutize("file-4");
+
+    topDir.createDirectory();
+    FileSystemUtils.createEmptyFile(file1);
+    FileSystemUtils.createEmptyFile(file2);
+    aDir.createDirectory();
+    FileSystemUtils.createEmptyFile(file3);
+    FileSystemUtils.createEmptyFile(file4);
+
+    topDir.deleteTree();
+    assertThat(file4.exists()).isTrue();
+    assertThat(topDir.exists()).isFalse();
+    assertThat(file1.exists()).isFalse();
+    assertThat(file2.exists()).isFalse();
+    assertThat(aDir.exists()).isFalse();
+    assertThat(file3.exists()).isFalse();
+  }
+
+  @Test
+  public void testDeleteTreeDeletesUnreadableDirectories() throws IOException {
+    Path topDir = absolutize("top-dir");
+    Path aDir = absolutize("top-dir/a-dir");
+    Path file1 = absolutize("top-dir/a-dir/file1");
+    Path file2 = absolutize("top-dir/a-dir/file2");
+
+    topDir.createDirectory();
+    aDir.createDirectory();
+    FileSystemUtils.createEmptyFile(file1);
+    FileSystemUtils.createEmptyFile(file2);
+
+    try {
+      aDir.setReadable(false);
+      aDir.setExecutable(false);
+    } catch (UnsupportedOperationException e) {
+      // Skip testing if the file system does not support clearing the needed attibutes.
+      return;
+    }
+
+    topDir.deleteTree();
+    assertThat(topDir.exists()).isFalse();
+    assertThat(aDir.exists()).isFalse();
+    assertThat(file1.exists()).isFalse();
+    assertThat(file2.exists()).isFalse();
+  }
+
+  @Test
+  public void testDeleteTreeDeletesUnwritableDirectories() throws IOException {
+    Path topDir = absolutize("top-dir");
+    Path aDir = absolutize("top-dir/a-dir");
+    Path file1 = absolutize("top-dir/a-dir/file1");
+    Path file2 = absolutize("top-dir/a-dir/file2");
+
+    topDir.createDirectory();
+    aDir.createDirectory();
+    FileSystemUtils.createEmptyFile(file1);
+    FileSystemUtils.createEmptyFile(file2);
+
+    try {
+      aDir.setWritable(false);
+    } catch (UnsupportedOperationException e) {
+      // Skip testing if the file system does not support clearing the needed attibutes.
+      return;
+    }
+
+    topDir.deleteTree();
+    assertThat(topDir.exists()).isFalse();
+    assertThat(aDir.exists()).isFalse();
+    assertThat(file1.exists()).isFalse();
+    assertThat(file2.exists()).isFalse();
+  }
+
+  @Test
+  public void testDeleteTreeDoesNotFollowInnerLinks() throws IOException {
+    Path topDir = absolutize("top-dir");
+    Path file = absolutize("file");
+    Path outboundLink = absolutize("top-dir/outbound-link");
+
+    topDir.createDirectory();
+    FileSystemUtils.createEmptyFile(file);
+    outboundLink.createSymbolicLink(file);
+
+    topDir.deleteTree();
+    assertThat(file.exists()).isTrue();
+    assertThat(topDir.exists()).isFalse();
+  }
+
+  @Test
+  public void testDeleteTreeDoesNotFollowTopLink() throws IOException {
+    Path topDir = absolutize("top-dir");
+    Path file = absolutize("file");
+
+    FileSystemUtils.createEmptyFile(file);
+    topDir.createSymbolicLink(file);
+
+    topDir.deleteTree();
+    assertThat(file.exists()).isTrue();
+    assertThat(topDir.exists()).isFalse();
+  }
+
+  @Test
+  public void testTreesDeletesBelowDeletesContentsOnly() throws IOException {
+    Path topDir = absolutize("top-dir");
+    Path file = absolutize("top-dir/file");
+    Path subdir = absolutize("top-dir/subdir");
+
+    topDir.createDirectory();
+    FileSystemUtils.createEmptyFile(file);
+    subdir.createDirectory();
+
+    topDir.deleteTreesBelow();
+    assertThat(topDir.exists()).isTrue();
+    assertThat(file.exists()).isFalse();
+    assertThat(subdir.exists()).isFalse();
+  }
+
+  @Test
+  public void testTreesDeletesBelowIgnoresMissingTopDir() throws IOException {
+    Path topDir = absolutize("top-dir");
+
+    assertThat(topDir.exists()).isFalse();
+    topDir.deleteTreesBelow(); // Expect no exception.
+    assertThat(topDir.exists()).isFalse();
+  }
+
+  @Test
+  public void testTreesDeletesBelowIgnoresNonDirectories() throws IOException {
+    Path topFile = absolutize("top-file");
+
+    FileSystemUtils.createEmptyFile(topFile);
+
+    assertThat(topFile.exists()).isTrue();
+    topFile.deleteTreesBelow(); // Expect no exception.
+    assertThat(topFile.exists()).isTrue();
   }
 
   // Test the date functions
@@ -839,7 +1002,7 @@ public abstract class FileSystemTest {
       newPath.getLastModifiedTime();
       fail("FileNotFoundException not thrown!");
     } catch (FileNotFoundException x) {
-      assertThat(x).hasMessage(newPath + " (No such file or directory)");
+      assertThat(x).hasMessageThat().isEqualTo(newPath + " (No such file or directory)");
     }
   }
 
@@ -851,7 +1014,7 @@ public abstract class FileSystemTest {
       newPath.getFileSize();
       fail("FileNotFoundException not thrown.");
     } catch (FileNotFoundException e) {
-      assertThat(e).hasMessage(newPath + " (No such file or directory)");
+      assertThat(e).hasMessageThat().isEqualTo(newPath + " (No such file or directory)");
     }
   }
 
@@ -955,7 +1118,7 @@ public abstract class FileSystemTest {
       xEmptyDirectory.getOutputStream();
       fail("The Exception was not thrown!");
     } catch (IOException ex) {
-      assertThat(ex).hasMessage(xEmptyDirectory + " (Is a directory)");
+      assertThat(ex).hasMessageThat().isEqualTo(xEmptyDirectory + " (Is a directory)");
     }
   }
 
@@ -965,7 +1128,7 @@ public abstract class FileSystemTest {
       xEmptyDirectory.getInputStream();
       fail("The Exception was not thrown!");
     } catch (IOException ex) {
-      assertThat(ex).hasMessage(xEmptyDirectory + " (Is a directory)");
+      assertThat(ex).hasMessageThat().isEqualTo(xEmptyDirectory + " (Is a directory)");
     }
   }
 
@@ -1000,7 +1163,7 @@ public abstract class FileSystemTest {
       xEmptyDirectory.renameTo(xNonEmptyDirectory);
       fail();
     } catch (IOException e) {
-      assertThat(e).hasMessageThat().endsWith(" (Directory not empty)");
+      assertThat(e).hasMessageThat().containsMatch("\\((File exists|Directory not empty)\\)$");
     }
   }
 
@@ -1025,7 +1188,9 @@ public abstract class FileSystemTest {
       xEmptyDirectory.renameTo(xFile);
       fail();
     } catch (IOException e) {
-      assertThat(e).hasMessage(xEmptyDirectory + " -> " + xFile + " (Not a directory)");
+      assertThat(e)
+          .hasMessageThat()
+          .isEqualTo(xEmptyDirectory + " -> " + xFile + " (Not a directory)");
     }
   }
 
@@ -1048,7 +1213,9 @@ public abstract class FileSystemTest {
       xFile.renameTo(xEmptyDirectory);
       fail();
     } catch (IOException e) {
-      assertThat(e).hasMessage(xFile + " -> " + xEmptyDirectory + " (Is a directory)");
+      assertThat(e)
+          .hasMessageThat()
+          .isEqualTo(xFile + " -> " + xEmptyDirectory + " (Is a directory)");
     }
   }
 
@@ -1121,7 +1288,7 @@ public abstract class FileSystemTest {
       xNothing.isExecutable();
       fail("No exception thrown.");
     } catch (FileNotFoundException ex) {
-      assertThat(ex).hasMessage(xNothing + " (No such file or directory)");
+      assertThat(ex).hasMessageThat().isEqualTo(xNothing + " (No such file or directory)");
     }
   }
 
@@ -1131,7 +1298,7 @@ public abstract class FileSystemTest {
       xNothing.setExecutable(true);
       fail("No exception thrown.");
     } catch (FileNotFoundException ex) {
-      assertThat(ex).hasMessage(xNothing + " (No such file or directory)");
+      assertThat(ex).hasMessageThat().isEqualTo(xNothing + " (No such file or directory)");
     }
   }
 
@@ -1141,7 +1308,7 @@ public abstract class FileSystemTest {
       xNothing.isWritable();
       fail("No exception thrown.");
     } catch (FileNotFoundException ex) {
-      assertThat(ex).hasMessage(xNothing + " (No such file or directory)");
+      assertThat(ex).hasMessageThat().isEqualTo(xNothing + " (No such file or directory)");
     }
   }
 
@@ -1151,7 +1318,7 @@ public abstract class FileSystemTest {
       xNothing.setWritable(false);
       fail("No exception thrown.");
     } catch (FileNotFoundException ex) {
-      assertThat(ex).hasMessage(xNothing + " (No such file or directory)");
+      assertThat(ex).hasMessageThat().isEqualTo(xNothing + " (No such file or directory)");
     }
   }
 
@@ -1199,7 +1366,7 @@ public abstract class FileSystemTest {
       FileSystemUtils.writeContent(xFile, "hello, world!".getBytes(UTF_8));
       fail("No exception thrown.");
     } catch (IOException e) {
-      assertThat(e).hasMessage(xFile + " (Permission denied)");
+      assertThat(e).hasMessageThat().isEqualTo(xFile + " (Permission denied)");
     }
   }
 
@@ -1211,7 +1378,7 @@ public abstract class FileSystemTest {
       FileSystemUtils.readContent(xFile);
       fail("No exception thrown.");
     } catch (IOException e) {
-      assertThat(e).hasMessage(xFile + " (Permission denied)");
+      assertThat(e).hasMessageThat().isEqualTo(xFile + " (Permission denied)");
     }
   }
 
@@ -1224,7 +1391,7 @@ public abstract class FileSystemTest {
       FileSystemUtils.createEmptyFile(xNonEmptyDirectoryBar);
       fail("No exception thrown.");
     } catch (IOException e) {
-      assertThat(e).hasMessage(xNonEmptyDirectoryBar + " (Permission denied)");
+      assertThat(e).hasMessageThat().isEqualTo(xNonEmptyDirectoryBar + " (Permission denied)");
     }
   }
 
@@ -1237,7 +1404,7 @@ public abstract class FileSystemTest {
       xNonEmptyDirectoryBar.createDirectory();
       fail("No exception thrown.");
     } catch (IOException e) {
-      assertThat(e).hasMessage(xNonEmptyDirectoryBar + " (Permission denied)");
+      assertThat(e).hasMessageThat().isEqualTo(xNonEmptyDirectoryBar + " (Permission denied)");
     }
   }
 
@@ -1274,7 +1441,7 @@ public abstract class FileSystemTest {
       xNonEmptyDirectoryFoo.delete();
       fail("No exception thrown.");
     } catch (IOException e) {
-      assertThat(e).hasMessage(xNonEmptyDirectoryFoo + " (Permission denied)");
+      assertThat(e).hasMessageThat().isEqualTo(xNonEmptyDirectoryFoo + " (Permission denied)");
     }
   }
 
@@ -1288,27 +1455,27 @@ public abstract class FileSystemTest {
         createSymbolicLink(xNonEmptyDirectoryBar, xNonEmptyDirectoryFoo);
         fail("No exception thrown.");
       } catch (IOException e) {
-        assertThat(e).hasMessage(xNonEmptyDirectoryBar + " (Permission denied)");
+        assertThat(e).hasMessageThat().isEqualTo(xNonEmptyDirectoryBar + " (Permission denied)");
       }
     }
   }
 
   @Test
-  public void testGetMD5DigestForEmptyFile() throws Exception {
-    Fingerprint fp = new Fingerprint();
+  public void testGetDigestForEmptyFile() throws Exception {
+    Fingerprint fp = new Fingerprint(digestHashFunction);
     fp.addBytes(new byte[0]);
     assertThat(fp.hexDigestAndReset())
         .isEqualTo(BaseEncoding.base16().lowerCase().encode(xFile.getDigest()));
   }
 
   @Test
-  public void testGetMD5Digest() throws Exception {
+  public void testGetDigest() throws Exception {
     byte[] buffer = new byte[500000];
     for (int i = 0; i < buffer.length; ++i) {
       buffer[i] = 1;
     }
     FileSystemUtils.writeContent(xFile, buffer);
-    Fingerprint fp = new Fingerprint();
+    Fingerprint fp = new Fingerprint(digestHashFunction);
     fp.addBytes(buffer);
     assertThat(fp.hexDigestAndReset())
         .isEqualTo(BaseEncoding.base16().lowerCase().encode(xFile.getDigest()));
@@ -1319,7 +1486,7 @@ public abstract class FileSystemTest {
     try {
       xNothing.stat();
       fail("Expected IOException");
-    } catch(IOException e) {
+    } catch (IOException e) {
       // Do nothing.
     }
   }
@@ -1385,7 +1552,9 @@ public abstract class FileSystemTest {
       xFile.createHardLink(xLink);
       fail("expected FileNotFoundException: File \"xFile\" linked from \"xLink\" does not exist");
     } catch (FileNotFoundException expected) {
-      assertThat(expected).hasMessage("File \"xFile\" linked from \"xLink\" does not exist");
+      assertThat(expected)
+          .hasMessageThat()
+          .isEqualTo("File \"xFile\" linked from \"xLink\" does not exist");
     }
     assertThat(xFile.exists()).isFalse();
     assertThat(xLink.exists()).isFalse();
@@ -1406,7 +1575,9 @@ public abstract class FileSystemTest {
       xFile.createHardLink(xLink);
       fail("expected FileNotFoundException: File \"xFile\" linked from \"xLink\" does not exist");
     } catch (FileNotFoundException expected) {
-      assertThat(expected).hasMessage("File \"xFile\" linked from \"xLink\" does not exist");
+      assertThat(expected)
+          .hasMessageThat()
+          .isEqualTo("File \"xFile\" linked from \"xLink\" does not exist");
     }
     assertThat(xFile.exists()).isFalse();
     assertThat(xLink.exists()).isTrue();
@@ -1425,7 +1596,7 @@ public abstract class FileSystemTest {
       xFile.createHardLink(xLink);
       fail("expected FileAlreadyExistsException: New link file \"xLink\" already exists");
     } catch (FileAlreadyExistsException expected) {
-      assertThat(expected).hasMessage("New link file \"xLink\" already exists");
+      assertThat(expected).hasMessageThat().isEqualTo("New link file \"xLink\" already exists");
     }
     assertThat(xFile.exists()).isTrue();
     assertThat(xLink.exists()).isTrue();

@@ -28,18 +28,22 @@ import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.ProtoUtils;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClassProvider;
+import com.google.devtools.build.lib.packages.TriState;
 import com.google.devtools.build.lib.pkgcache.PackageCacheOptions;
 import com.google.devtools.build.lib.query2.proto.proto2api.Build.AllowedRuleClassInfo;
 import com.google.devtools.build.lib.query2.proto.proto2api.Build.AttributeDefinition;
+import com.google.devtools.build.lib.query2.proto.proto2api.Build.AttributeValue;
 import com.google.devtools.build.lib.query2.proto.proto2api.Build.BuildLanguage;
 import com.google.devtools.build.lib.query2.proto.proto2api.Build.RuleDefinition;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
+import com.google.devtools.build.lib.syntax.Type;
 import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.devtools.build.lib.util.ProcessUtils;
 import com.google.devtools.build.lib.util.StringUtilities;
 import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.common.options.OptionsProvider;
+import com.google.devtools.common.options.OptionsParsingResult;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.lang.management.GarbageCollectorMXBean;
@@ -49,7 +53,11 @@ import java.lang.management.MemoryUsage;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * An item that is returned by <code>blaze info</code>.
@@ -270,6 +278,32 @@ public abstract class InfoItem {
     }
   }
 
+  /** Info item for server_log path. */
+  public static class ServerLogInfoItem extends InfoItem {
+    private static final Logger logger = Logger.getLogger(ServerLogInfoItem.class.getName());
+
+    /**
+     * Constructs an info item for the server log path.
+     *
+     * @param productName name of the tool whose server log path will be queried
+     */
+    public ServerLogInfoItem(String productName) {
+      super("server_log", productName + " server log path", false);
+    }
+
+    @Override
+    public byte[] get(Supplier<BuildConfiguration> configurationSupplier, CommandEnvironment env)
+        throws AbruptExitException {
+      try {
+        Optional<Path> path = env.getRuntime().getServerLogPath();
+        return print(path.map(Path::toString).orElse(""));
+      } catch (IOException e) {
+        logger.log(Level.WARNING, "Failed to determine server log location", e);
+        return print("UNKNOWN LOG LOCATION");
+      }
+    }
+  }
+
   /**
    * Info item for release
    */
@@ -308,9 +342,9 @@ public abstract class InfoItem {
    * Info item for package_path
    */
   public static final class PackagePathInfoItem extends InfoItem {
-    private final OptionsProvider commandOptions;
+    private final OptionsParsingResult commandOptions;
 
-    public PackagePathInfoItem(OptionsProvider commandOptions) {
+    public PackagePathInfoItem(OptionsParsingResult commandOptions) {
       super("package_path",
           "The search path for resolving package labels.",
           false);
@@ -551,24 +585,23 @@ public abstract class InfoItem {
   }
 
   /**
-   * Info item for the default package. It is deprecated, it still works, when
-   * explicitly requested, but are not shown by default. It prints multi-line messages and thus
-   * don't play well with grep. We don't print them unless explicitly requested.
+   * Info item for the default package. It is deprecated, it still works, when explicitly requested,
+   * but are not shown by default. It prints multi-line messages and thus don't play well with grep.
+   * We don't print them unless explicitly requested.
+   *
    * @deprecated
    */
+  // TODO(lberki): Try to remove this using an incompatible flag.
   @Deprecated
   public static final class DefaultsPackageInfoItem extends InfoItem {
     public DefaultsPackageInfoItem() {
-      super("defaults-package",
-          "Default packages used as implicit dependencies",
-          true);
+      super("defaults-package", "Obsolete. Retained for backwards compatibility.", true);
     }
 
     @Override
-    public byte[] get(Supplier<BuildConfiguration> configurationSupplier, CommandEnvironment env)
-        throws AbruptExitException {
+    public byte[] get(Supplier<BuildConfiguration> configurationSupplier, CommandEnvironment env) {
       checkNotNull(env);
-      return print(env.getRuntime().getDefaultsPackageContent());
+      return print("");
     }
   }
 
@@ -582,13 +615,17 @@ public abstract class InfoItem {
       info.setPolicy(AllowedRuleClassInfo.AllowedRuleClasses.SPECIFIED);
       Predicate<RuleClass> filter = attr.getAllowedRuleClassesPredicate();
       for (RuleClass otherClass : Iterables.filter(ruleClasses, filter)) {
-        if (otherClass.isDocumented()) {
+        if (!isAbstractRule(otherClass)) {
           info.addAllowedRuleClass(otherClass.getName());
         }
       }
     }
 
     return info.build();
+  }
+
+  private static boolean isAbstractRule(RuleClass c) {
+    return c.getName().startsWith("$");
   }
 
   /**
@@ -598,28 +635,37 @@ public abstract class InfoItem {
     BuildLanguage.Builder resultPb = BuildLanguage.newBuilder();
     Collection<RuleClass> ruleClasses = provider.getRuleClassMap().values();
     for (RuleClass ruleClass : ruleClasses) {
-      if (!ruleClass.isDocumented()) {
+      if (isAbstractRule(ruleClass)) {
         continue;
       }
 
       RuleDefinition.Builder rulePb = RuleDefinition.newBuilder();
       rulePb.setName(ruleClass.getName());
       for (Attribute attr : ruleClass.getAttributes()) {
-        if (!attr.isDocumented()) {
-          continue;
-        }
-
+        Type<?> t = attr.getType();
         AttributeDefinition.Builder attrPb = AttributeDefinition.newBuilder();
         attrPb.setName(attr.getName());
-        // The protocol compiler, in its infinite wisdom, generates the field as one of the
-        // integer type and the getTypeEnum() method is missing. WTF?
-        attrPb.setType(ProtoUtils.getDiscriminatorFromType(attr.getType()));
+        attrPb.setType(ProtoUtils.getDiscriminatorFromType(t));
         attrPb.setMandatory(attr.isMandatory());
+        attrPb.setAllowEmpty(!attr.isNonEmpty());
+        attrPb.setAllowSingleFile(attr.isSingleArtifact());
+        attrPb.setConfigurable(attr.isConfigurable());
+        attrPb.setCfgIsHost(attr.getTransitionFactory().isHost());
 
-        if (BuildType.isLabelType(attr.getType())) {
-          attrPb.setAllowedRuleClasses(getAllowedRuleClasses(ruleClasses, attr));
+        // Encode default value, if simple.
+        Object v = attr.getDefaultValueUnchecked();
+        if (!(v == null
+            || v instanceof Attribute.ComputedDefault
+            || v instanceof Attribute.SkylarkComputedDefaultTemplate
+            || v instanceof Attribute.LateBoundDefault
+            || v == t.getDefaultValue())) {
+          attrPb.setDefault(convertAttrValue(t, v));
         }
-
+        attrPb.setExecutable(attr.isExecutable());
+        if (BuildType.isLabelType(t)) {
+          attrPb.setAllowedRuleClasses(getAllowedRuleClasses(ruleClasses, attr));
+          attrPb.setNodep(t.getLabelClass() == Type.LabelClass.NONDEP_REFERENCE);
+        }
         rulePb.addAttribute(attrPb);
       }
 
@@ -627,6 +673,44 @@ public abstract class InfoItem {
     }
 
     return resultPb.build().toByteArray();
+  }
+
+  // convertAttrValue converts attribute value v of type to t an AttributeValue message.
+  private static AttributeValue convertAttrValue(Type<?> t, Object v) {
+    AttributeValue.Builder b = AttributeValue.newBuilder();
+    if (v instanceof Map) {
+      Type.DictType<?, ?> dictType = (Type.DictType<?, ?>) t;
+      for (Map.Entry<?, ?> entry : ((Map<?, ?>) v).entrySet()) {
+        b.addDictBuilder()
+            .setKey(entry.getKey().toString())
+            .setValue(convertAttrValue(dictType.getValueType(), entry.getValue()))
+            .build();
+      }
+    } else if (v instanceof List) {
+      for (Object elem : (List<?>) v) {
+        b.addList(convertAttrValue(t.getListElementType(), elem));
+      }
+    } else if (t == BuildType.LICENSE) {
+      // TODO(adonovan): need dual function of parseLicense.
+      // Treat as empty list for now.
+    } else if (t == BuildType.DISTRIBUTIONS) {
+      // TODO(adonovan): need dual function of parseDistributions.
+      // Treat as empty list for now.
+    } else if (t == Type.STRING) {
+      b.setString((String) v);
+    } else if (t == Type.INTEGER) {
+      b.setInt((Integer) v);
+    } else if (t == Type.BOOLEAN) {
+      b.setBool((Boolean) v);
+    } else if (t == BuildType.TRISTATE) {
+      b.setInt(((TriState) v).toInt());
+    } else if (BuildType.isLabelType(t)) { // case order matters!
+      b.setString(v.toString());
+    } else {
+      // No native rule attribute of this type (FilesetEntry?) has a default value.
+      throw new IllegalStateException("unexpected type of attribute default value: " + t);
+    }
+    return b.build();
   }
 
   /**
@@ -659,9 +743,9 @@ public abstract class InfoItem {
    */
   @Deprecated
   public static final class DefaultPackagePathInfoItem extends InfoItem {
-    private final OptionsProvider commandOptions;
+    private final OptionsParsingResult commandOptions;
 
-    public DefaultPackagePathInfoItem(OptionsProvider commandOptions) {
+    public DefaultPackagePathInfoItem(OptionsParsingResult commandOptions) {
       super("default-package-path",
           "The default package path",
           true);

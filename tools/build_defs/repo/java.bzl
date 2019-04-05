@@ -64,7 +64,7 @@ Sometimes jars are distributed with their dependencies shaded. What this means
 is that com.initech.tps will contain classes like
 com.initech.tps.shade.com.fakecorp.foo. This is less problematic, since it
 won't lead to mysterious classpath conflicts. But it can lead to inefficient
-use of space and make the license of the the end product more difficult to
+use of space and make the license of the end product more difficult to
 determine.
 
 #### Licensing
@@ -163,7 +163,7 @@ disjoint from production code.
 
 ### Provided Dependencies
 
-The feature in Bazel most analagous to Maven's provided scope is the neverlink
+The feature in Bazel most analogous to Maven's provided scope is the neverlink
 attribute. This should be used in rare circumstances when a distributed jar
 will be loaded into a runtime environment where certain dependencies can be
 reasonably expected to already be provided.

@@ -14,11 +14,13 @@
 package com.google.devtools.build.lib.skyframe;
 
 import com.google.devtools.build.lib.vfs.RootedPath;
+import com.google.devtools.build.lib.vfs.Symlinks;
+import com.google.devtools.build.lib.vfs.UnixGlob.FilesystemCalls;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionException;
 import com.google.devtools.build.skyframe.SkyKey;
-import com.google.devtools.build.skyframe.SkyValue;
 import java.io.IOException;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * A {@link SkyFunction} for {@link DirectoryListingStateValue}s.
@@ -30,21 +32,31 @@ public class DirectoryListingStateFunction implements SkyFunction {
 
   private final ExternalFilesHelper externalFilesHelper;
 
-  public DirectoryListingStateFunction(ExternalFilesHelper externalFilesHelper) {
+  /**
+   * A file-system abstraction to use. This can e.g. be a {@link PerBuildSyscallCache} which helps
+   * re-use the results of expensive readdir() operations, that are likely already executed for
+   * evaluating globs.
+   */
+  private final AtomicReference<FilesystemCalls> syscallCache;
+
+  public DirectoryListingStateFunction(
+      ExternalFilesHelper externalFilesHelper, AtomicReference<FilesystemCalls> syscallCache) {
     this.externalFilesHelper = externalFilesHelper;
+    this.syscallCache = syscallCache;
   }
 
   @Override
-  public SkyValue compute(SkyKey skyKey, Environment env)
+  public DirectoryListingStateValue compute(SkyKey skyKey, Environment env)
       throws DirectoryListingStateFunctionException, InterruptedException {
     RootedPath dirRootedPath = (RootedPath) skyKey.argument();
 
     try {
-      externalFilesHelper.maybeHandleExternalFile(dirRootedPath, env);
+      externalFilesHelper.maybeHandleExternalFile(dirRootedPath, true, env);
       if (env.valuesMissing()) {
         return null;
       }
-      return DirectoryListingStateValue.create(dirRootedPath);
+      return DirectoryListingStateValue.create(
+          syscallCache.get().readdir(dirRootedPath.asPath(), Symlinks.NOFOLLOW));
     } catch (ExternalFilesHelper.NonexistentImmutableExternalFileException e) {
       // DirectoryListingStateValue.key assumes the path exists. This exception here is therefore
       // indicative of a programming bug.

@@ -16,12 +16,16 @@ package com.google.devtools.build.lib.skyframe;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Collections2;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Multimap;
 import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.events.EventHandler;
+import com.google.devtools.build.lib.packages.AdvertisedProviderSet;
+import com.google.devtools.build.lib.packages.Aspect;
+import com.google.devtools.build.lib.packages.AspectDefinition;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.BuildFileContainsErrorsException;
 import com.google.devtools.build.lib.packages.DependencyFilter;
@@ -39,7 +43,6 @@ import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 import com.google.devtools.build.skyframe.ValueOrException2;
 import java.util.Collection;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -54,13 +57,12 @@ import javax.annotation.Nullable;
  * its transitive dependencies.
  *
  * <p>{@code TransitiveBaseTraversalFunction} asks for one to be constructed via {@link
- * #processTarget}, and then asks for it to be updated based on the current target's
- * attributes' dependencies via {@link #processDeps}, and then asks for it to be updated based
- * on the current target' aspects' dependencies via {@link #processDeps}. Finally, it calls
- * {@link #computeSkyValue} with the {#code ProcessedTargets} to get the {@link SkyValue} to
- * return.
+ * #processTarget}, and then asks for it to be updated based on the current target's attributes'
+ * dependencies via {@link #processDeps}, and then asks for it to be updated based on the current
+ * target' aspects' dependencies via {@link #processDeps}. Finally, it calls {@link
+ * #computeSkyValue} with the {#code ProcessedTargets} to get the {@link SkyValue} to return.
  */
-abstract class TransitiveBaseTraversalFunction<TProcessedTargets> implements SkyFunction {
+abstract class TransitiveBaseTraversalFunction<ProcessedTargetsT> implements SkyFunction {
   /**
    * Returns a {@link SkyKey} corresponding to the traversal of a target specified by {@code label}
    * and its transitive dependencies.
@@ -77,22 +79,21 @@ abstract class TransitiveBaseTraversalFunction<TProcessedTargets> implements Sky
    */
   abstract SkyKey getKey(Label label);
 
-  abstract TProcessedTargets processTarget(Label label, TargetAndErrorIfAny targetAndErrorIfAny);
+  abstract ProcessedTargetsT processTarget(Label label, TargetAndErrorIfAny targetAndErrorIfAny);
 
   abstract void processDeps(
-      TProcessedTargets processedTargets,
+      ProcessedTargetsT processedTargets,
       EventHandler eventHandler,
       TargetAndErrorIfAny targetAndErrorIfAny,
       Iterable<Map.Entry<SkyKey, ValueOrException2<NoSuchPackageException, NoSuchTargetException>>>
-          depEntries)
-      throws InterruptedException;
+          depEntries);
 
   /**
    * Returns a {@link SkyValue} based on the target and any errors it has, and the values
    * accumulated across it and a traversal of its transitive dependencies.
    */
-  abstract SkyValue computeSkyValue(TargetAndErrorIfAny targetAndErrorIfAny,
-      TProcessedTargets processedTargets);
+  abstract SkyValue computeSkyValue(
+      TargetAndErrorIfAny targetAndErrorIfAny, ProcessedTargetsT processedTargets);
 
   /**
    * Returns a {@link TargetMarkerValue} corresponding to the {@param targetMarkerKey} or {@code
@@ -148,7 +149,7 @@ abstract class TransitiveBaseTraversalFunction<TProcessedTargets> implements Sky
       return null;
     }
 
-    TProcessedTargets processedTargets = processTarget(label, targetAndErrorIfAny);
+    ProcessedTargetsT processedTargets = processTarget(label, targetAndErrorIfAny);
     processDeps(processedTargets, env.getListener(), targetAndErrorIfAny, depMap.entrySet());
     processDeps(processedTargets, env.getListener(), targetAndErrorIfAny, labelAspectEntries);
 
@@ -185,37 +186,53 @@ abstract class TransitiveBaseTraversalFunction<TProcessedTargets> implements Sky
       Map<SkyKey, ValueOrException2<NoSuchPackageException, NoSuchTargetException>> depMap,
       Environment env)
       throws InterruptedException {
-    List<SkyKey> depKeys = Lists.newArrayList();
-    if (target instanceof Rule) {
-      Map<Label, ValueOrException2<NoSuchPackageException, NoSuchTargetException>> labelDepMap =
-          new HashMap<>(depMap.size());
-      for (Map.Entry<SkyKey, ValueOrException2<NoSuchPackageException, NoSuchTargetException>>
-          entry : depMap.entrySet()) {
-        labelDepMap.put(argumentFromKey(entry.getKey()), entry.getValue());
-      }
+    if (!(target instanceof Rule)) {
+      // Aspects can be declared only for Rules.
+      return ImmutableList.of();
+    }
 
-      Multimap<Attribute, Label> transitions =
-          ((Rule) target).getTransitions(DependencyFilter.NO_NODEP_ATTRIBUTES);
-      for (Map.Entry<Attribute, Label> entry : transitions.entries()) {
-        ValueOrException2<NoSuchPackageException, NoSuchTargetException> value =
-            labelDepMap.get(entry.getValue());
-        for (Label label :
-                getAspectLabels((Rule) target, entry.getKey(), entry.getValue(), value, env)) {
-          depKeys.add(getKey(label));
+    Rule rule = (Rule) target;
+
+    List<SkyKey> depKeys = Lists.newArrayList();
+    Multimap<Attribute, Label> transitions =
+        rule.getTransitions(DependencyFilter.NO_NODEP_ATTRIBUTES);
+    for (Attribute attribute : transitions.keySet()) {
+      for (Aspect aspect : attribute.getAspects(rule)) {
+        if (hasDepThatSatisfies(aspect, transitions.get(attribute), depMap, env)) {
+          AspectDefinition.forEachLabelDepFromAllAttributesOfAspect(
+              rule,
+              aspect,
+              DependencyFilter.ALL_DEPS,
+              (aspectAttribute, aspectLabel) -> depKeys.add(getKey(aspectLabel)));
         }
       }
     }
     return depKeys;
   }
 
-  /** Get the Aspect-related Label deps for the given edge. */
-  protected abstract Collection<Label> getAspectLabels(
-      Rule fromRule,
-      Attribute attr,
+  @Nullable
+  protected abstract AdvertisedProviderSet getAdvertisedProviderSet(
       Label toLabel,
-      ValueOrException2<NoSuchPackageException, NoSuchTargetException> toVal,
+      @Nullable ValueOrException2<NoSuchPackageException, NoSuchTargetException> toVal,
       Environment env)
       throws InterruptedException;
+
+  private final boolean hasDepThatSatisfies(
+      Aspect aspect,
+      Iterable<Label> depLabels,
+      Map<SkyKey, ValueOrException2<NoSuchPackageException, NoSuchTargetException>> fullDepMap,
+      Environment env)
+      throws InterruptedException {
+    for (Label depLabel : depLabels) {
+      AdvertisedProviderSet advertisedProviderSet =
+          getAdvertisedProviderSet(depLabel, fullDepMap.get(depLabel), env);
+      if (advertisedProviderSet != null
+          && AspectDefinition.satisfies(aspect, advertisedProviderSet)) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   // TODO(bazel-team): Unify this logic with that in LabelVisitor, and possibly DependencyResolver.
   private static Collection<Label> getLabelDeps(Target target) throws InterruptedException {

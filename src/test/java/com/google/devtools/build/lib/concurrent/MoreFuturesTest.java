@@ -156,7 +156,7 @@ public class MoreFuturesTest {
       }
     } finally {
       // The @After-annotated shutdownExecutor method blocks on completion of all tasks. Since we
-      // submitted a bunch of tasks that never complete, we need to explictly cancel them.
+      // submitted a bunch of tasks that never complete, we need to explicitly cancel them.
       for (DelayedFuture delayedFuture : futureList) {
         delayedFuture.cancel(/*mayInterruptIfRunning=*/ true);
       }
@@ -183,7 +183,7 @@ public class MoreFuturesTest {
       MoreFutures.waitForAllInterruptiblyFailFast(futureList);
       fail();
     } catch (ExecutionException ee) {
-      assertThat(ee).hasCauseThat().hasMessage("I like to fail!!");
+      assertThat(ee).hasCauseThat().hasMessageThat().isEqualTo("I like to fail!!");
     }
   }
 

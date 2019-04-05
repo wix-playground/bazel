@@ -27,9 +27,9 @@
 #include <shlobj.h>        // SHGetKnownFolderPath
 
 #include <algorithm>
-#include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <mutex>  // NOLINT
 #include <set>
 #include <sstream>
@@ -89,15 +89,16 @@ class WindowsDumper : public Dumper {
   bool Finish(string* error) override;
 
  private:
-  WindowsDumper()
-      : threadpool_(NULL), cleanup_group_(NULL), was_error_(false) {}
+  WindowsDumper() : threadpool_(NULL), cleanup_group_(NULL) {}
 
   PTP_POOL threadpool_;
   PTP_CLEANUP_GROUP cleanup_group_;
   TP_CALLBACK_ENVIRON threadpool_env_;
+
   std::mutex dir_cache_lock_;
   std::set<string> dir_cache_;
-  std::atomic_bool was_error_;
+
+  std::mutex error_lock_;
   string error_msg_;
 };
 
@@ -107,7 +108,7 @@ class DumpContext {
  public:
   DumpContext(unique_ptr<uint8_t[]> data, const size_t size, const string path,
               std::mutex* dir_cache_lock, std::set<string>* dir_cache,
-              std::atomic_bool* was_error, string* error_msg);
+              std::mutex* error_lock_, string* error_msg);
   void Run();
 
  private:
@@ -116,9 +117,11 @@ class DumpContext {
   unique_ptr<uint8_t[]> data_;
   const size_t size_;
   const string path_;
+
   std::mutex* dir_cache_lock_;
   std::set<string>* dir_cache_;
-  std::atomic_bool* was_error_;
+
+  std::mutex* error_lock_;
   string* error_msg_;
 };
 
@@ -168,27 +171,25 @@ WindowsDumper* WindowsDumper::Create(string* error) {
 
 void WindowsDumper::Dump(const void* data, const size_t size,
                          const string& path) {
-  if (was_error_) {
-    return;
+  {
+    std::lock_guard<std::mutex> g(error_lock_);
+    if (!error_msg_.empty()) {
+      return;
+    }
   }
 
   unique_ptr<uint8_t[]> data_copy(new uint8_t[size]);
   memcpy(data_copy.get(), data, size);
   unique_ptr<DumpContext> ctx(new DumpContext(std::move(data_copy), size, path,
                                               &dir_cache_lock_, &dir_cache_,
-                                              &was_error_, &error_msg_));
+                                              &error_lock_, &error_msg_));
   PTP_WORK w = CreateThreadpoolWork(WorkCallback, ctx.get(), &threadpool_env_);
   if (w == NULL) {
     string err = GetLastErrorString();
-    if (!was_error_.exchange(true)) {
-      // Benign race condition: though we use no locks to access `error_msg_`,
-      // only one thread may ever flip `was_error_` from false to true and enter
-      // the body of this if-clause. Since `was_error_` is the same object as
-      // used by all other threads trying to write to `error_msg_` (see
-      // DumpContext::MaybeSignalError), using it provides adequate mutual
-      // exclusion to write `error_msg_`.
-      error_msg_ = string("WindowsDumper::Dump() couldn't submit work: ") + err;
-    }
+    err = string("WindowsDumper::Dump() couldn't submit work: ") + err;
+
+    std::lock_guard<std::mutex> g(error_lock_);
+    error_msg_ = err;
   } else {
     ctx.release();  // release pointer ownership
     SubmitThreadpoolWork(w);
@@ -204,26 +205,25 @@ bool WindowsDumper::Finish(string* error) {
   CloseThreadpool(threadpool_);
   threadpool_ = NULL;
   cleanup_group_ = NULL;
-  if (was_error_ && error) {
-    // No race condition reading `error_msg_`: all worker threads terminated
-    // by now.
+
+  std::lock_guard<std::mutex> g(error_lock_);
+  if (!error_msg_.empty() && error) {
     *error = error_msg_;
   }
-  return !was_error_;
+  return error_msg_.empty();
 }
 
 namespace {
 
 DumpContext::DumpContext(unique_ptr<uint8_t[]> data, const size_t size,
                          const string path, std::mutex* dir_cache_lock,
-                         std::set<string>* dir_cache,
-                         std::atomic_bool* was_error, string* error_msg)
+                         std::set<string>* dir_cache, std::mutex* error_lock_,
+                         string* error_msg)
     : data_(std::move(data)),
       size_(size),
       path_(path),
       dir_cache_lock_(dir_cache_lock),
       dir_cache_(dir_cache),
-      was_error_(was_error),
       error_msg_(error_msg) {}
 
 void DumpContext::Run() {
@@ -252,14 +252,8 @@ void DumpContext::Run() {
 }
 
 void DumpContext::MaybeSignalError(const string& msg) {
-  if (!was_error_->exchange(true)) {
-    // Benign race condition: though we use no locks to access `error_msg_`,
-    // only one thread may ever flip `was_error_` from false to true and enter
-    // the body of this if-clause. Since `was_error_` is the same object as used
-    // by all other threads and by WindowsDumper::Dump(), using it provides
-    // adequate mutual exclusion to write `error_msg_`.
-    *error_msg_ = msg;
-  }
+  std::lock_guard<std::mutex> g(*error_lock_);
+  *error_msg_ = msg;
 }
 
 VOID CALLBACK WorkCallback(_Inout_ PTP_CALLBACK_INSTANCE Instance,
@@ -277,7 +271,6 @@ SignalHandler SignalHandler::INSTANCE;
 class WindowsClock {
  public:
   uint64_t GetMilliseconds() const;
-  uint64_t GetProcessMilliseconds() const;
 
   static const WindowsClock INSTANCE;
 
@@ -288,9 +281,6 @@ class WindowsClock {
   // consistent across all processors. Therefore, the frequency need only be
   // queried upon application initialization, and the result can be cached."
   const LARGE_INTEGER kFrequency;
-
-  // Time (in milliseconds) at process start.
-  const LARGE_INTEGER kStart;
 
   WindowsClock();
 
@@ -405,20 +395,41 @@ string GetOutputRoot() {
   string home = GetHomeDir();
   if (home.empty()) {
     BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
-        << "Cannot find a good output root. Use the --output_user_root flag.";
+        << "Cannot find a good output root.\n"
+           "Set the USERPROFILE or the HOME environment variable.\n"
+           "Example (in cmd.exe):\n"
+           "    set USERPROFILE=c:\\_bazel\\<YOUR-USERNAME>\n"
+           "or:\n"
+           "    set HOME=c:\\_bazel\\<YOUR-USERNAME>";
   }
   return home;
 }
 
 string GetHomeDir() {
+  if (IsRunningWithinTest()) {
+    // Bazel is running inside of a test. Respect $HOME that the test setup has
+    // set instead of using the actual home directory of the current user.
+    return GetPathEnv("HOME");
+  }
+
   PWSTR wpath;
+  // Look up the user's home directory. The default value of "FOLDERID_Profile"
+  // is the same as %USERPROFILE%, but it does not require the envvar to be set.
   if (SUCCEEDED(::SHGetKnownFolderPath(FOLDERID_Profile, KF_FLAG_DEFAULT, NULL,
                                        &wpath))) {
     string result = string(blaze_util::WstringToCstring(wpath).get());
     ::CoTaskMemFree(wpath);
     return result;
   }
-  return GetEnv("HOME");  // only defined in MSYS/Cygwin
+
+  // On Windows 2016 Server, Nano server: FOLDERID_Profile is unknown but
+  // %USERPROFILE% is set. See https://github.com/bazelbuild/bazel/issues/6701
+  string userprofile = GetPathEnv("USERPROFILE");
+  if (!userprofile.empty()) {
+    return userprofile;
+  }
+
+  return GetPathEnv("HOME");  // only defined in MSYS/Cygwin
 }
 
 string FindSystemWideBlazerc() {
@@ -430,10 +441,6 @@ string GetJavaBinaryUnderJavabase() { return "bin/java.exe"; }
 
 uint64_t GetMillisecondsMonotonic() {
   return WindowsClock::INSTANCE.GetMilliseconds();
-}
-
-uint64_t GetMillisecondsSinceProcessStart() {
-  return WindowsClock::INSTANCE.GetProcessMilliseconds();
 }
 
 void SetScheduling(bool batch_cpu_scheduling, int io_nice_level) {
@@ -451,11 +458,17 @@ bool IsSharedLibrary(const string &filename) {
 }
 
 string GetSystemJavabase() {
-  string javahome(GetEnv("JAVA_HOME"));
-  if (javahome.empty()) {
-    return "";
+  string javahome(GetPathEnv("JAVA_HOME"));
+  if (!javahome.empty()) {
+    string javac = blaze_util::JoinPath(javahome, "bin/javac.exe");
+    if (blaze_util::PathExists(javac.c_str())) {
+      return javahome;
+    }
+    BAZEL_LOG(WARNING)
+        << "Ignoring JAVA_HOME, because it must point to a JDK, not a JRE.";
   }
-  return javahome;
+
+  return "";
 }
 
 namespace {
@@ -570,8 +583,7 @@ static void WriteProcessStartupTime(const string& server_dir, HANDLE process) {
   }
 }
 
-static HANDLE CreateJvmOutputFile(const wstring& path,
-                                  SECURITY_ATTRIBUTES* sa,
+static HANDLE CreateJvmOutputFile(const wstring& path, LPSECURITY_ATTRIBUTES sa,
                                   bool daemon_out_append) {
   // If the previous server process was asked to be shut down (but not killed),
   // it takes a while for it to comply, so wait until the JVM output file that
@@ -630,13 +642,14 @@ class ProcessHandleBlazeServerStartup : public BlazeServerStartup {
   AutoHandle proc;
 };
 
-
 int ExecuteDaemon(const string& exe,
                   const std::vector<string>& args_vector,
                   const std::map<string, EnvVarValue>& env,
                   const string& daemon_output,
                   const bool daemon_out_append,
+                  const string& binaries_dir,
                   const string& server_dir,
+                  const StartupOptions* options,
                   BlazeServerStartup** server_startup) {
   wstring wdaemon_output;
   string error;
@@ -647,29 +660,25 @@ int ExecuteDaemon(const string& exe,
         << daemon_output << ") failed: " << error;
   }
 
-  SECURITY_ATTRIBUTES sa;
-  sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-  // We redirect stdin to the NUL device, and redirect stdout and stderr to
-  // `stdout_file` and `stderr_file` (opened below) by telling CreateProcess to
-  // use these file handles, so they must be inheritable.
-  sa.bInheritHandle = TRUE;
-  sa.lpSecurityDescriptor = NULL;
+  SECURITY_ATTRIBUTES inheritable_handle_sa = {sizeof(SECURITY_ATTRIBUTES),
+                                               NULL, TRUE};
 
-  AutoHandle devnull(::CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ, NULL,
-                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL));
+  AutoHandle devnull(::CreateFileW(
+      L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+      &inheritable_handle_sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL));
   if (!devnull.IsValid()) {
+    error = GetLastErrorString();
     BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
-        << "ExecuteDaemon(" << exe
-        << "): CreateFileA(NUL) failed: " << GetLastErrorString();
+        << "ExecuteDaemon(" << exe << "): CreateFileA(NUL) failed: " << error;
   }
 
-  AutoHandle stdout_file(CreateJvmOutputFile(wdaemon_output.c_str(), &sa,
-                                             daemon_out_append));
+  AutoHandle stdout_file(CreateJvmOutputFile(
+      wdaemon_output.c_str(), &inheritable_handle_sa, daemon_out_append));
   if (!stdout_file.IsValid()) {
+    error = GetLastErrorString();
     BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
         << "ExecuteDaemon(" << exe << "): CreateJvmOutputFile("
-        << blaze_util::WstringToString(wdaemon_output)
-        << ") failed: " << GetLastErrorString();
+        << blaze_util::WstringToString(wdaemon_output) << ") failed: " << error;
   }
   HANDLE stderr_handle;
   // We must duplicate the handle to stdout, otherwise "bazel clean --expunge"
@@ -691,27 +700,19 @@ int ExecuteDaemon(const string& exe,
   }
   AutoHandle stderr_file(stderr_handle);
 
-  // Create an attribute list with length of 1
-  AutoAttributeList lpAttributeList(1);
-
-  HANDLE handlesToInherit[2] = {stdout_file, stderr_handle};
-  if (!UpdateProcThreadAttribute(
-          lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-          handlesToInherit, 2 * sizeof(HANDLE), NULL, NULL)) {
+  // Create an attribute list.
+  wstring werror;
+  std::unique_ptr<AutoAttributeList> lpAttributeList;
+  if (!AutoAttributeList::Create(devnull, stdout_file, stderr_handle,
+                                 &lpAttributeList, &werror)) {
     BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
-        << "ExecuteDaemon(" << exe
-        << "): UpdateProcThreadAttribute failed: " << GetLastErrorString();
+        << "ExecuteDaemon(" << exe << "): attribute list creation failed: "
+        << blaze_util::WstringToString(werror);
   }
 
   PROCESS_INFORMATION processInfo = {0};
   STARTUPINFOEXA startupInfoEx = {0};
-
-  startupInfoEx.StartupInfo.cb = sizeof(startupInfoEx);
-  startupInfoEx.StartupInfo.hStdInput = devnull;
-  startupInfoEx.StartupInfo.hStdOutput = stdout_file;
-  startupInfoEx.StartupInfo.hStdError = stderr_handle;
-  startupInfoEx.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
-  startupInfoEx.lpAttributeList = lpAttributeList;
+  lpAttributeList->InitStartupInfoExA(&startupInfoEx);
 
   CmdLine cmdline;
   CreateCommandLine(&cmdline, exe, args_vector);
@@ -1001,6 +1002,24 @@ string GetEnv(const string& name) {
   return string(value.get());
 }
 
+string GetPathEnv(const string& name) {
+  string value = GetEnv(name);
+  if (value.empty()) {
+    return value;
+  }
+  if (bazel::windows::HasUncPrefix(value.c_str())) {
+    value = value.substr(4);
+  }
+  string wpath, error;
+  if (!blaze_util::AsWindowsPath(value, &wpath, &error)) {
+    BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
+        << "Invalid path in envvar \"" << name << "\": " << error;
+  }
+  // Callers of GetPathEnv expect a path with forward slashes.
+  std::replace(wpath.begin(), wpath.end(), '\\', '/');
+  return wpath;
+}
+
 bool ExistsEnv(const string& name) {
   return ::GetEnvironmentVariableA(name.c_str(), NULL, 0) != 0;
 }
@@ -1115,15 +1134,10 @@ LARGE_INTEGER WindowsClock::GetMillisecondsAsLargeInt(
 const WindowsClock WindowsClock::INSTANCE;
 
 WindowsClock::WindowsClock()
-    : kFrequency(GetFrequency()),
-      kStart(GetMillisecondsAsLargeInt(kFrequency)) {}
+    : kFrequency(GetFrequency()) {}
 
 uint64_t WindowsClock::GetMilliseconds() const {
   return GetMillisecondsAsLargeInt(kFrequency).QuadPart;
-}
-
-uint64_t WindowsClock::GetProcessMilliseconds() const {
-  return GetMilliseconds() - kStart.QuadPart;
 }
 
 uint64_t AcquireLock(const string& output_base, bool batch_mode, bool block,
@@ -1222,36 +1236,35 @@ string GetUserName() {
 
 bool IsEmacsTerminal() {
   string emacs = GetEnv("EMACS");
-  string inside_emacs = GetEnv("INSIDE_EMACS");
   // GNU Emacs <25.1 (and ~all non-GNU emacsen) set EMACS=t, but >=25.1 doesn't
   // do that and instead sets INSIDE_EMACS=<stuff> (where <stuff> can look like
   // e.g. "25.1.1,comint").  So we check both variables for maximum
   // compatibility.
-  return emacs == "t" || !inside_emacs.empty();
+  return emacs == "t" || ExistsEnv("INSIDE_EMACS");
 }
 
-// Returns true iff both stdout and stderr are connected to a
-// terminal, and it can support color and cursor movement
-// (this is computed heuristically based on the values of
-// environment variables).
-bool IsStandardTerminal() {
-  for (DWORD i : {STD_OUTPUT_HANDLE, STD_ERROR_HANDLE}) {
-    DWORD mode = 0;
-    HANDLE handle = ::GetStdHandle(i);
-    // handle may be invalid when std{out,err} is redirected
-    if (handle == INVALID_HANDLE_VALUE || !::GetConsoleMode(handle, &mode) ||
-        !(mode & ENABLE_PROCESSED_OUTPUT) ||
-        !(mode & ENABLE_WRAP_AT_EOL_OUTPUT) ||
-        !(mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
-      return false;
-    }
+// Returns true if stderr is connected to a terminal, and it can support color
+// and cursor movement (this is computed heuristically based on the values of
+// environment variables).  Blaze only outputs control characters to stderr,
+// so we only care for the stderr descriptor type.
+bool IsStderrStandardTerminal() {
+  DWORD mode = 0;
+  HANDLE handle = ::GetStdHandle(STD_ERROR_HANDLE);
+  // handle may be invalid when stderr is redirected
+  if (handle == INVALID_HANDLE_VALUE || !::GetConsoleMode(handle, &mode) ||
+      !(mode & ENABLE_PROCESSED_OUTPUT) ||
+      !(mode & ENABLE_WRAP_AT_EOL_OUTPUT) ||
+      !(mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
+    return false;
   }
   return true;
 }
 
-// Returns the number of columns of the terminal to which stdout is
-// connected, or $COLUMNS (default 80) if there is no such terminal.
-int GetTerminalColumns() {
+// Returns the number of columns of the terminal to which stderr is connected,
+// or $COLUMNS (default 80) if there is no such terminal.  Blaze only outputs
+// formatted messages to stderr, so we only care for width of a terminal
+// connected to the stderr descriptor.
+int GetStderrTerminalColumns() {
   string columns_env = GetEnv("COLUMNS");
   if (!columns_env.empty()) {
     char* endptr;
@@ -1261,7 +1274,7 @@ int GetTerminalColumns() {
     }
   }
 
-  HANDLE stdout_handle = ::GetStdHandle(STD_OUTPUT_HANDLE);
+  HANDLE stdout_handle = ::GetStdHandle(STD_ERROR_HANDLE);
   if (stdout_handle != INVALID_HANDLE_VALUE) {
     // stdout_handle may be invalid when stdout is redirected.
     CONSOLE_SCREEN_BUFFER_INFO screen_info;
@@ -1277,6 +1290,10 @@ int GetTerminalColumns() {
 }
 
 bool UnlimitResources() {
+  return true;  // Nothing to do so assume success.
+}
+
+bool UnlimitCoredumps() {
   return true;  // Nothing to do so assume success.
 }
 
@@ -1365,9 +1382,9 @@ static string GetMsysBash() {
                         value,          // _Out_opt_   LPBYTE  lpData,
                         &value_length   // _Inout_opt_ LPDWORD lpcbData
                         )) {
-      BAZEL_LOG(ERROR) << "Failed to query DisplayName of HKCU\\" << key << "\\"
-                       << subkey_name;
-      continue;  // try next subkey
+      // This registry key has no DisplayName subkey, so it cannot be MSYS2, or
+      // it cannot be a version of MSYS2 that we are looking for.
+      continue;
     }
 
     if (value_type == REG_SZ &&
@@ -1385,16 +1402,17 @@ static string GetMsysBash() {
               path,               // _Out_opt_   LPBYTE  lpData,
               &path_length        // _Inout_opt_ LPDWORD lpcbData
               )) {
-        BAZEL_LOG(ERROR) << "Failed to query InstallLocation of HKCU\\" << key
-                         << "\\" << subkey_name;
+        // This version of MSYS2 does not seem to create a "InstallLocation"
+        // subkey. Let's ignore this registry key to avoid picking up an MSYS2
+        // version that may be different from what Bazel expects.
         continue;  // try next subkey
       }
 
       if (path_length == 0 || path_type != REG_SZ) {
-        BAZEL_LOG(ERROR) << "Zero-length (" << path_length
-                         << ") install location or wrong type (" << path_type
-                         << ")";
-        continue;  // try next subkey
+        // This version of MSYS2 seem to have recorded an empty installation
+        // location, or the registry key was modified. Either way, let's ignore
+        // this registry key and keep looking at the next subkey.
+        continue;
       }
 
       BAZEL_LOG(INFO) << "Install location of HKCU\\" << key << "\\"
@@ -1402,11 +1420,13 @@ static string GetMsysBash() {
       string path_as_string(path, path + path_length - 1);
       string bash_exe = path_as_string + "\\usr\\bin\\bash.exe";
       if (!blaze_util::PathExists(bash_exe)) {
-        BAZEL_LOG(INFO) << bash_exe.c_str() << " does not exist";
-        continue;  // try next subkey
+        // The supposed bash.exe does not exist. Maybe MSYS2 was deleted but not
+        // uninstalled? We can't tell, but for all we care, this MSYS2 path is
+        // not what we need, so ignore this registry key.
+        continue;
       }
 
-      BAZEL_LOG(INFO) << "Detected msys bash at " << bash_exe.c_str();
+      BAZEL_LOG(INFO) << "Detected MSYS2 Bash at " << bash_exe.c_str();
       return bash_exe;
     }
   }
@@ -1415,7 +1435,7 @@ static string GetMsysBash() {
 
 static string GetBinaryFromPath(const string& binary_name) {
   char found[MAX_PATH];
-  string path_list = blaze::GetEnv("PATH");
+  string path_list = blaze::GetPathEnv("PATH");
 
   // We do not fully replicate all the quirks of search in PATH.
   // There is no system function to do so, and that way lies madness.
@@ -1446,45 +1466,35 @@ static string GetBinaryFromPath(const string& binary_name) {
     start = end + 1;
   } while (true);
 
-  BAZEL_LOG(ERROR) << binary_name.c_str() << " not found on PATH";
   return string();
 }
 
-static string LocateBash() {
+static string LocateBashMaybe() {
   string msys_bash = GetMsysBash();
-  if (!msys_bash.empty()) {
-    return msys_bash;
-  }
-
-  return GetBinaryFromPath("bash.exe");
+  return msys_bash.empty() ? GetBinaryFromPath("bash.exe") : msys_bash;
 }
 
-void DetectBashOrDie() {
-  if (!blaze::GetEnv("BAZEL_SH").empty()) return;
+string DetectBashAndExportBazelSh() {
+  string bash = blaze::GetPathEnv("BAZEL_SH");
+  if (!bash.empty()) {
+    return bash;
+  }
 
   uint64_t start = blaze::GetMillisecondsMonotonic();
 
-  string bash = LocateBash();
+  bash = LocateBashMaybe();
   uint64_t end = blaze::GetMillisecondsMonotonic();
-  BAZEL_LOG(INFO) << "BAZEL_SH detection took " << end - start
-                  << " msec, found " << bash.c_str();
-
-  if (!bash.empty()) {
+  if (bash.empty()) {
+    BAZEL_LOG(INFO) << "BAZEL_SH detection took " << end - start
+                    << " msec, not found";
+  } else {
+    BAZEL_LOG(INFO) << "BAZEL_SH detection took " << end - start
+                    << " msec, found " << bash.c_str();
     // Set process environment variable.
     blaze::SetEnv("BAZEL_SH", bash);
-  } else {
-    // TODO(bazel-team) should this be printed to stderr? If so, it should use
-    // BAZEL_LOG(ERROR)
-    printf(
-        "Bazel on Windows requires MSYS2 Bash, but we could not find it.\n"
-        "If you do not have it installed, you can install MSYS2 from\n"
-        "       http://repo.msys2.org/distrib/msys2-x86_64-latest.exe\n"
-        "\n"
-        "If you already have it installed but Bazel cannot find it,\n"
-        "set BAZEL_SH environment variable to its location:\n"
-        "       set BAZEL_SH=c:\\path\\to\\msys2\\usr\\bin\\bash.exe\n");
-    exit(1);
   }
+
+  return bash;
 }
 
 void EnsurePythonPathOption(std::vector<string>* options) {

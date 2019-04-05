@@ -20,7 +20,6 @@ and debian package.
 This example is a simplification of the debian packaging of Bazel:
 
 ```python
-
 load("@bazel_tools//tools/build_defs/pkg:pkg.bzl", "pkg_tar", "pkg_deb")
 
 pkg_tar(
@@ -37,7 +36,6 @@ pkg_tar(
     package_dir = "/usr/share/lib/bazel/tools",
     srcs = ["//tools:package-srcs"],
     mode = "0644",
-    modes = {"tools/build_defs/docker/build_test.sh": "0755"},
 )
 
 pkg_tar(
@@ -119,7 +117,7 @@ Creates a tar file from a list of inputs.
         <code>String, default to 'tar'</code>
         <p>
             The extension for the resulting tarball. The output
-            file will be '<i>name<i>.<i>extension<i>'. This extension
+            file will be '<i>name</i>.<i>extension</i>'. This extension
             also decide on the compression: if set to <code>tar.gz</code>
             or <code>tgz</code> then gzip compression will be used and
             if set to <code>tar.bz2</code> or <code>tar.bzip2</code> then
@@ -172,6 +170,25 @@ Creates a tar file from a list of inputs.
         <code>String, default to 0555</code>
         <p>
           Set the mode of files added by the <code>files</code> attribute.
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td><code>mtime</code></td>
+      <td>
+        <code>int, seconds since Jan 1, 1970, default to -1 (ignored)</code>
+        <p>
+          Set the mod time of files added by the <code>files</code> attribute.
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td><code>portable_mtime</code></td>
+      <td>
+        <code>bool, default True</code>
+        <p>
+          Set the mod time of files added by the <code>files</code> attribute
+          to a 2000-01-01.
         </p>
       </td>
     </tr>
@@ -284,7 +301,21 @@ Creates a tar file from a list of inputs.
         </p>
       </td>
     </tr>
-  </tbody>
+    <tr>
+      <td><code>remap_paths</code></td>
+      <td>
+        <code>Dictionary, optional</code>
+        <p>Source path prefixes to remap in the tarfile.</p>
+        <p>
+          <code>
+          remap_paths = {
+           "original/path/prefix": "replaced/path",
+           ...
+          },
+          </code>
+        </p>
+      </td>
+    </tr>
   </tbody>
 </table>
 
@@ -449,7 +480,6 @@ for more details on this.
       </td>
     </tr>
   </tbody>
-  </tbody>
 </table>
 
 <a name="pkg_rpm"></a>
@@ -517,6 +547,5 @@ for more details on this.
         </p>
       </td>
     </tr>
-  </tbody>
   </tbody>
 </table>

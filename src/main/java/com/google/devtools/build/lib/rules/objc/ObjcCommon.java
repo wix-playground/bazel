@@ -62,19 +62,18 @@ import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.Info;
-import com.google.devtools.build.lib.packages.NativeProvider;
 import com.google.devtools.build.lib.rules.apple.AppleToolchain;
 import com.google.devtools.build.lib.rules.cpp.CcCompilationContext;
-import com.google.devtools.build.lib.rules.cpp.CcCompilationInfo;
-import com.google.devtools.build.lib.rules.cpp.CcLinkParams;
-import com.google.devtools.build.lib.rules.cpp.CcLinkParamsStore;
-import com.google.devtools.build.lib.rules.cpp.CcLinkingInfo;
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
 import com.google.devtools.build.lib.rules.cpp.CppFileTypes;
 import com.google.devtools.build.lib.rules.cpp.CppModuleMap;
+import com.google.devtools.build.lib.rules.cpp.LibraryToLink;
+import com.google.devtools.build.lib.rules.cpp.LibraryToLink.CcLinkingContext;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetAndData;
-import com.google.devtools.build.lib.syntax.SkylarkSemantics;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import com.google.devtools.build.lib.util.FileType;
 import com.google.devtools.build.lib.util.FileTypeSet;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -145,7 +144,7 @@ public final class ObjcCommon {
 
   static class Builder {
     private final RuleContext context;
-    private final SkylarkSemantics semantics;
+    private final StarlarkSemantics semantics;
     private final BuildConfiguration buildConfiguration;
     private Optional<CompilationAttributes> compilationAttributes = Optional.absent();
     private Optional<ResourceAttributes> resourceAttributes = Optional.absent();
@@ -169,7 +168,7 @@ public final class ObjcCommon {
     private Optional<Artifact> linkedBinary = Optional.absent();
     private Optional<Artifact> linkmapFile = Optional.absent();
     private Iterable<CcCompilationContext> depCcHeaderProviders = ImmutableList.of();
-    private Iterable<CcLinkParamsStore> depCcLinkProviders = ImmutableList.of();
+    private Iterable<CcLinkingContext> depCcLinkProviders = ImmutableList.of();
 
     /**
      * Builder for {@link ObjcCommon} obtaining both attribute data and configuration data from
@@ -257,28 +256,24 @@ public final class ObjcCommon {
     Builder addDeps(List<ConfiguredTargetAndData> deps) {
       ImmutableList.Builder<ObjcProvider> propagatedObjcDeps =
           ImmutableList.<ObjcProvider>builder();
-      ImmutableList.Builder<CcCompilationInfo> cppDeps = ImmutableList.builder();
-      ImmutableList.Builder<CcLinkParamsStore> cppDepLinkParams =
-          ImmutableList.<CcLinkParamsStore>builder();
+      ImmutableList.Builder<CcInfo> cppDeps = ImmutableList.builder();
+      ImmutableList.Builder<CcLinkingContext> cppDepLinkParams = ImmutableList.builder();
 
       for (ConfiguredTargetAndData dep : deps) {
         ConfiguredTarget depCT = dep.getConfiguredTarget();
         addAnyProviders(propagatedObjcDeps, depCT, ObjcProvider.SKYLARK_CONSTRUCTOR);
-        addAnyProviders(cppDeps, depCT, CcCompilationInfo.PROVIDER);
+        addAnyProviders(cppDeps, depCT, CcInfo.PROVIDER);
         if (isCcLibrary(dep)) {
-          cppDepLinkParams.add(depCT.get(CcLinkingInfo.PROVIDER).getCcLinkParamsStore());
+          cppDepLinkParams.add(depCT.get(CcInfo.PROVIDER).getCcLinkingContext());
           CcCompilationContext ccCompilationContext =
-              depCT.get(CcCompilationInfo.PROVIDER).getCcCompilationContext();
+              depCT.get(CcInfo.PROVIDER).getCcCompilationContext();
           addDefines(ccCompilationContext.getDefines());
         }
       }
       ImmutableList.Builder<CcCompilationContext> ccCompilationContextBuilder =
           ImmutableList.builder();
-      for (CcCompilationInfo ccCompilationInfo : cppDeps.build()) {
-        CcCompilationContext ccCompilationContext = ccCompilationInfo.getCcCompilationContext();
-        if (ccCompilationContext != null) {
-          ccCompilationContextBuilder.add(ccCompilationContext);
-        }
+      for (CcInfo ccInfo : cppDeps.build()) {
+        ccCompilationContextBuilder.add(ccInfo.getCcCompilationContext());
       }
       addDepObjcProviders(propagatedObjcDeps.build());
       this.depCcHeaderProviders =
@@ -301,18 +296,6 @@ public final class ObjcCommon {
       this.runtimeDepObjcProviders = Iterables.concat(
           this.runtimeDepObjcProviders, propagatedDeps.build());
       return this;
-    }
-
-    @Deprecated // Use the BuiltinProvider method instead.
-    private <T extends Info> ImmutableList.Builder<T> addAnyProviders(
-        ImmutableList.Builder<T> listBuilder,
-        TransitiveInfoCollection collection,
-        NativeProvider<T> providerClass) {
-      T provider = collection.get(providerClass);
-      if (provider != null) {
-        listBuilder.add(provider);
-      }
-      return listBuilder;
     }
 
     private <T extends Info> ImmutableList.Builder<T> addAnyProviders(
@@ -452,9 +435,8 @@ public final class ObjcCommon {
         objcProvider.addAll(DEFINE, headerProvider.getDefines());
         textualHeaders.addAll(headerProvider.getTextualHdrs());
       }
-      for (CcLinkParamsStore linkProvider : depCcLinkProviders) {
-        CcLinkParams params = linkProvider.getCcLinkParams(true, false);
-        ImmutableList<String> linkOpts = params.flattenedLinkopts();
+      for (CcLinkingContext linkProvider : depCcLinkProviders) {
+        ImmutableList<String> linkOpts = linkProvider.getFlattenedUserLinkFlags();
         ImmutableSet.Builder<SdkFramework> frameworkLinkOpts = new ImmutableSet.Builder<>();
         ImmutableList.Builder<String> nonFrameworkLinkOpts = new ImmutableList.Builder<>();
         // Add any framework flags as frameworks directly, rather than as linkopts.
@@ -471,7 +453,11 @@ public final class ObjcCommon {
         objcProvider
             .addAll(SDK_FRAMEWORK, frameworkLinkOpts.build())
             .addAll(LINKOPT, nonFrameworkLinkOpts.build())
-            .addTransitiveAndPropagate(CC_LIBRARY, params.getLibraries());
+            .addTransitiveAndPropagate(
+                CC_LIBRARY,
+                NestedSetBuilder.<LibraryToLink>linkOrder()
+                    .addTransitive(linkProvider.getLibraries())
+                    .build());
       }
 
       if (compilationAttributes.isPresent()) {
@@ -595,8 +581,8 @@ public final class ObjcCommon {
     }
 
     private static boolean useStrictObjcModuleMaps(RuleContext context) {
-      // We need to check isLegalFragment first because some non-compilation rules, like
-      // objc_bundle_library, don't declare this fragment.
+      // We need to check isLegalFragment first because some non-compilation rules don't declare
+      // this fragment.
       return context.isLegalFragment(ObjcConfiguration.class)
           && context.getFragment(ObjcConfiguration.class).useStrictObjcModuleMaps();
     }

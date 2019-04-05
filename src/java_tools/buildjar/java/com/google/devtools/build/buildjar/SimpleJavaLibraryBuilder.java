@@ -14,12 +14,15 @@
 
 package com.google.devtools.build.buildjar;
 
+import com.google.common.io.MoreFiles;
+import com.google.common.io.RecursiveDeleteOption;
 import com.google.devtools.build.buildjar.instrumentation.JacocoInstrumentationProcessor;
 import com.google.devtools.build.buildjar.jarhelper.JarCreator;
-import com.google.devtools.build.buildjar.javac.BlazeJavacArguments;
 import com.google.devtools.build.buildjar.javac.BlazeJavacMain;
 import com.google.devtools.build.buildjar.javac.BlazeJavacResult;
+import com.google.devtools.build.buildjar.javac.BlazeJavacResult.Status;
 import com.google.devtools.build.buildjar.javac.JavacRunner;
+import com.google.devtools.build.buildjar.javac.statistics.BlazeJavacStatistics;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
@@ -47,7 +50,20 @@ public class SimpleJavaLibraryBuilder implements Closeable {
 
   BlazeJavacResult compileSources(JavaLibraryBuildRequest build, JavacRunner javacRunner)
       throws IOException {
-    return javacRunner.invokeJavac(build.toBlazeJavacArguments(build.getClassPath()));
+    BlazeJavacResult result =
+        javacRunner.invokeJavac(build.toBlazeJavacArguments(build.getClassPath()));
+
+    BlazeJavacStatistics.Builder stats =
+        result
+            .statistics()
+            .toBuilder()
+            .transitiveClasspathLength(build.getClassPath().size())
+            .reducedClasspathLength(build.getClassPath().size())
+            .transitiveClasspathFallback(false);
+    build.getProcessors().stream()
+        .map(p -> p.substring(p.lastIndexOf('.') + 1))
+        .forEachOrdered(stats::addProcessor);
+    return result.withStatistics(stats.build());
   }
 
   protected void prepareSourceCompilation(JavaLibraryBuildRequest build) throws IOException {
@@ -63,34 +79,16 @@ public class SimpleJavaLibraryBuilder implements Closeable {
     if (directory == null) {
       return;
     }
-    if (!Files.exists(directory)) {
-      Files.createDirectories(directory);
-      return;
-    }
-    try {
-      // TODO(b/27069912): handle symlinks
-      Files.walkFileTree(
-          directory,
-          new SimpleFileVisitor<Path>() {
-            @Override
-            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs)
-                throws IOException {
-              Files.delete(file);
-              return FileVisitResult.CONTINUE;
-            }
 
-            @Override
-            public FileVisitResult postVisitDirectory(Path dir, IOException exc)
-                throws IOException {
-              if (!dir.equals(directory)) {
-                Files.delete(dir);
-              }
-              return FileVisitResult.CONTINUE;
-            }
-          });
-    } catch (IOException e) {
-      throw new IOException("Cannot clean '" + directory + "'", e);
+    if (Files.exists(directory)) {
+      try {
+        MoreFiles.deleteRecursively(directory, RecursiveDeleteOption.ALLOW_INSECURE);
+      } catch (IOException e) {
+        throw new IOException("Cannot clean '" + directory + "'", e);
+      }
     }
+
+    Files.createDirectories(directory);
   }
 
   public void buildGensrcJar(JavaLibraryBuildRequest build) throws IOException {
@@ -115,15 +113,7 @@ public class SimpleJavaLibraryBuilder implements Closeable {
     if (build.getSourceFiles().isEmpty()) {
       return BlazeJavacResult.ok();
     }
-    JavacRunner javacRunner =
-        new JavacRunner() {
-          @Override
-          public BlazeJavacResult invokeJavac(BlazeJavacArguments arguments) {
-            return BlazeJavacMain.compile(arguments);
-          }
-        };
-    BlazeJavacResult result = compileSources(build, javacRunner);
-    return result;
+    return compileSources(build, BlazeJavacMain::compile);
   }
 
   /** Perform the build. */
@@ -141,7 +131,12 @@ public class SimpleJavaLibraryBuilder implements Closeable {
         }
       }
     } finally {
-      build.getDependencyModule().emitDependencyInformation(build.getClassPath(), result.isOk());
+      build
+          .getDependencyModule()
+          .emitDependencyInformation(
+              build.getClassPath(),
+              result.isOk(),
+              /* requiresFallback= */ result.status() == Status.REQUIRES_FALLBACK);
       build.getProcessingModule().emitManifestProto();
     }
     return result;

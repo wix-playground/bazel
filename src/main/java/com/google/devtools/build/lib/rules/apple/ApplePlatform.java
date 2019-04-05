@@ -18,10 +18,10 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.packages.Info;
 import com.google.devtools.build.lib.packages.NativeProvider;
 import com.google.devtools.build.lib.packages.Provider;
 import com.google.devtools.build.lib.packages.SkylarkInfo;
+import com.google.devtools.build.lib.packages.StructImpl;
 import com.google.devtools.build.lib.skylarkbuildapi.apple.ApplePlatformApi;
 import com.google.devtools.build.lib.skylarkbuildapi.apple.ApplePlatformTypeApi;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkPrinter;
@@ -43,17 +43,20 @@ public enum ApplePlatform implements ApplePlatformApi {
   private static final ImmutableSet<String> IOS_SIMULATOR_TARGET_CPUS =
       ImmutableSet.of("ios_x86_64", "ios_i386");
   private static final ImmutableSet<String> IOS_DEVICE_TARGET_CPUS =
-      ImmutableSet.of("ios_armv6", "ios_arm64", "ios_armv7", "ios_armv7s");
+      ImmutableSet.of("ios_armv6", "ios_arm64", "ios_armv7", "ios_armv7s", "ios_arm64e");
   private static final ImmutableSet<String> WATCHOS_SIMULATOR_TARGET_CPUS =
-      ImmutableSet.of("watchos_i386");
+      ImmutableSet.of("watchos_i386", "watchos_x86_64");
   private static final ImmutableSet<String> WATCHOS_DEVICE_TARGET_CPUS =
-      ImmutableSet.of("watchos_armv7k");
+      ImmutableSet.of("watchos_armv7k", "watchos_arm64_32");
   private static final ImmutableSet<String> TVOS_SIMULATOR_TARGET_CPUS =
       ImmutableSet.of("tvos_x86_64");
   private static final ImmutableSet<String> TVOS_DEVICE_TARGET_CPUS =
       ImmutableSet.of("tvos_arm64");
+  // "darwin" is included because that's currently the default when on macOS, and
+  // migrating it would be a breaking change more details:
+  // https://github.com/bazelbuild/bazel/pull/7062
   private static final ImmutableSet<String> MACOS_TARGET_CPUS =
-      ImmutableSet.of("darwin_x86_64");
+      ImmutableSet.of("darwin_x86_64", "darwin");
 
   private static final ImmutableSet<String> BIT_32_TARGET_CPUS =
       ImmutableSet.of("ios_i386", "ios_armv7", "ios_armv7s", "watchos_i386", "watchos_armv7k");
@@ -175,8 +178,8 @@ public enum ApplePlatform implements ApplePlatformApi {
   }
 
   /** Returns a Skylark struct that contains the instances of this enum. */
-  public static Info getSkylarkStruct() {
-    Provider constructor = new NativeProvider<Info>(Info.class, "platforms") {};
+  public static StructImpl getSkylarkStruct() {
+    Provider constructor = new NativeProvider<StructImpl>(StructImpl.class, "platforms") {};
     HashMap<String, Object> fields = new HashMap<>();
     for (ApplePlatform type : values()) {
       fields.put(type.skylarkKey, type);
@@ -231,8 +234,8 @@ public enum ApplePlatform implements ApplePlatformApi {
     }
 
     /** Returns a Skylark struct that contains the instances of this enum. */
-    public static Info getSkylarkStruct() {
-      Provider constructor = new NativeProvider<Info>(Info.class, "platform_types") {};
+    public static StructImpl getSkylarkStruct() {
+      Provider constructor = new NativeProvider<StructImpl>(StructImpl.class, "platform_types") {};
       HashMap<String, Object> fields = new HashMap<>();
       for (PlatformType type : values()) {
         fields.put(type.skylarkKey, type);

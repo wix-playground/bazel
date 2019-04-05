@@ -44,8 +44,16 @@ if [ "$ERROR_PRONE_INDEX" -lt "$GUAVA_INDEX" ]; then
   LIBRARY_JARS="${LIBRARY_JARS_ARRAY[*]}"
 fi
 
-DIRS=$(echo src/{java_tools/singlejar/java/com/google/devtools/build/zip,main/java,tools/xcode-common/java/com/google/devtools/build/xcode/{common,util}} third_party/java/dd_plist/java ${OUTPUT_DIR}/src)
+DIRS=$(echo src/{java_tools/singlejar/java/com/google/devtools/build/zip,main/java,tools/xcode-common/java/com/google/devtools/build/xcode/{common,util}} tools/java/runfiles third_party/java/dd_plist/java ${OUTPUT_DIR}/src)
 EXCLUDE_FILES="src/main/java/com/google/devtools/build/lib/server/GrpcServerImpl.java src/java_tools/buildjar/java/com/google/devtools/build/buildjar/javac/testing/*"
+# Exclude whole directories under the bazel src tree that bazel itself
+# doesn't depend on.
+EXCLUDE_DIRS="src/main/java/com/google/devtools/build/skydoc"
+for d in $EXCLUDE_DIRS ; do
+  for f in $(find $d -type f) ; do
+    EXCLUDE_FILES+=" $f"
+  done
+done
 
 mkdir -p "${OUTPUT_DIR}/classes"
 mkdir -p "${OUTPUT_DIR}/src"
@@ -220,7 +228,41 @@ workspace(name = 'bazel_tools')
 EOF
   link_dir ${PWD}/src ${BAZEL_TOOLS_REPO}/src
   link_dir ${PWD}/third_party ${BAZEL_TOOLS_REPO}/third_party
-  link_dir ${PWD}/tools ${BAZEL_TOOLS_REPO}/tools
+
+  # Create @bazel_tools//tools/cpp/runfiles
+  mkdir -p ${BAZEL_TOOLS_REPO}/tools/cpp/runfiles
+  link_file "${PWD}/tools/cpp/runfiles/runfiles_src.h" \
+      "${BAZEL_TOOLS_REPO}/tools/cpp/runfiles/runfiles.h"
+  # Transform //tools/cpp/runfiles:runfiles_src.cc to
+  # @bazel_tools//tools/cpp/runfiles:runfiles.cc
+  # Keep this transformation logic in sync with the
+  # //tools/cpp/runfiles:srcs_for_embedded_tools genrule.
+  sed 's|^#include.*/runfiles_src.h.*|#include \"tools/cpp/runfiles/runfiles.h\"|' \
+      "${PWD}/tools/cpp/runfiles/runfiles_src.cc" > \
+      "${BAZEL_TOOLS_REPO}/tools/cpp/runfiles/runfiles.cc"
+  link_file "${PWD}/tools/cpp/runfiles/BUILD.tools" \
+      "${BAZEL_TOOLS_REPO}/tools/cpp/runfiles/BUILD"
+
+  # Create @bazel_tools//tools/sh
+  mkdir -p ${BAZEL_TOOLS_REPO}/tools/sh
+  link_file "${PWD}/tools/sh/sh_configure.bzl" "${BAZEL_TOOLS_REPO}/tools/sh/sh_configure.bzl"
+  link_file "${PWD}/tools/sh/sh_toolchain.bzl" "${BAZEL_TOOLS_REPO}/tools/sh/sh_toolchain.bzl"
+  link_file "${PWD}/tools/sh/BUILD.tools" "${BAZEL_TOOLS_REPO}/tools/sh/BUILD"
+
+  # Create @bazel_tools//tools/java/runfiles
+  mkdir -p ${BAZEL_TOOLS_REPO}/tools/java/runfiles
+  link_file "${PWD}/tools/java/runfiles/Runfiles.java" "${BAZEL_TOOLS_REPO}/tools/java/runfiles/Runfiles.java"
+  link_file "${PWD}/tools/java/runfiles/Util.java" "${BAZEL_TOOLS_REPO}/tools/java/runfiles/Util.java"
+  link_file "${PWD}/tools/java/runfiles/BUILD.tools" "${BAZEL_TOOLS_REPO}/tools/java/runfiles/BUILD"
+
+  # Create @bazel_tools/tools/python/BUILD
+  mkdir -p ${BAZEL_TOOLS_REPO}/tools/python
+  link_file "${PWD}/tools/python/BUILD.tools" "${BAZEL_TOOLS_REPO}/tools/python/BUILD"
+
+  # Create the rest of @bazel_tools//tools/...
+  link_children "${PWD}" tools/cpp "${BAZEL_TOOLS_REPO}"
+  link_children "${PWD}" tools/python "${BAZEL_TOOLS_REPO}"
+  link_children "${PWD}" tools "${BAZEL_TOOLS_REPO}"
 
   # Set up @bazel_tools//platforms properly
   mkdir -p ${BAZEL_TOOLS_REPO}/platforms
@@ -241,12 +283,47 @@ log "Creating Bazel install base..."
 ARCHIVE_DIR=${OUTPUT_DIR}/archive
 mkdir -p ${ARCHIVE_DIR}/_embedded_binaries
 
-# Dummy build-runfiles
-cat <<'EOF' >${ARCHIVE_DIR}/_embedded_binaries/build-runfiles${EXE_EXT}
+# Dummy build-runfiles (we can't compile C++ yet, so we can't have the real one)
+if [ "${PLATFORM}" = "windows" ]; then
+  # We don't rely on runfiles trees on Windows
+  cat <<'EOF' >${ARCHIVE_DIR}/_embedded_binaries/build-runfiles${EXE_EXT}
 #!/bin/sh
 mkdir -p $2
 cp $1 $2/MANIFEST
 EOF
+else
+  cat <<'EOF' >${ARCHIVE_DIR}/_embedded_binaries/build-runfiles${EXE_EXT}
+#!/bin/sh
+# This is bash implementation of build-runfiles: reads space-separated paths
+# from each line in the file in $1, then creates a symlink under $2 for the
+# first element of the pair that points to the second element of the pair.
+#
+# bash is a terrible tool for this job, but in this case, that's the only one
+# we have (we could hand-compile a little .jar file like we hand-compile the
+# bootstrap version of Bazel, but we'd still need a shell wrapper around it, so
+# it's not clear whether that would be a win over a few lines of Lovecraftian
+# code)
+MANIFEST="$1"
+TREE="$2"
+
+rm -fr "$TREE"
+mkdir -p "$TREE"
+
+# Read the lines in $MANIFEST. the usual "for VAR in $(cat FILE)" idiom won't do
+# because the lines in FILE contain spaces.
+while read LINE; do
+  # Split each line into two parts on the first space
+  SYMLINK_PATH="${LINE%% *}"
+  TARGET_PATH="${LINE#* }"
+  ABSOLUTE_SYMLINK_PATH="$TREE/$SYMLINK_PATH"
+  mkdir -p "$(dirname $ABSOLUTE_SYMLINK_PATH)"
+  ln -s "$TARGET_PATH" "$ABSOLUTE_SYMLINK_PATH"
+done < "$MANIFEST"
+
+cp "$MANIFEST" "$TREE/MANIFEST"
+EOF
+fi
+
 chmod 0755 ${ARCHIVE_DIR}/_embedded_binaries/build-runfiles${EXE_EXT}
 
 function build_jni() {
@@ -334,7 +411,7 @@ function run_bazel_jar() {
   local env_vars="$(awk 'END { for (name in ENVIRON) { if(name != "_" && name ~ /^[A-Za-z0-9_]*$/) print name; } }' </dev/null)"
   for varname in $env_vars; do
     eval value=\$$varname
-    if [ "${PLATFORM}" = "windows" ] && echo "$varname" | grep -q -i "^\(path\|tmp\|temp\|tempdir\|systemroot\)$" ; then
+    if [ "${PLATFORM}" = "windows" ] && echo "$varname" | grep -q -i "^\(path\|tmp\|temp\|tempdir\|systemroot\|systemdrive\)$" ; then
       varname="$(echo "$varname" | tr [:lower:] [:upper:])"
     fi
     if [ "${value}" ]; then

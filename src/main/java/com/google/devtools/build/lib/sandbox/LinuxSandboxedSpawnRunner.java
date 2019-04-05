@@ -31,12 +31,12 @@ import com.google.devtools.build.lib.exec.local.PosixLocalEnvProvider;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.SilentCloseable;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
+import com.google.devtools.build.lib.sandbox.SandboxHelpers.SandboxOutputs;
 import com.google.devtools.build.lib.shell.Command;
 import com.google.devtools.build.lib.shell.CommandException;
 import com.google.devtools.build.lib.util.OS;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Symlinks;
 import java.io.File;
 import java.io.IOException;
@@ -96,6 +96,7 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
   private final LocalEnvProvider localEnvProvider;
   private final Duration timeoutKillDelay;
   private final @Nullable SandboxfsProcess sandboxfsProcess;
+  private final boolean sandboxfsMapSymlinkTargets;
 
   /**
    * Creates a sandboxed spawn runner that uses the {@code linux-sandbox} tool.
@@ -107,6 +108,7 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
    * @param timeoutKillDelay an additional grace period before killing timing out commands
    * @param sandboxfsProcess instance of the sandboxfs process to use; may be null for none, in
    *     which case the runner uses a symlinked sandbox
+   * @param sandboxfsMapSymlinkTargets map the targets of symlinks within the sandbox if true
    */
   LinuxSandboxedSpawnRunner(
       CommandEnvironment cmdEnv,
@@ -114,7 +116,8 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
       Path inaccessibleHelperFile,
       Path inaccessibleHelperDir,
       Duration timeoutKillDelay,
-      @Nullable SandboxfsProcess sandboxfsProcess) {
+      @Nullable SandboxfsProcess sandboxfsProcess,
+      boolean sandboxfsMapSymlinkTargets) {
     super(cmdEnv);
     this.fileSystem = cmdEnv.getRuntime().getFileSystem();
     this.blazeDirs = cmdEnv.getDirectories();
@@ -126,6 +129,7 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
     this.inaccessibleHelperDir = inaccessibleHelperDir;
     this.timeoutKillDelay = timeoutKillDelay;
     this.sandboxfsProcess = sandboxfsProcess;
+    this.sandboxfsMapSymlinkTargets = sandboxfsMapSymlinkTargets;
     this.localEnvProvider = new PosixLocalEnvProvider(cmdEnv.getClientEnv());
   }
 
@@ -147,10 +151,10 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
     sandboxExecRoot.createDirectory();
 
     Map<String, String> environment =
-        localEnvProvider.rewriteLocalEnv(spawn.getEnvironment(), execRoot, "/tmp");
+        localEnvProvider.rewriteLocalEnv(spawn.getEnvironment(), binTools, "/tmp");
 
     ImmutableSet<Path> writableDirs = getWritableDirs(sandboxExecRoot, environment);
-    ImmutableSet<PathFragment> outputs = SandboxHelpers.getOutputFiles(spawn);
+    SandboxOutputs outputs = SandboxHelpers.getOutputs(spawn);
     Duration timeout = context.getTimeout();
 
     LinuxSandboxUtil.CommandLineBuilder commandLineBuilder =
@@ -159,7 +163,10 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
             .setTmpfsDirectories(getTmpfsPaths())
             .setBindMounts(getReadOnlyBindMounts(blazeDirs, sandboxExecRoot))
             .setUseFakeHostname(getSandboxOptions().sandboxFakeHostname)
-            .setCreateNetworkNamespace(!(allowNetwork || Spawns.requiresNetwork(spawn)))
+            .setCreateNetworkNamespace(
+                !(allowNetwork
+                    || Spawns.requiresNetwork(
+                        spawn, getSandboxOptions().defaultSandboxAllowNetwork)))
             .setUseDebugMode(getSandboxOptions().sandboxDebug)
             .setKillDelay(timeoutKillDelay);
 
@@ -187,9 +194,14 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
               sandboxPath,
               commandLineBuilder.build(),
               environment,
-              SandboxHelpers.processInputFiles(spawn, context, execRoot),
+              SandboxHelpers.processInputFiles(
+                  spawn,
+                  context,
+                  execRoot,
+                  getSandboxOptions().symlinkedSandboxExpandsTreeArtifactsInRunfilesTree),
               outputs,
-              ImmutableSet.of());
+              ImmutableSet.of(),
+              sandboxfsMapSymlinkTargets);
     } else {
       sandbox =
           new SymlinkedSandboxedSpawn(
@@ -197,7 +209,11 @@ final class LinuxSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
               sandboxExecRoot,
               commandLineBuilder.build(),
               environment,
-              SandboxHelpers.processInputFiles(spawn, context, execRoot),
+              SandboxHelpers.processInputFiles(
+                  spawn,
+                  context,
+                  execRoot,
+                  getSandboxOptions().symlinkedSandboxExpandsTreeArtifactsInRunfilesTree),
               outputs,
               writableDirs);
     }

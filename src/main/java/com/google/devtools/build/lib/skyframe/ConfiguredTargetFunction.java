@@ -19,6 +19,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Streams;
 import com.google.devtools.build.lib.actions.Actions;
 import com.google.devtools.build.lib.actions.Actions.GeneratingActions;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
@@ -28,10 +29,15 @@ import com.google.devtools.build.lib.analysis.ConfiguredAspect;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.Dependency;
+import com.google.devtools.build.lib.analysis.DependencyResolver;
+import com.google.devtools.build.lib.analysis.DependencyResolver.DependencyKind;
 import com.google.devtools.build.lib.analysis.DependencyResolver.InconsistentAspectOrderException;
+import com.google.devtools.build.lib.analysis.EmptyConfiguredTarget;
 import com.google.devtools.build.lib.analysis.PlatformSemantics;
 import com.google.devtools.build.lib.analysis.TargetAndConfiguration;
 import com.google.devtools.build.lib.analysis.ToolchainContext;
+import com.google.devtools.build.lib.analysis.ToolchainResolver;
+import com.google.devtools.build.lib.analysis.ToolchainResolver.UnloadedToolchainContext;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
 import com.google.devtools.build.lib.analysis.config.ConfigMatchingProvider;
@@ -39,6 +45,8 @@ import com.google.devtools.build.lib.analysis.config.ConfigurationResolver;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.analysis.configuredtargets.MergedConfiguredTarget.DuplicateException;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget;
+import com.google.devtools.build.lib.analysis.skylark.StarlarkTransition.TransitionException;
+import com.google.devtools.build.lib.bugreport.BugReport;
 import com.google.devtools.build.lib.buildeventstream.BuildEventId;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.BuildEventId.ConfigurationId;
 import com.google.devtools.build.lib.causes.AnalysisFailedCause;
@@ -52,7 +60,6 @@ import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventKind;
 import com.google.devtools.build.lib.events.StoredEventHandler;
 import com.google.devtools.build.lib.packages.Aspect;
-import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.NoSuchTargetException;
 import com.google.devtools.build.lib.packages.NoSuchThingException;
@@ -60,9 +67,9 @@ import com.google.devtools.build.lib.packages.NonconfigurableAttributeMapper;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.packages.RawAttributeMapper;
 import com.google.devtools.build.lib.packages.Rule;
+import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.ExecutionPlatformConstraintsAllowed;
 import com.google.devtools.build.lib.packages.RuleClassProvider;
-import com.google.devtools.build.lib.packages.RuleTransitionFactory;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.packages.TargetUtils;
 import com.google.devtools.build.lib.skyframe.AspectFunction.AspectCreationException;
@@ -75,14 +82,17 @@ import com.google.devtools.build.skyframe.SkyFunctionException;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 import com.google.devtools.build.skyframe.ValueOrException;
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.Semaphore;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import javax.annotation.Nullable;
 
@@ -116,6 +126,10 @@ public final class ConfiguredTargetFunction implements SkyFunction {
       super(cause);
     }
 
+    public DependencyEvaluationException(TransitionException cause) {
+      super(cause);
+    }
+
     @Override
     public synchronized Exception getCause() {
       return (Exception) super.getCause();
@@ -126,6 +140,9 @@ public final class ConfiguredTargetFunction implements SkyFunction {
   private final RuleClassProvider ruleClassProvider;
   private final Semaphore cpuBoundSemaphore;
   private final BuildOptions defaultBuildOptions;
+  @Nullable private final ConfiguredTargetProgressReceiver configuredTargetProgress;
+  private final Supplier<BigInteger> nonceVersion;
+
   /**
    * Indicates whether the set of packages transitively loaded for a given {@link
    * ConfiguredTargetValue} will be needed for package root resolution later in the build. If not,
@@ -141,7 +158,9 @@ public final class ConfiguredTargetFunction implements SkyFunction {
       Semaphore cpuBoundSemaphore,
       boolean storeTransitivePackagesForPackageRootResolution,
       boolean shouldUnblockCpuWorkWhenFetchingDeps,
-      BuildOptions defaultBuildOptions) {
+      BuildOptions defaultBuildOptions,
+      @Nullable ConfiguredTargetProgressReceiver configuredTargetProgress,
+      Supplier<BigInteger> nonceVersion) {
     this.buildViewProvider = buildViewProvider;
     this.ruleClassProvider = ruleClassProvider;
     this.cpuBoundSemaphore = cpuBoundSemaphore;
@@ -149,6 +168,8 @@ public final class ConfiguredTargetFunction implements SkyFunction {
         storeTransitivePackagesForPackageRootResolution;
     this.shouldUnblockCpuWorkWhenFetchingDeps = shouldUnblockCpuWorkWhenFetchingDeps;
     this.defaultBuildOptions = defaultBuildOptions;
+    this.configuredTargetProgress = configuredTargetProgress;
+    this.nonceVersion = nonceVersion;
   }
 
   @Override
@@ -206,12 +227,19 @@ public final class ConfiguredTargetFunction implements SkyFunction {
     if (transitivePackagesForPackageRootResolution != null) {
       transitivePackagesForPackageRootResolution.add(pkg);
     }
-    // TODO(bazel-team): This is problematic - we create the right key, but then end up with a value
-    // that doesn't match; we can even have the same value multiple times. However, I think it's
-    // only triggered in tests (i.e., in normal operation, the configuration passed in is already
-    // null).
-    if (!target.isConfigurable()) {
-      configuration = null;
+    if (target.isConfigurable() != (configuredTargetKey.getConfigurationKey() != null)) {
+      // We somehow ended up in a target that requires a non-null configuration as a dependency of
+      // one that requires a null configuration or the other way round. This is always an error, but
+      // we need to analyze the dependencies of the latter target to realize that. Short-circuit the
+      // evaluation to avoid doing useless work and running code with a null configuration that's
+      // not prepared for it.
+      return new NonRuleConfiguredTargetValue(
+          new EmptyConfiguredTarget(target.getLabel(), configuredTargetKey.getConfigurationKey()),
+          GeneratingActions.EMPTY,
+          transitivePackagesForPackageRootResolution == null
+              ? null
+              : transitivePackagesForPackageRootResolution.build(),
+          nonceVersion.get());
     }
 
     // This line is only needed for accurate error messaging. Say this target has a circular
@@ -229,7 +257,7 @@ public final class ConfiguredTargetFunction implements SkyFunction {
 
     SkyframeDependencyResolver resolver = view.createDependencyResolver(env);
 
-    ToolchainContext toolchainContext = null;
+    UnloadedToolchainContext unloadedToolchainContext = null;
 
     // TODO(janakr): this acquire() call may tie up this thread indefinitely, reducing the
     // parallelism of Skyframe. This is a strict improvement over the prior state of the code, in
@@ -242,11 +270,9 @@ public final class ConfiguredTargetFunction implements SkyFunction {
           getConfigConditions(
               ctgValue.getTarget(),
               env,
-              resolver,
               ctgValue,
               transitivePackagesForPackageRootResolution,
-              transitiveRootCauses,
-              ((ConfiguredRuleClassProvider) ruleClassProvider).getTrimmingTransitionFactory());
+              transitiveRootCauses);
       if (env.valuesMissing()) {
         return null;
       }
@@ -257,7 +283,8 @@ public final class ConfiguredTargetFunction implements SkyFunction {
       // more root causes during computeDependencies.
       // Note that this doesn't apply to AspectFunction, because aspects can't have configurable
       // attributes.
-      if (!transitiveRootCauses.isEmpty() && configConditions != NO_CONFIG_CONDITIONS) {
+      if (!transitiveRootCauses.isEmpty()
+          && !Objects.equals(configConditions, NO_CONFIG_CONDITIONS)) {
         throw new ConfiguredTargetFunctionException(
             new ConfiguredValueCreationException(
                 "Cannot compute config conditions", configuration, transitiveRootCauses.build()));
@@ -272,13 +299,12 @@ public final class ConfiguredTargetFunction implements SkyFunction {
 
           // Collect local (target, rule) constraints for filtering out execution platforms.
           ImmutableSet<Label> execConstraintLabels = getExecutionPlatformConstraints(rule);
-          toolchainContext =
-              ToolchainUtil.createToolchainContext(
-                  env,
-                  rule.toString(),
-                  requiredToolchains,
-                  execConstraintLabels,
-                  configuredTargetKey.getConfigurationKey());
+          unloadedToolchainContext =
+              new ToolchainResolver(env, configuredTargetKey.getConfigurationKey())
+                  .setTargetDescription(rule.toString())
+                  .setRequiredToolchainTypes(requiredToolchains)
+                  .setExecConstraintLabels(execConstraintLabels)
+                  .resolve();
           if (env.valuesMissing()) {
             return null;
           }
@@ -286,16 +312,16 @@ public final class ConfiguredTargetFunction implements SkyFunction {
       }
 
       // Calculate the dependencies of this target.
-      OrderedSetMultimap<Attribute, ConfiguredTargetAndData> depValueMap =
+      OrderedSetMultimap<DependencyKind, ConfiguredTargetAndData> depValueMap =
           computeDependencies(
               env,
               resolver,
               ctgValue,
               ImmutableList.<Aspect>of(),
               configConditions,
-              toolchainContext == null
+              unloadedToolchainContext == null
                   ? ImmutableSet.of()
-                  : toolchainContext.resolvedToolchainLabels(),
+                  : unloadedToolchainContext.resolvedToolchainLabels(),
               ruleClassProvider,
               view.getHostConfiguration(configuration),
               transitivePackagesForPackageRootResolution,
@@ -312,8 +338,10 @@ public final class ConfiguredTargetFunction implements SkyFunction {
       Preconditions.checkNotNull(depValueMap);
 
       // Load the requested toolchains into the ToolchainContext, now that we have dependencies.
-      if (toolchainContext != null) {
-        toolchainContext.resolveToolchains(depValueMap);
+      ToolchainContext toolchainContext = null;
+      if (unloadedToolchainContext != null) {
+        toolchainContext =
+            unloadedToolchainContext.load(depValueMap.get(DependencyResolver.TOOLCHAIN_DEPENDENCY));
       }
 
       ConfiguredTargetValue ans =
@@ -322,20 +350,28 @@ public final class ConfiguredTargetFunction implements SkyFunction {
               env,
               target,
               configuration,
+              configuredTargetKey,
               depValueMap,
               configConditions,
               toolchainContext,
               transitivePackagesForPackageRootResolution);
+      if (configuredTargetProgress != null) {
+        configuredTargetProgress.doneConfigureTarget();
+      }
       return ans;
     } catch (DependencyEvaluationException e) {
       if (e.getCause() instanceof ConfiguredValueCreationException) {
         ConfiguredValueCreationException cvce = (ConfiguredValueCreationException) e.getCause();
 
         // Check if this is caused by an unresolved toolchain, and report it as such.
-        if (toolchainContext != null) {
+        if (unloadedToolchainContext != null) {
+          UnloadedToolchainContext finalUnloadedToolchainContext = unloadedToolchainContext;
           Set<Label> toolchainDependencyErrors =
-              toolchainContext.filterToolchainLabels(
-                  Iterables.transform(cvce.getRootCauses(), Cause::getLabel));
+              Streams.stream(cvce.getRootCauses())
+                  .map(Cause::getLabel)
+                  .filter(l -> finalUnloadedToolchainContext.resolvedToolchainLabels().contains(l))
+                  .collect(ImmutableSet.toImmutableSet());
+
           if (!toolchainDependencyErrors.isEmpty()) {
             env.getListener()
                 .handle(
@@ -358,6 +394,11 @@ public final class ConfiguredTargetFunction implements SkyFunction {
         throw new ConfiguredTargetFunctionException(
             new ConfiguredValueCreationException(
                 cause.getMessage(), target.getLabel(), configuration));
+      } else if (e.getCause() instanceof TransitionException) {
+        TransitionException cause = (TransitionException) e.getCause();
+        env.getListener().handle(Event.error(cause.getMessage()));
+        throw new ConfiguredTargetFunctionException(
+            new ConfiguredValueCreationException(e.getMessage(), target.getLabel(), configuration));
       } else {
         // Unknown exception type.
         throw new ConfiguredTargetFunctionException(
@@ -433,7 +474,7 @@ public final class ConfiguredTargetFunction implements SkyFunction {
    *     BuildOptions object.
    */
   @Nullable
-  static OrderedSetMultimap<Attribute, ConfiguredTargetAndData> computeDependencies(
+  static OrderedSetMultimap<DependencyKind, ConfiguredTargetAndData> computeDependencies(
       Environment env,
       SkyframeDependencyResolver resolver,
       TargetAndConfiguration ctgValue,
@@ -448,7 +489,7 @@ public final class ConfiguredTargetFunction implements SkyFunction {
       throws DependencyEvaluationException, ConfiguredTargetFunctionException,
           AspectCreationException, InterruptedException {
     // Create the map from attributes to set of (target, configuration) pairs.
-    OrderedSetMultimap<Attribute, Dependency> depValueNames;
+    OrderedSetMultimap<DependencyKind, Dependency> depValueNames;
     try {
       depValueNames =
           resolver.dependentNodeMap(
@@ -458,7 +499,6 @@ public final class ConfiguredTargetFunction implements SkyFunction {
               configConditions,
               toolchainLabels,
               transitiveRootCauses,
-              defaultBuildOptions,
               ((ConfiguredRuleClassProvider) ruleClassProvider).getTrimmingTransitionFactory());
     } catch (EvalException e) {
       // EvalException can only be thrown by computed Skylark attributes in the current rule.
@@ -466,8 +506,6 @@ public final class ConfiguredTargetFunction implements SkyFunction {
       throw new DependencyEvaluationException(
           new ConfiguredValueCreationException(
               e.print(), ctgValue.getLabel(), ctgValue.getConfiguration()));
-    } catch (InvalidConfigurationException e) {
-      throw new DependencyEvaluationException(e);
     } catch (InconsistentAspectOrderException e) {
       env.getListener().handle(Event.error(e.getLocation(), e.getMessage()));
       throw new DependencyEvaluationException(e);
@@ -475,16 +513,14 @@ public final class ConfiguredTargetFunction implements SkyFunction {
 
     // Trim each dep's configuration so it only includes the fragments needed by its transitive
     // closure.
-    if (ctgValue.getConfiguration() != null) {
-      depValueNames =
-          ConfigurationResolver.resolveConfigurations(
-              env,
-              ctgValue,
-              depValueNames,
-              hostConfiguration,
-              ruleClassProvider,
-              defaultBuildOptions);
-    }
+    depValueNames =
+        ConfigurationResolver.resolveConfigurations(
+            env,
+            ctgValue,
+            depValueNames,
+            hostConfiguration,
+            ruleClassProvider,
+            defaultBuildOptions);
 
     // Return early in case packages were not loaded yet. In theory, we could start configuring
     // dependent targets in loaded packages. However, that creates an artificial sync boundary
@@ -538,57 +574,38 @@ public final class ConfiguredTargetFunction implements SkyFunction {
   static ImmutableMap<Label, ConfigMatchingProvider> getConfigConditions(
       Target target,
       Environment env,
-      SkyframeDependencyResolver resolver,
       TargetAndConfiguration ctgValue,
       @Nullable NestedSetBuilder<Package> transitivePackagesForPackageRootResolution,
-      NestedSetBuilder<Cause> transitiveRootCauses,
-      @Nullable RuleTransitionFactory trimmingTransitionFactory)
+      NestedSetBuilder<Cause> transitiveRootCauses)
       throws DependencyEvaluationException, InterruptedException {
     if (!(target instanceof Rule)) {
       return NO_CONFIG_CONDITIONS;
     }
-
-    Map<Label, ConfigMatchingProvider> configConditions = new LinkedHashMap<>();
-
-    // Collect the labels of the configured targets we need to resolve.
-    OrderedSetMultimap<Attribute, Label> configLabelMap = OrderedSetMultimap.create();
-    RawAttributeMapper attributeMap = RawAttributeMapper.of(((Rule) target));
-    for (Attribute a : ((Rule) target).getAttributes()) {
-      for (Label configLabel : attributeMap.getConfigurabilityKeys(a.getName(), a.getType())) {
-        if (!BuildType.Selector.isReservedLabel(configLabel)) {
-          configLabelMap.put(a, target.getLabel().resolveRepositoryRelative(configLabel));
-        }
-      }
-    }
-    if (configLabelMap.isEmpty()) {
+    RawAttributeMapper attrs = RawAttributeMapper.of(((Rule) target));
+    if (!attrs.has(RuleClass.CONFIG_SETTING_DEPS_ATTRIBUTE)) {
       return NO_CONFIG_CONDITIONS;
     }
 
-    // Collect the actual deps, hard-coded to the current configuration (since by definition config
-    // conditions evaluate over the current target's configuration).
-    ImmutableList.Builder<Dependency> depsBuilder = ImmutableList.builder();
-    try {
-      Iterable<Dependency> dependencies =
-          resolver.resolveRuleLabels(
-              ctgValue, configLabelMap, transitiveRootCauses, trimmingTransitionFactory);
-      if (env.valuesMissing()) {
-        return null;
-      }
-      for (Dependency dep : dependencies) {
-        if (dep.hasExplicitConfiguration() && dep.getConfiguration() == null) {
-          // Bazel assumes non-existent labels are source files, which have a null configuration.
-          // Keep those as is. Otherwise ConfiguredTargetAndData throws an exception about a
-          // source file having a non-null configuration. The error checking later in this method
-          // reports a proper "bad config condition" error to the user.
-          depsBuilder.add(dep);
-        } else {
-          depsBuilder.add(Dependency.withConfigurationAndAspects(dep.getLabel(),
-              ctgValue.getConfiguration(), dep.getAspects()));
-        }
-      }
-    } catch (InconsistentAspectOrderException e) {
-      throw new DependencyEvaluationException(e);
+    // Collect the labels of the configured targets we need to resolve.
+    List<Label> configLabels =
+        attrs.get(RuleClass.CONFIG_SETTING_DEPS_ATTRIBUTE, BuildType.LABEL_LIST).stream()
+            .map(configLabel -> target.getLabel().resolveRepositoryRelative(configLabel))
+            .collect(Collectors.toList());
+    if (configLabels.isEmpty()) {
+      return NO_CONFIG_CONDITIONS;
     }
+
+    // Collect the actual deps without a configuration transition (since by definition config
+    // conditions evaluate over the current target's configuration). If the dependency is
+    // (erroneously) something that needs the null configuration, its analysis will be
+    // short-circuited. That error will be reported later.
+    ImmutableList.Builder<Dependency> depsBuilder = ImmutableList.builder();
+    for (Label configurabilityLabel : configLabels) {
+      Dependency configurabilityDependency =
+          Dependency.withConfiguration(configurabilityLabel, ctgValue.getConfiguration());
+      depsBuilder.add(configurabilityDependency);
+    }
+
     ImmutableList<Dependency> configConditionDeps = depsBuilder.build();
 
     Map<SkyKey, ConfiguredTargetAndData> configValues =
@@ -602,11 +619,14 @@ public final class ConfiguredTargetFunction implements SkyFunction {
       return null;
     }
 
+    Map<Label, ConfigMatchingProvider> configConditions = new LinkedHashMap<>();
+
     // Get the configured targets as ConfigMatchingProvider interfaces.
     for (Dependency entry : configConditionDeps) {
       SkyKey baseKey = ConfiguredTargetValue.key(entry.getLabel(), entry.getConfiguration());
       ConfiguredTarget value = configValues.get(baseKey).getConfiguredTarget();
-      // The code above guarantees that value is non-null here.
+      // The code above guarantees that value is non-null here and since the rule is a
+      // config_setting, provider must also be non-null.
       ConfigMatchingProvider provider = value.getProvider(ConfigMatchingProvider.class);
       if (provider != null) {
         configConditions.put(entry.getLabel(), provider);
@@ -681,11 +701,29 @@ public final class ConfiguredTargetFunction implements SkyFunction {
                 aliasDepsToRedo.add(dep);
                 continue;
               } else {
-                pkgValue =
-                    Preconditions.checkNotNull(
-                        (PackageValue) packageResult.get(),
-                        "Package should have been loaded during dep resolution: %s",
-                        dep);
+                pkgValue = (PackageValue) packageResult.get();
+                if (pkgValue == null) {
+                  // In a race, the getValuesOrThrow call above may have retrieved the package
+                  // before it was done but the configured target after it was done. However, the
+                  // configured target being done implies that the package is now done, so we can
+                  // retrieve it from the graph.
+                  pkgValue = (PackageValue) env.getValue(packageKey);
+                  if (pkgValue == null) {
+                    BugReport.sendBugReport(
+                        new IllegalStateException(
+                            "Package should have been loaded during dep resolution: "
+                                + dep
+                                + ", ("
+                                + depValue
+                                + ", "
+                                + packageResult
+                                + ", "
+                                + ctgValue
+                                + ")"));
+                    missedValues = true;
+                    continue;
+                  }
+                }
               }
             } else {
               // We were doing AliasConfiguredTarget mop-up.
@@ -746,7 +784,8 @@ public final class ConfiguredTargetFunction implements SkyFunction {
       Environment env,
       Target target,
       BuildConfiguration configuration,
-      OrderedSetMultimap<Attribute, ConfiguredTargetAndData> depValueMap,
+      ConfiguredTargetKey configuredTargetKey,
+      OrderedSetMultimap<DependencyKind, ConfiguredTargetAndData> depValueMap,
       ImmutableMap<Label, ConfigMatchingProvider> configConditions,
       @Nullable ToolchainContext toolchainContext,
       @Nullable NestedSetBuilder<Package> transitivePackagesForPackageRootResolution)
@@ -771,6 +810,7 @@ public final class ConfiguredTargetFunction implements SkyFunction {
               target,
               configuration,
               analysisEnvironment,
+              configuredTargetKey,
               depValueMap,
               configConditions,
               toolchainContext);
@@ -812,7 +852,8 @@ public final class ConfiguredTargetFunction implements SkyFunction {
           ruleConfiguredTarget,
           transitivePackagesForPackageRootResolution == null
               ? null
-              : transitivePackagesForPackageRootResolution.build());
+              : transitivePackagesForPackageRootResolution.build(),
+          nonceVersion.get());
     } else {
       GeneratingActions generatingActions;
       // Check for conflicting actions within this configured target (that indicates a bug in the
@@ -830,7 +871,8 @@ public final class ConfiguredTargetFunction implements SkyFunction {
           generatingActions,
           transitivePackagesForPackageRootResolution == null
               ? null
-              : transitivePackagesForPackageRootResolution.build());
+              : transitivePackagesForPackageRootResolution.build(),
+          nonceVersion.get());
     }
   }
 

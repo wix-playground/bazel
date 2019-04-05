@@ -23,6 +23,7 @@ import com.google.devtools.build.lib.analysis.PlatformConfiguration;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.platform.DeclaredToolchainInfo;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.cmdline.LabelConstants;
 import com.google.devtools.build.lib.cmdline.TargetParsingException;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.pkgcache.FilteringPolicies;
@@ -55,25 +56,26 @@ public class RegisteredToolchainsFunction implements SkyFunction {
     }
     BuildConfiguration configuration = buildConfigurationValue.getConfiguration();
 
-    ImmutableList.Builder<String> targetPatterns = new ImmutableList.Builder<>();
+    ImmutableList.Builder<String> targetPatternBuilder = new ImmutableList.Builder<>();
 
     // Get the toolchains from the configuration.
     PlatformConfiguration platformConfiguration =
         configuration.getFragment(PlatformConfiguration.class);
-    targetPatterns.addAll(platformConfiguration.getExtraToolchains());
+    targetPatternBuilder.addAll(platformConfiguration.getExtraToolchains());
 
     // Get the registered toolchains from the WORKSPACE.
-    targetPatterns.addAll(getWorkspaceToolchains(env));
+    targetPatternBuilder.addAll(getWorkspaceToolchains(env));
     if (env.valuesMissing()) {
       return null;
     }
+    ImmutableList<String> targetPatterns = targetPatternBuilder.build();
 
     // Expand target patterns.
     ImmutableList<Label> toolchainLabels;
     try {
       toolchainLabels =
           TargetPatternUtil.expandTargetPatterns(
-              env, targetPatterns.build(), FilteringPolicies.ruleType("toolchain", true));
+              env, targetPatterns, FilteringPolicies.ruleType("toolchain", true));
       if (env.valuesMissing()) {
         return null;
       }
@@ -110,7 +112,7 @@ public class RegisteredToolchainsFunction implements SkyFunction {
   @VisibleForTesting
   public static List<String> getRegisteredToolchains(Environment env) throws InterruptedException {
     PackageValue externalPackageValue =
-        (PackageValue) env.getValue(PackageValue.key(Label.EXTERNAL_PACKAGE_IDENTIFIER));
+        (PackageValue) env.getValue(PackageValue.key(LabelConstants.EXTERNAL_PACKAGE_IDENTIFIER));
     if (externalPackageValue == null) {
       return null;
     }
@@ -120,7 +122,9 @@ public class RegisteredToolchainsFunction implements SkyFunction {
   }
 
   private ImmutableList<DeclaredToolchainInfo> configureRegisteredToolchains(
-      Environment env, BuildConfiguration configuration, List<Label> labels)
+      Environment env,
+      BuildConfiguration configuration,
+      List<Label> labels)
       throws InterruptedException, RegisteredToolchainsFunctionException {
     ImmutableList<SkyKey> keys =
         labels

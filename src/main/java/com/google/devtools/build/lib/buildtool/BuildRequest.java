@@ -23,9 +23,10 @@ import com.google.common.collect.ImmutableSortedSet;
 import com.google.devtools.build.lib.analysis.AnalysisOptions;
 import com.google.devtools.build.lib.analysis.OutputGroupInfo;
 import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
+import com.google.devtools.build.lib.analysis.config.BuildOptions;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
-import com.google.devtools.build.lib.packages.SkylarkSemanticsOptions;
+import com.google.devtools.build.lib.packages.StarlarkSemanticsOptions;
 import com.google.devtools.build.lib.pkgcache.LoadingOptions;
 import com.google.devtools.build.lib.pkgcache.PackageCacheOptions;
 import com.google.devtools.build.lib.runtime.BlazeCommandEventHandler;
@@ -34,7 +35,7 @@ import com.google.devtools.build.lib.runtime.LoadingPhaseThreadsOption;
 import com.google.devtools.build.lib.util.OptionsUtils;
 import com.google.devtools.build.lib.util.io.OutErr;
 import com.google.devtools.common.options.OptionsBase;
-import com.google.devtools.common.options.OptionsClassProvider;
+import com.google.devtools.common.options.OptionsParsingResult;
 import com.google.devtools.common.options.OptionsProvider;
 import java.util.ArrayList;
 import java.util.List;
@@ -48,10 +49,10 @@ import java.util.concurrent.ExecutionException;
  * configuration, a pair of output/error streams, and additional options such
  * as --keep_going, --jobs, etc.
  */
-public class BuildRequest implements OptionsClassProvider {
+public class BuildRequest implements OptionsProvider {
   private final UUID id;
   private final LoadingCache<Class<? extends OptionsBase>, Optional<OptionsBase>> optionsCache;
-  private final Map<String, Object> skylarkOptions;
+  private final Map<String, Object> starlarkOptions;
 
   /** A human-readable description of all the non-default option settings. */
   private final String optionsDescription;
@@ -75,7 +76,7 @@ public class BuildRequest implements OptionsClassProvider {
       ImmutableList.of(
           BuildRequestOptions.class,
           PackageCacheOptions.class,
-          SkylarkSemanticsOptions.class,
+          StarlarkSemanticsOptions.class,
           LoadingOptions.class,
           AnalysisOptions.class,
           ExecutionOptions.class,
@@ -83,8 +84,8 @@ public class BuildRequest implements OptionsClassProvider {
           LoadingPhaseThreadsOption.class);
 
   private BuildRequest(String commandName,
-                       final OptionsProvider options,
-                       final OptionsProvider startupOptions,
+                       final OptionsParsingResult options,
+                       final OptionsParsingResult startupOptions,
                        List<String> targets,
                        OutErr outErr,
                        UUID id,
@@ -107,15 +108,22 @@ public class BuildRequest implements OptionsClassProvider {
             return Optional.fromNullable(result);
           }
         });
-    this.skylarkOptions = options.getSkylarkOptions();
+    this.starlarkOptions = options.getStarlarkOptions();
 
     for (Class<? extends OptionsBase> optionsClass : MANDATORY_OPTIONS) {
       Preconditions.checkNotNull(getOptions(optionsClass));
     }
   }
 
-  private Map<String, Object> getSkylarkOptions() {
-    return skylarkOptions;
+  /**
+   * Since the OptionsProvider interface is used by many teams, this method is String-keyed even
+   * though it should always contain labels for our purposes. Consumers of this method should
+   * probably use the {@link BuildOptions#labelizeStarlarkOptions} method before doing meaningful
+   * work with the results.
+   */
+  @Override
+  public Map<String, Object> getStarlarkOptions() {
+    return starlarkOptions;
   }
 
   /**
@@ -215,7 +223,7 @@ public class BuildRequest implements OptionsClassProvider {
   }
 
   /** Returns the value of the --keep_going option. */
-  boolean getKeepGoing() {
+  public boolean getKeepGoing() {
     return getOptions(KeepGoingOption.class).keepGoing;
   }
 
@@ -266,11 +274,6 @@ public class BuildRequest implements OptionsClassProvider {
     List<String> warnings = new ArrayList<>();
 
     int localTestJobs = getExecutionOptions().localTestJobs;
-    if (localTestJobs < 0) {
-      throw new InvalidConfigurationException(String.format(
-          "Invalid parameter for --local_test_jobs: %d. Only values 0 or greater are "
-              + "allowed.", localTestJobs));
-    }
     int jobs = getBuildOptions().jobs;
     if (localTestJobs > jobs) {
       warnings.add(
@@ -301,8 +304,8 @@ public class BuildRequest implements OptionsClassProvider {
     return ImmutableList.copyOf(getBuildOptions().aspects);
   }
 
-  public static BuildRequest create(String commandName, OptionsProvider options,
-      OptionsProvider startupOptions,
+  public static BuildRequest create(String commandName, OptionsParsingResult options,
+      OptionsParsingResult startupOptions,
       List<String> targets, OutErr outErr, UUID commandId, long commandStartTime) {
 
     BuildRequest request = new BuildRequest(commandName, options, startupOptions, targets, outErr,

@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.syntax;
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.skylarkinterface.StarlarkContext;
 
 /** A helper class for calling Skylark functions from Java. */
 @AutoCodec
@@ -23,13 +24,18 @@ public class SkylarkCallbackFunction {
 
   private final BaseFunction callback;
   private final FuncallExpression ast;
-  private final SkylarkSemantics skylarkSemantics;
+  private final StarlarkSemantics starlarkSemantics;
+  private final StarlarkContext starlarkContext;
 
   public SkylarkCallbackFunction(
-      BaseFunction callback, FuncallExpression ast, SkylarkSemantics skylarkSemantics) {
+      BaseFunction callback,
+      FuncallExpression ast,
+      StarlarkSemantics starlarkSemantics,
+      StarlarkContext starlarkContext) {
     this.callback = callback;
     this.ast = ast;
-    this.skylarkSemantics = skylarkSemantics;
+    this.starlarkSemantics = starlarkSemantics;
+    this.starlarkContext = starlarkContext;
   }
 
   public ImmutableList<String> getParameterNames() {
@@ -41,8 +47,9 @@ public class SkylarkCallbackFunction {
     try (Mutability mutability = Mutability.create("callback %s", callback)) {
       Environment env =
           Environment.builder(mutability)
-              .setSemantics(skylarkSemantics)
+              .setSemantics(starlarkSemantics)
               .setEventHandler(eventHandler)
+              .setStarlarkContext(starlarkContext)
               .build();
       return callback.call(buildArgumentList(ctx, arguments), null, ast, env);
     } catch (ClassCastException | IllegalArgumentException e) {

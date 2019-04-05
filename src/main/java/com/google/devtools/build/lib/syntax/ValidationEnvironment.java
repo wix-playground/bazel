@@ -23,15 +23,44 @@ import java.util.List;
 import java.util.Set;
 import javax.annotation.Nullable;
 
-/** A class for doing static checks on files, before evaluating them. */
+/**
+ * A class for doing static checks on files, before evaluating them.
+ *
+ * <p>We implement the semantics discussed in
+ * https://github.com/bazelbuild/proposals/blob/master/docs/2018-06-18-name-resolution.md
+ *
+ * <p>When a variable is defined, it is visible in the entire block. For example, a global variable
+ * is visible in the entire file; a variable in a function is visible in the entire function block
+ * (even on the lines before its first assignment).
+ */
 public final class ValidationEnvironment extends SyntaxTreeVisitor {
+
+  enum Scope {
+    /** Symbols defined inside a function or a comprehension. */
+    Local("local"),
+    /** Symbols defined at a module top-level, e.g. functions, loaded symbols. */
+    Module("global"),
+    /** Predefined symbols (builtins) */
+    Universe("builtin");
+
+    private final String qualifier;
+
+    private Scope(String qualifier) {
+      this.qualifier = qualifier;
+    }
+
+    public String getQualifier() {
+      return qualifier;
+    }
+  }
 
   private static class Block {
     private final Set<String> variables = new HashSet<>();
-    private final Set<String> readOnlyVariables = new HashSet<>();
+    private final Scope scope;
     @Nullable private final Block parent;
 
-    Block(@Nullable Block parent) {
+    Block(Scope scope, @Nullable Block parent) {
+      this.scope = scope;
       this.parent = parent;
     }
   }
@@ -56,46 +85,100 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
     }
   }
 
-  private final SkylarkSemantics semantics;
+  private final Environment env;
   private Block block;
   private int loopCount;
 
-  /** Create a ValidationEnvironment for a given global Environment. */
+  /** Create a ValidationEnvironment for a given global Environment (containing builtins). */
   ValidationEnvironment(Environment env) {
     Preconditions.checkArgument(env.isGlobal());
-    block = new Block(null);
+    this.env = env;
+    block = new Block(Scope.Universe, null);
     Set<String> builtinVariables = env.getVariableNames();
     block.variables.addAll(builtinVariables);
-    block.readOnlyVariables.addAll(builtinVariables);
-    semantics = env.getSemantics();
   }
 
-  @Override
-  public void visit(LoadStatement node) {
-    for (Identifier symbol : node.getSymbols()) {
-      declare(symbol.getName(), node.getLocation());
+  /**
+   * First pass: add all definitions to the current block. This is done because symbols are
+   * sometimes used before their definition point (e.g. a functions are not necessarily declared in
+   * order).
+   */
+  private void collectDefinitions(Iterable<Statement> stmts) {
+    for (Statement stmt : stmts) {
+      collectDefinitions(stmt);
     }
   }
 
-  @Override
-  public void visit(Identifier node) {
-    if (!hasSymbolInEnvironment(node.getName())) {
-      throw new ValidationException(node.createInvalidIdentifierException(getAllSymbols()));
+  private void collectDefinitions(Statement stmt) {
+    switch (stmt.kind()) {
+      case ASSIGNMENT:
+        collectDefinitions(((AssignmentStatement) stmt).getLValue());
+        break;
+      case AUGMENTED_ASSIGNMENT:
+        collectDefinitions(((AugmentedAssignmentStatement) stmt).getLValue());
+        break;
+      case IF:
+        IfStatement ifStmt = (IfStatement) stmt;
+        for (IfStatement.ConditionalStatements cond : ifStmt.getThenBlocks()) {
+          collectDefinitions(cond.getStatements());
+        }
+        collectDefinitions(ifStmt.getElseBlock());
+        break;
+      case FOR:
+        ForStatement forStmt = (ForStatement) stmt;
+        collectDefinitions(forStmt.getVariable());
+        collectDefinitions(forStmt.getBlock());
+        break;
+      case FUNCTION_DEF:
+        Identifier fctName = ((FunctionDefStatement) stmt).getIdentifier();
+        declare(fctName.getName(), fctName.getLocation());
+        break;
+      case LOAD:
+        for (LoadStatement.Binding binding : ((LoadStatement) stmt).getBindings()) {
+          declare(binding.getLocalName().getName(), binding.getLocalName().getLocation());
+        }
+        break;
+      case CONDITIONAL:
+      case EXPRESSION:
+      case FLOW:
+      case PASS:
+      case RETURN:
+        // nothing to declare
+    }
+  }
+
+  private void collectDefinitions(LValue left) {
+    for (Identifier id : left.boundIdentifiers()) {
+      declare(id.getName(), id.getLocation());
     }
   }
 
   private void validateLValue(Location loc, Expression expr) {
-    if (expr instanceof Identifier) {
-      declare(((Identifier) expr).getName(), loc);
-    } else if (expr instanceof IndexExpression) {
+    if (expr instanceof IndexExpression) {
       visit(expr);
     } else if (expr instanceof ListLiteral) {
       for (Expression e : ((ListLiteral) expr).getElements()) {
         validateLValue(loc, e);
       }
-    } else {
+    } else if (!(expr instanceof Identifier)) {
       throw new ValidationException(loc, "cannot assign to '" + expr + "'");
     }
+  }
+
+  @Override
+  public void visit(Identifier node) {
+    @Nullable Block b = blockThatDefines(node.getName());
+    if (b == null) {
+      // The identifier might not exist because it was restricted (hidden) by the current semantics.
+      // If this is the case, output a more helpful error message than 'not found'.
+      FlagGuardedValue result = env.getRestrictedBindings().get(node.getName());
+      if (result != null) {
+        throw new ValidationException(result.getEvalExceptionFromAttemptingAccess(
+            node.getLocation(), env.getSemantics(), node.getName()));
+      }
+      throw new ValidationException(node.createInvalidIdentifierException(getAllSymbols()));
+    }
+    node.setScope(b.scope);
   }
 
   @Override
@@ -105,7 +188,7 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
 
   @Override
   public void visit(ReturnStatement node) {
-    if (isTopLevel()) {
+    if (block.scope != Scope.Local) {
       throw new ValidationException(
           node.getLocation(), "return statements must be inside a function");
     }
@@ -137,7 +220,12 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
 
   @Override
   public void visit(AbstractComprehension node) {
-    openBlock();
+    openBlock(Scope.Local);
+    for (AbstractComprehension.Clause clause : node.getClauses()) {
+      if (clause.getLValue() != null) {
+        collectDefinitions(clause.getLValue());
+      }
+    }
     super.visit(node);
     closeBlock();
   }
@@ -149,23 +237,24 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
         visit(param.getDefaultValue());
       }
     }
-    openBlock();
+    openBlock(Scope.Local);
     for (Parameter<Expression, Expression> param : node.getParameters()) {
       if (param.hasName()) {
         declare(param.getName(), param.getLocation());
       }
     }
+    collectDefinitions(node.getStatements());
     visitAll(node.getStatements());
     closeBlock();
   }
 
   @Override
   public void visit(IfStatement node) {
-    if (isTopLevel()) {
+    if (block.scope != Scope.Local) {
       throw new ValidationException(
           node.getLocation(),
           "if statements are not allowed at the top level. You may move it inside a function "
-          + "or use an if expression (x if condition else y).");
+              + "or use an if expression (x if condition else y).");
     }
     super.visit(node);
   }
@@ -180,33 +269,26 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
     super.visit(node);
   }
 
-  /** Returns true if the current block is the top level i.e. has no parent. */
-  private boolean isTopLevel() {
-    return block.parent == null;
-  }
-
   /** Declare a variable and add it to the environment. */
   private void declare(String varname, Location location) {
-    if (block.readOnlyVariables.contains(varname)) {
+    if (block.scope == Scope.Module && block.variables.contains(varname)) {
+      // Symbols defined in the module scope cannot be reassigned.
       throw new ValidationException(
           location,
           String.format("Variable %s is read only", varname),
           "https://bazel.build/versions/master/docs/skylark/errors/read-only-variable.html");
     }
-    if (isTopLevel()) {  // top-level values are immutable
-      block.readOnlyVariables.add(varname);
-    }
     block.variables.add(varname);
   }
 
-  /** Returns true if the symbol exists in the validation environment (or a parent). */
-  private boolean hasSymbolInEnvironment(String varname) {
+  /** Returns the nearest Block that defines a symbol. */
+  private Block blockThatDefines(String varname) {
     for (Block b = block; b != null; b = b.parent) {
       if (b.variables.contains(varname)) {
-        return true;
+        return b;
       }
     }
-    return false;
+    return null;
   }
 
   /** Returns the set of all accessible symbols (both local and global) */
@@ -251,21 +333,19 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
   /** Validates the AST and runs static checks. */
   private void validateAst(List<Statement> statements) {
     // Check that load() statements are on top.
-    if (semantics.incompatibleBzlDisallowLoadAfterStatement()) {
+    if (env.getSemantics().incompatibleBzlDisallowLoadAfterStatement()) {
       checkLoadAfterStatement(statements);
     }
 
-    // Add every function in the environment before validating. This is
-    // necessary because functions may call other functions defined
-    // later in the file.
-    for (Statement statement : statements) {
-      if (statement instanceof FunctionDefStatement) {
-        FunctionDefStatement fct = (FunctionDefStatement) statement;
-        declare(fct.getIdentifier().getName(), fct.getLocation());
-      }
-    }
+    openBlock(Scope.Module);
 
-    this.visitAll(statements);
+    // Add each variable defined by statements, not including definitions that appear in
+    // sub-scopes of the given statements (function bodies and comprehensions).
+    collectDefinitions(statements);
+
+    // Second pass: ensure that all symbols have been defined.
+    visitAll(statements);
+    closeBlock();
   }
 
   public static void validateAst(Environment env, List<Statement> statements) throws EvalException {
@@ -293,8 +373,8 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
   }
 
   /** Open a new lexical block that will contain the future declarations. */
-  private void openBlock() {
-    block = new Block(block);
+  private void openBlock(Scope scope) {
+    block = new Block(scope, block);
   }
 
   /** Close a lexical block (and lose all declarations it contained). */

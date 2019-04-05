@@ -16,10 +16,12 @@ package com.google.devtools.build.lib.skylark;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.devtools.build.lib.analysis.OutputGroupInfo.INTERNAL_SUFFIX;
+import static com.google.devtools.build.lib.packages.FunctionSplitTransitionWhitelist.WHITELIST_ATTRIBUTE_NAME;
 import static org.junit.Assert.fail;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.truth.Correspondence;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
@@ -27,18 +29,25 @@ import com.google.devtools.build.lib.analysis.FileProvider;
 import com.google.devtools.build.lib.analysis.FilesToRunProvider;
 import com.google.devtools.build.lib.analysis.OutputGroupInfo;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
+import com.google.devtools.build.lib.analysis.config.StarlarkDefinedConfigTransition;
 import com.google.devtools.build.lib.analysis.configuredtargets.FileConfiguredTarget;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget;
-import com.google.devtools.build.lib.analysis.test.InstrumentedFilesProvider;
+import com.google.devtools.build.lib.analysis.skylark.StarlarkAttributeTransitionProvider;
+import com.google.devtools.build.lib.analysis.skylark.StarlarkRuleTransitionProvider;
+import com.google.devtools.build.lib.analysis.test.AnalysisFailure;
+import com.google.devtools.build.lib.analysis.test.AnalysisFailureInfo;
+import com.google.devtools.build.lib.analysis.test.AnalysisTestResultInfo;
+import com.google.devtools.build.lib.analysis.test.InstrumentedFilesInfo;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.packages.AttributeContainer;
 import com.google.devtools.build.lib.packages.BuildFileContainsErrorsException;
-import com.google.devtools.build.lib.packages.Info;
+import com.google.devtools.build.lib.packages.BuildSetting;
 import com.google.devtools.build.lib.packages.Provider;
 import com.google.devtools.build.lib.packages.SkylarkProvider;
 import com.google.devtools.build.lib.packages.SkylarkProvider.SkylarkKey;
+import com.google.devtools.build.lib.packages.StructImpl;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetAndData;
 import com.google.devtools.build.lib.skyframe.PackageFunction;
 import com.google.devtools.build.lib.skyframe.SkyFunctions;
@@ -47,6 +56,7 @@ import com.google.devtools.build.lib.syntax.Runtime;
 import com.google.devtools.build.lib.syntax.SkylarkList;
 import com.google.devtools.build.lib.syntax.SkylarkList.MutableList;
 import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
+import com.google.devtools.build.lib.syntax.Type;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.skyframe.InMemoryMemoizingEvaluator;
 import com.google.devtools.build.skyframe.SkyFunction;
@@ -81,7 +91,7 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
     checkError(
         "test/skylark",
         "the_rule",
-        "no such package '@r//': The repository could not be resolved",
+        "no such package '@r//': The repository '@r' could not be resolved",
         "load('//test/skylark:extension.bzl', 'my_rule')",
         "",
         "my_rule(name='the_rule')");
@@ -359,15 +369,15 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
         "str",
         "\t\tstr.index(1)"
             + System.lineSeparator()
-            + "expected value of type 'string' for parameter 'sub', "
-            + "in method call index(int) of 'string'");
+            + "expected value of type 'string' for parameter 'sub', for call to method "
+            + "index(sub, start = 0, end = None) of 'string'");
   }
 
   @Test
   public void testStackTraceMissingMethod() throws Exception {
     runStackTraceTest(
         "None",
-        "\t\tNone.index(1)" + System.lineSeparator() + "type 'NoneType' has no method index(int)");
+        "\t\tNone.index(1)" + System.lineSeparator() + "type 'NoneType' has no method index()");
   }
 
   protected void runStackTraceTest(String object, String errorMessage) throws Exception {
@@ -553,7 +563,7 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
         "  return struct(runfiles = rf)",
         "",
         "custom_rule = rule(implementation = custom_rule_impl, executable = True,",
-        "  attrs = {'data': attr.label_list(cfg='data', allow_files=True)})");
+        "  attrs = {'data': attr.label_list(allow_files=True)})");
 
     scratch.file(
         "test/skylark/BUILD",
@@ -644,7 +654,7 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
   }
 
   @Test
-  public void testInstrumentedFilesProviderWithCodeCoverageDiabled() throws Exception {
+  public void testInstrumentedFilesProviderWithCodeCoverageDisabled() throws Exception {
     scratch.file(
         "test/skylark/extension.bzl",
         "def custom_rule_impl(ctx):",
@@ -670,8 +680,8 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
     ConfiguredTarget target = getConfiguredTarget("//test/skylark:cr");
 
     assertThat(target.getLabel().toString()).isEqualTo("//test/skylark:cr");
-    InstrumentedFilesProvider provider = target.getProvider(InstrumentedFilesProvider.class);
-    assertWithMessage("InstrumentedFilesProvider should be set.").that(provider).isNotNull();
+    InstrumentedFilesInfo provider = target.get(InstrumentedFilesInfo.SKYLARK_CONSTRUCTOR);
+    assertWithMessage("InstrumentedFilesInfo should be set.").that(provider).isNotNull();
     assertThat(ActionsTestUtil.baseArtifactNames(provider.getInstrumentedFiles())).isEmpty();
   }
 
@@ -702,8 +712,71 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
     ConfiguredTarget target = getConfiguredTarget("//test/skylark:cr");
 
     assertThat(target.getLabel().toString()).isEqualTo("//test/skylark:cr");
-    InstrumentedFilesProvider provider = target.getProvider(InstrumentedFilesProvider.class);
-    assertWithMessage("InstrumentedFilesProvider should be set.").that(provider).isNotNull();
+    InstrumentedFilesInfo provider = target.get(InstrumentedFilesInfo.SKYLARK_CONSTRUCTOR);
+    assertWithMessage("InstrumentedFilesInfo should be set.").that(provider).isNotNull();
+    assertThat(ActionsTestUtil.baseArtifactNames(provider.getInstrumentedFiles()))
+        .containsExactly("a.txt", "A.java");
+  }
+
+  @Test
+  public void testInstrumentedFilesInfo_coverageDisabled() throws Exception {
+    scratch.file(
+        "test/skylark/extension.bzl",
+        "def custom_rule_impl(ctx):",
+        "  return struct(instrumented_files=struct(",
+        "      extensions = ['txt'],",
+        "      source_attributes = ['attr1'],",
+        "      dependency_attributes = ['attr2']))",
+        "",
+        "custom_rule = rule(implementation = custom_rule_impl,",
+        "  attrs = {",
+        "      'attr1': attr.label_list(mandatory = True, allow_files=True),",
+        "      'attr2': attr.label_list(mandatory = True)})");
+
+    scratch.file(
+        "test/skylark/BUILD",
+        "load('//test/skylark:extension.bzl', 'custom_rule')",
+        "",
+        "java_library(name='jl', srcs = [':A.java'])",
+        "custom_rule(name = 'cr', attr1 = [':a.txt', ':a.random'], attr2 = [':jl'])");
+
+    useConfiguration("--nocollect_code_coverage");
+
+    ConfiguredTarget target = getConfiguredTarget("//test/skylark:cr");
+
+    InstrumentedFilesInfo provider = target.get(InstrumentedFilesInfo.SKYLARK_CONSTRUCTOR);
+    assertWithMessage("InstrumentedFilesInfo should be set.").that(provider).isNotNull();
+    assertThat(ActionsTestUtil.baseArtifactNames(provider.getInstrumentedFiles())).isEmpty();
+  }
+
+  @Test
+  public void testInstrumentedFilesInfo_coverageEnabled() throws Exception {
+    scratch.file(
+        "test/skylark/extension.bzl",
+        "def custom_rule_impl(ctx):",
+        "  return [coverage_common.instrumented_files_info(ctx,",
+        "      extensions = ['txt'],",
+        "      source_attributes = ['attr1'],",
+        "      dependency_attributes = ['attr2'])]",
+        "",
+        "custom_rule = rule(implementation = custom_rule_impl,",
+        "  attrs = {",
+        "      'attr1': attr.label_list(mandatory = True, allow_files=True),",
+        "      'attr2': attr.label_list(mandatory = True)})");
+
+    scratch.file(
+        "test/skylark/BUILD",
+        "load('//test/skylark:extension.bzl', 'custom_rule')",
+        "",
+        "java_library(name='jl', srcs = [':A.java'])",
+        "custom_rule(name = 'cr', attr1 = [':a.txt', ':a.random'], attr2 = [':jl'])");
+
+    useConfiguration("--collect_code_coverage");
+
+    ConfiguredTarget target = getConfiguredTarget("//test/skylark:cr");
+
+    InstrumentedFilesInfo provider = target.get(InstrumentedFilesInfo.SKYLARK_CONSTRUCTOR);
+    assertWithMessage("InstrumentedFilesInfo should be set.").that(provider).isNotNull();
     assertThat(ActionsTestUtil.baseArtifactNames(provider.getInstrumentedFiles()))
         .containsExactly("a.txt", "A.java");
   }
@@ -1052,6 +1125,94 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
   }
 
   @Test
+  public void testNoOutputAttrDefault() throws Exception {
+    setSkylarkSemanticsOptions("--incompatible_no_output_attr_default=true");
+
+    scratch.file(
+        "test/extension.bzl",
+        "def custom_rule_impl(ctx):",
+        "  out_file = ctx.actions.declare_file(ctx.attr._o1.name)",
+        "  ctx.actions.write(output=out_file, content='hi')",
+        "  return struct(o1=ctx.attr._o1)",
+        "",
+        "def output_fn():",
+        "  return Label('//test/skylark:foo.txt')",
+        "",
+        "custom_rule = rule(implementation = custom_rule_impl,",
+        "  attrs = {'_o1': attr.output(default = output_fn)})");
+
+    scratch.file(
+        "test/BUILD",
+        "load('//test:extension.bzl', 'custom_rule')",
+        "",
+        "custom_rule(name = 'r')");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test:r");
+    assertContainsEvent(
+        "parameter 'default' is deprecated and will be removed soon. It may be "
+            + "temporarily re-enabled by setting --incompatible_no_output_attr_default=false");
+  }
+
+  @Test
+  public void testNoOutputListAttrDefault() throws Exception {
+    setSkylarkSemanticsOptions("--incompatible_no_output_attr_default=true");
+
+    scratch.file(
+        "test/extension.bzl",
+        "def custom_rule_impl(ctx):",
+        "  return []",
+        "",
+        "custom_rule = rule(implementation = custom_rule_impl,",
+        "  attrs = {'outs': attr.output_list(default = [])})");
+
+    scratch.file(
+        "test/BUILD",
+        "load('//test:extension.bzl', 'custom_rule')",
+        "",
+        "custom_rule(name = 'r')");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test:r");
+    assertContainsEvent(
+        "parameter 'default' is deprecated and will be removed soon. It may be "
+            + "temporarily re-enabled by setting --incompatible_no_output_attr_default=false");
+  }
+
+  @Test
+  public void testLegacyOutputAttrDefault() throws Exception {
+    // Note that use of the "default" parameter of attr.output and attr.output_label is deprecated
+    // and barely functional. This test simply serves as proof-of-concept verification that the
+    // legacy behavior remains intact.
+    setSkylarkSemanticsOptions("--incompatible_no_output_attr_default=false");
+
+    scratch.file(
+        "test/skylark/extension.bzl",
+        "def custom_rule_impl(ctx):",
+        "  out_file = ctx.actions.declare_file(ctx.attr._o1.name)",
+        "  ctx.actions.write(output=out_file, content='hi')",
+        "  return struct(o1=ctx.attr._o1,",
+        "                o2=ctx.attr.o2)",
+        "",
+        "def output_fn():",
+        "  return Label('//test/skylark:foo.txt')",
+        "",
+        "custom_rule = rule(implementation = custom_rule_impl,",
+        "  attrs = {'_o1': attr.output(default = output_fn),",
+        "           'o2': attr.output_list(default = [])})");
+
+    scratch.file(
+        "test/skylark/BUILD",
+        "load('//test/skylark:extension.bzl', 'custom_rule')",
+        "",
+        "custom_rule(name = 'cr')");
+
+    ConfiguredTarget target = getConfiguredTarget("//test/skylark:cr");
+    assertThat(target.get("o1")).isEqualTo(Label.parseAbsoluteUnchecked("//test/skylark:foo.txt"));
+    assertThat(target.get("o2")).isEqualTo(MutableList.empty());
+  }
+
+  @Test
   public void testRuleClassNonMandatoryEmptyOutputs() throws Exception {
     scratch.file(
         "test/skylark/extension.bzl",
@@ -1152,7 +1313,7 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
         new SkylarkProvider.SkylarkKey(
             Label.create(configuredTarget.getLabel().getPackageIdentifier(), "extension.bzl"),
             "my_provider");
-    Info declaredProvider = configuredTarget.get(key);
+    StructImpl declaredProvider = (StructImpl) configuredTarget.get(key);
     assertThat(declaredProvider).isNotNull();
     assertThat(declaredProvider.getProvider().getKey()).isEqualTo(key);
     assertThat(declaredProvider.getValue("x")).isEqualTo(1);
@@ -1178,10 +1339,74 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
         new SkylarkProvider.SkylarkKey(
             Label.create(configuredTarget.getLabel().getPackageIdentifier(), "extension.bzl"),
             "my_provider");
-    Info declaredProvider = configuredTarget.get(key);
+    StructImpl declaredProvider = (StructImpl) configuredTarget.get(key);
     assertThat(declaredProvider).isNotNull();
     assertThat(declaredProvider.getProvider().getKey()).isEqualTo(key);
     assertThat(declaredProvider.getValue("x")).isEqualTo(1);
+  }
+
+  @Test
+  public void testRuleReturningUnwrappedDeclaredProvider() throws Exception {
+    scratch.file(
+        "test/extension.bzl",
+        "my_provider = provider()",
+        "def _impl(ctx):",
+        "   return my_provider(x = 1)",
+        "my_rule = rule(_impl)"
+    );
+    scratch.file(
+        "test/BUILD",
+        "load(':extension.bzl', 'my_rule')",
+        "my_rule(name = 'r')"
+    );
+
+    ConfiguredTarget configuredTarget  = getConfiguredTarget("//test:r");
+    Provider.Key key =
+        new SkylarkProvider.SkylarkKey(
+            Label.create(configuredTarget.getLabel().getPackageIdentifier(), "extension.bzl"),
+            "my_provider");
+    StructImpl declaredProvider = (StructImpl) configuredTarget.get(key);
+    assertThat(declaredProvider).isNotNull();
+    assertThat(declaredProvider.getProvider().getKey()).isEqualTo(key);
+    assertThat(declaredProvider.getValue("x")).isEqualTo(1);
+  }
+
+  @Test
+  public void testConflictingProviderKeys_fromStruct_disallowed() throws Exception {
+    scratch.file(
+        "test/extension.bzl",
+        "my_provider = provider()",
+        "other_provider = provider()",
+        "def _impl(ctx):",
+        "   return struct(providers = [my_provider(x = 1), other_provider(), my_provider(x = 2)])",
+        "my_rule = rule(_impl)"
+    );
+
+    checkError(
+        "test",
+        "r",
+        "Multiple conflicting returned providers with key my_provider",
+        "load(':extension.bzl', 'my_rule')",
+        "my_rule(name = 'r')");
+  }
+
+  @Test
+  public void testConflictingProviderKeys_fromIterable_disallowed() throws Exception {
+    scratch.file(
+        "test/extension.bzl",
+        "my_provider = provider()",
+        "other_provider = provider()",
+        "def _impl(ctx):",
+        "   return [my_provider(x = 1), other_provider(), my_provider(x = 2)]",
+        "my_rule = rule(_impl)"
+    );
+
+    checkError(
+        "test",
+        "r",
+        "Multiple conflicting returned providers with key my_provider",
+        "load(':extension.bzl', 'my_rule')",
+        "my_rule(name = 'r')");
   }
 
   @Test
@@ -1404,6 +1629,7 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
     }
     assertContainsEvent(
         "cycle detected in extension files: \n"
+            + "    test/skylark/BUILD\n"
             + "    //test/skylark:ext1.bzl\n"
             + ".-> //test/skylark:ext2.bzl\n"
             + "|   //test/skylark:ext3.bzl\n"
@@ -1413,6 +1639,7 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
 
   @Test
   public void testSymbolPropagateThroughImports() throws Exception {
+    setSkylarkSemanticsOptions("--incompatible_no_transitive_loads=false");
     scratch.file("test/skylark/implementation.bzl", "def custom_rule_impl(ctx):", "  return None");
 
     scratch.file(
@@ -1423,8 +1650,7 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
         "test/skylark/extension1.bzl",
         "load('//test/skylark:extension2.bzl', 'custom_rule_impl')",
         "",
-        "custom_rule = rule(implementation = custom_rule_impl,",
-        "     attrs = {'dep': attr.label_list()})");
+        "custom_rule = rule(implementation = custom_rule_impl)");
 
     scratch.file(
         "test/skylark/BUILD",
@@ -1432,6 +1658,31 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
         "custom_rule(name = 'cr')");
 
     getConfiguredTarget("//test/skylark:cr");
+  }
+
+  @Test
+  public void testSymbolDoNotPropagateThroughImports() throws Exception {
+    setSkylarkSemanticsOptions("--incompatible_no_transitive_loads=true");
+    scratch.file("test/skylark/implementation.bzl", "def custom_rule_impl(ctx):", "  return None");
+
+    scratch.file(
+        "test/skylark/extension2.bzl",
+        "load('//test/skylark:implementation.bzl', 'custom_rule_impl')");
+
+    scratch.file(
+        "test/skylark/extension1.bzl",
+        "load('//test/skylark:extension2.bzl', 'custom_rule_impl')",
+        "",
+        "custom_rule = rule(implementation = custom_rule_impl)");
+
+    scratch.file(
+        "test/skylark/BUILD",
+        "load('//test/skylark:extension1.bzl', 'custom_rule')",
+        "custom_rule(name = 'cr')");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test/skylark:cr");
+    assertContainsEvent("does not contain symbol 'custom_rule_impl'");
   }
 
   @Test
@@ -1458,7 +1709,7 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
         "test/skylark/BUILD",
         "load('//test/skylark:macro.bzl', 'x')",
         "pass", // syntax error
-        "print(1 / (5 - x)"); // division by 0
+        "print(1 // (5 - x)"); // division by 0
 
     // Make sure that evaluation continues and load() succeeds, despite a syntax
     // error in the file.
@@ -1643,13 +1894,16 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
         new SkylarkKey(Label.parseAbsolute("//test:rule.bzl", ImmutableMap.of()), "PInfo");
 
     ConfiguredTarget targetXXX = getConfiguredTarget("//test:xxx");
-    assertThat(targetXXX.get(pInfoKey).getValue("s"))
+    StructImpl structXXX = (StructImpl) targetXXX.get(pInfoKey);
+
+    assertThat(structXXX.getValue("s"))
         .isEqualTo(
             "ctx.outputs(executable = <generated file test/xxx>, "
                 + "other = <generated file test/xxx.other>)");
 
     ConfiguredTarget targetYYY = getConfiguredTarget("//test:yyy");
-    assertThat(targetYYY.get(pInfoKey).getValue("s"))
+    StructImpl structYYY = (StructImpl) targetYYY.get(pInfoKey);
+    assertThat(structYYY.getValue("s"))
         .isEqualTo("ctx.outputs(for //test:xxx)");
   }
 
@@ -1764,6 +2018,856 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
         "//test/skylark:dep doesn't support expected environment: //buildenv/foo:default");
   }
 
+  @Test
+  public void testNoTargetOutputGroup() throws Exception {
+    setSkylarkSemanticsOptions("--incompatible_no_target_output_group=true");
+    scratch.file(
+        "test/skylark/extension.bzl",
+        "def _impl(ctx):",
+        "  f = ctx.attr.dep.output_group()",
+        "  return struct()",
+        "my_rule = rule(implementation = _impl,",
+        "    attrs = { 'dep' : attr.label() })");
+
+    checkError(
+        "test/skylark",
+        "r",
+        "type 'Target' has no method output_group()",
+        "load('//test/skylark:extension.bzl',  'my_rule')",
+        "cc_binary(name = 'lib', data = ['a.txt'])",
+        "my_rule(name='r', dep = ':lib')");
+  }
+
+  @Test
+  public void testAnalysisFailureInfo() throws Exception {
+    scratch.file(
+        "test/extension.bzl",
+        "def custom_rule_impl(ctx):",
+        "   fail('This Is My Failure Message')",
+        "   return []",
+        "",
+        "custom_rule = rule(implementation = custom_rule_impl)");
+
+    scratch.file(
+        "test/BUILD",
+        "load('//test:extension.bzl', 'custom_rule')",
+        "",
+        "custom_rule(name = 'r')");
+
+    useConfiguration("--allow_analysis_failures=true");
+
+    ConfiguredTarget target = getConfiguredTarget("//test:r");
+    AnalysisFailureInfo info =
+        (AnalysisFailureInfo) target.get(AnalysisFailureInfo.SKYLARK_CONSTRUCTOR.getKey());
+    AnalysisFailure failure = info.getCauses().toList().get(0);
+    assertThat(failure.getMessage()).contains("This Is My Failure Message");
+    assertThat(failure.getLabel()).isEqualTo(Label.parseAbsoluteUnchecked("//test:r"));
+  }
+
+  @Test
+  public void testAnalysisFailureInfoWithOutput() throws Exception {
+    scratch.file(
+        "test/extension.bzl",
+        "def custom_rule_impl(ctx):",
+        "   fail('This Is My Failure Message')",
+        "   return []",
+        "",
+        "custom_rule = rule(implementation = custom_rule_impl,",
+        "    outputs = {'my_output': '%{name}.txt'})");
+
+    scratch.file(
+        "test/BUILD", "load('//test:extension.bzl', 'custom_rule')", "", "custom_rule(name = 'r')");
+
+    useConfiguration("--allow_analysis_failures=true");
+
+    ConfiguredTarget target = getConfiguredTarget("//test:r");
+    AnalysisFailureInfo info =
+        (AnalysisFailureInfo) target.get(AnalysisFailureInfo.SKYLARK_CONSTRUCTOR.getKey());
+    AnalysisFailure failure = info.getCauses().toList().get(0);
+    assertThat(failure.getMessage()).contains("This Is My Failure Message");
+    assertThat(failure.getLabel()).isEqualTo(Label.parseAbsoluteUnchecked("//test:r"));
+  }
+
+  @Test
+  public void testTransitiveAnalysisFailureInfo() throws Exception {
+    scratch.file(
+        "test/extension.bzl",
+        "def custom_rule_impl(ctx):",
+        "   fail('This Is My Failure Message')",
+        "   return []",
+        "",
+        "custom_rule = rule(implementation = custom_rule_impl)",
+        "",
+        "def depending_rule_impl(ctx):",
+        "   return []",
+        "",
+        "depending_rule = rule(implementation = depending_rule_impl,",
+        "     attrs = {'deps' : attr.label_list()})");
+
+    scratch.file(
+        "test/BUILD",
+        "load('//test:extension.bzl', 'custom_rule', 'depending_rule')",
+        "",
+        "custom_rule(name = 'one')",
+        "custom_rule(name = 'two')",
+        "depending_rule(name = 'failures_are_direct_deps',",
+        "    deps = [':one', ':two'])",
+        "depending_rule(name = 'failures_are_indirect_deps',",
+        "    deps = [':failures_are_direct_deps'])");
+
+    useConfiguration("--allow_analysis_failures=true");
+
+    ConfiguredTarget target = getConfiguredTarget("//test:failures_are_indirect_deps");
+    AnalysisFailureInfo info =
+        (AnalysisFailureInfo) target.get(AnalysisFailureInfo.SKYLARK_CONSTRUCTOR.getKey());
+
+    Correspondence<AnalysisFailure, AnalysisFailure> correspondence =
+        new Correspondence<AnalysisFailure, AnalysisFailure>() {
+          @Override
+          public boolean compare(AnalysisFailure actual, AnalysisFailure expected) {
+            return actual.getLabel().equals(expected.getLabel())
+                && actual.getMessage().contains(expected.getMessage());
+          }
+
+          @Override
+          public String toString() {
+            return "is equivalent to";
+          }
+        };
+
+    AnalysisFailure expectedOne =
+        new AnalysisFailure(
+            Label.parseAbsoluteUnchecked("//test:one"), "This Is My Failure Message");
+    AnalysisFailure expectedTwo =
+        new AnalysisFailure(
+            Label.parseAbsoluteUnchecked("//test:two"), "This Is My Failure Message");
+
+    assertThat(info.getCauses().toList())
+        .comparingElementsUsing(correspondence)
+        .containsExactly(expectedOne, expectedTwo);
+  }
+
+  @Test
+  public void testTestResultInfo() throws Exception {
+    scratch.file(
+        "test/extension.bzl",
+        "def custom_rule_impl(ctx):",
+        "  return [AnalysisTestResultInfo(success = True, message = 'message contents')]",
+        "",
+        "custom_rule = rule(implementation = custom_rule_impl)");
+
+    scratch.file(
+        "test/BUILD",
+        "load('//test:extension.bzl', 'custom_rule')",
+        "",
+        "custom_rule(name = 'r')");
+
+    ConfiguredTarget target = getConfiguredTarget("//test:r");
+    AnalysisTestResultInfo info =
+        (AnalysisTestResultInfo) target.get(AnalysisTestResultInfo.SKYLARK_CONSTRUCTOR.getKey());
+    assertThat(info.getSuccess()).isTrue();
+    assertThat(info.getMessage()).isEqualTo("message contents");
+  }
+
+  @Test
+  public void testAnalysisTestRuleWithActionRegistration() throws Exception {
+    scratch.file(
+        "test/extension.bzl",
+        "def custom_rule_impl(ctx):",
+        "  out_file = ctx.actions.declare_file('file.txt')",
+        "  ctx.actions.write(output=out_file, content='hi')",
+        "  return []",
+        "",
+        "custom_test = rule(implementation = custom_rule_impl, analysis_test = True)");
+
+    scratch.file(
+        "test/BUILD", "load('//test:extension.bzl', 'custom_test')", "", "custom_test(name = 'r')");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test:r");
+    assertContainsEvent(
+        "implementation function of a rule with analysis_test=true may not register actions");
+  }
+
+  @Test
+  public void testAnalysisTestRuleWithFlag() throws Exception {
+    scratch.file(
+        "test/extension.bzl",
+        "def custom_rule_impl(ctx):",
+        "  return [AnalysisTestResultInfo(success = True, message = 'message contents')]",
+        "",
+        "custom_test = rule(implementation = custom_rule_impl, analysis_test = True)");
+
+    scratch.file(
+        "test/BUILD", "load('//test:extension.bzl', 'custom_test')", "", "custom_test(name = 'r')");
+
+    ConfiguredTarget target = getConfiguredTarget("//test:r");
+    AnalysisTestResultInfo info =
+        (AnalysisTestResultInfo) target.get(AnalysisTestResultInfo.SKYLARK_CONSTRUCTOR.getKey());
+    assertThat(info.getSuccess()).isTrue();
+    assertThat(info.getMessage()).isEqualTo("message contents");
+
+    // TODO(cparsons): Verify implicit action registration via AnalysisTestResultInfo.
+  }
+
+  @Test
+  public void testAnalysisTestTransitionOnAnalysisTest() throws Exception {
+    useConfiguration("--copt=yeehaw");
+
+    scratch.file(
+        "test/extension.bzl",
+        "MyInfo = provider()",
+        "MyDep = provider()",
+        "",
+        "def outer_rule_impl(ctx):",
+        "  return [MyInfo(copts = ctx.fragments.cpp.copts),",
+        "          MyDep(info = ctx.attr.dep[0][MyInfo]),",
+        "          AnalysisTestResultInfo(success = True, message = 'message contents')]",
+        "def inner_rule_impl(ctx):",
+        "  return [MyInfo(copts = ctx.fragments.cpp.copts)]",
+        "",
+        "my_transition = analysis_test_transition(",
+        "    settings = {",
+        "        '//command_line_option:copt' : ['cowabunga'] }",
+        ")",
+        "inner_rule = rule(implementation = inner_rule_impl,",
+        "                  fragments = ['cpp'])",
+        "outer_rule_test = rule(",
+        "  implementation = outer_rule_impl,",
+        "  fragments = ['cpp'],",
+        "  analysis_test = True,",
+        "  attrs = {",
+        "    'dep':  attr.label(cfg = my_transition),",
+        "  })");
+
+    scratch.file(
+        "test/BUILD",
+        "load('//test:extension.bzl', 'inner_rule', 'outer_rule_test')",
+        "",
+        "inner_rule(name = 'inner')",
+        "outer_rule_test(name = 'r', dep = ':inner')");
+
+    SkylarkKey myInfoKey =
+        new SkylarkKey(Label.parseAbsolute("//test:extension.bzl", ImmutableMap.of()), "MyInfo");
+    SkylarkKey myDepKey =
+        new SkylarkKey(Label.parseAbsolute("//test:extension.bzl", ImmutableMap.of()), "MyDep");
+
+    ConfiguredTarget outerTarget = getConfiguredTarget("//test:r");
+    StructImpl outerInfo = (StructImpl) outerTarget.get(myInfoKey);
+    StructImpl outerDepInfo = (StructImpl) outerTarget.get(myDepKey);
+    StructImpl innerInfo = (StructImpl) outerDepInfo.getValue("info");
+
+    assertThat((SkylarkList) outerInfo.getValue("copts")).containsExactly("yeehaw");
+    assertThat((SkylarkList) innerInfo.getValue("copts")).containsExactly("cowabunga");
+  }
+
+  @Test
+  public void testAnalysisTestTransitionOnNonAnalysisTest() throws Exception {
+    scratch.file(
+        "test/extension.bzl",
+        "def custom_rule_impl(ctx):",
+        "  return []",
+        "my_transition = analysis_test_transition(",
+        "    settings = {",
+        "        '//command_line_option:test_arg' : ['yeehaw'] }",
+        ")",
+        "",
+        "custom_rule = rule(",
+        "  implementation = custom_rule_impl,",
+        "  attrs = {",
+        "    'dep':  attr.label(cfg = my_transition),",
+        "  })");
+
+    scratch.file(
+        "test/BUILD",
+        "load('//test:extension.bzl', 'custom_rule')",
+        "",
+        "custom_rule(name = 'r')");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test:r");
+    assertContainsEvent(
+        "Only rule definitions with analysis_test=True may have attributes "
+            + "with analysis_test_transition transitions");
+  }
+
+  @Test
+  public void testBuildSettingRule_flag() throws Exception {
+    setSkylarkSemanticsOptions("--experimental_build_setting_api=true");
+
+    scratch.file("test/rules.bzl",
+        "def _impl(ctx): return None",
+        "build_setting_rule = rule(_impl, build_setting = config.string(flag=True))");
+    scratch.file("test/BUILD",
+    "load('//test:rules.bzl', 'build_setting_rule')",
+    "build_setting_rule(name = 'my_build_setting', build_setting_default = 'default')");
+
+    BuildSetting buildSetting =
+        getTarget("//test:my_build_setting")
+            .getAssociatedRule()
+            .getRuleClassObject()
+            .getBuildSetting();
+
+    assertThat(buildSetting.getType()).isEqualTo(Type.STRING);
+    assertThat(buildSetting.isFlag()).isTrue();
+  }
+
+  @Test
+  public void testBuildSettingRule_settingByDefault() throws Exception {
+    setSkylarkSemanticsOptions("--experimental_build_setting_api=true");
+
+    scratch.file("test/rules.bzl",
+        "def _impl(ctx): return None",
+        "build_setting_rule = rule(_impl, build_setting = config.string())");
+    scratch.file("test/BUILD",
+        "load('//test:rules.bzl', 'build_setting_rule')",
+        "build_setting_rule(name = 'my_build_setting', build_setting_default = 'default')");
+
+    BuildSetting buildSetting =
+        getTarget("//test:my_build_setting")
+            .getAssociatedRule()
+            .getRuleClassObject()
+            .getBuildSetting();
+
+    assertThat(buildSetting.getType()).isEqualTo(Type.STRING);
+    assertThat(buildSetting.isFlag()).isFalse();
+  }
+
+  @Test
+  public void testBuildSettingRule_settingByFlagParameter() throws Exception {
+    setSkylarkSemanticsOptions("--experimental_build_setting_api=true");
+
+    scratch.file("test/rules.bzl",
+        "def _impl(ctx): return None",
+        "build_setting_rule = rule(_impl, build_setting = config.string(flag=False))");
+    scratch.file("test/BUILD",
+        "load('//test:rules.bzl', 'build_setting_rule')",
+        "build_setting_rule(name = 'my_build_setting', build_setting_default = 'default')");
+
+    BuildSetting buildSetting =
+        getTarget("//test:my_build_setting")
+            .getAssociatedRule()
+            .getRuleClassObject()
+            .getBuildSetting();
+
+    assertThat(buildSetting.getType()).isEqualTo(Type.STRING);
+    assertThat(buildSetting.isFlag()).isFalse();
+  }
+
+
+  @Test
+  public void testBuildSettingRule_noDefault() throws Exception {
+    setSkylarkSemanticsOptions("--experimental_build_setting_api=true");
+
+    scratch.file("test/rules.bzl",
+        "def _impl(ctx): return None",
+        "build_setting_rule = rule(_impl, build_setting = config.string())");
+    scratch.file("test/BUILD",
+        "load('//test:rules.bzl', 'build_setting_rule')",
+        "build_setting_rule(name = 'my_build_setting')");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test:my_build_setting");
+    assertContainsEvent("missing value for mandatory attribute "
+        + "'build_setting_default' in 'build_setting_rule' rule");
+
+  }
+
+  @Test
+  public void testBuildSettingRule_errorsWithoutExperimentalFlag() throws Exception {
+    setSkylarkSemanticsOptions("--experimental_build_setting_api=false");
+
+    scratch.file(
+        "test/rules.bzl",
+        "def _impl(ctx): return None",
+        "build_setting_rule = rule(_impl, build_setting = config.string())");
+    scratch.file(
+        "test/BUILD",
+        "load('//test:rules.bzl', 'build_setting_rule')",
+        "build_setting_rule(name = 'my_build_setting', build_setting_default = 'default')");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test:my_build_setting");
+    assertContainsEvent(
+        "parameter 'build_setting' is experimental and thus unavailable with the "
+            + "current flags. It may be enabled by setting --experimental_build_setting_api");
+  }
+
+  @Test
+  public void testAnalysisTestCannotDependOnAnalysisTest() throws Exception {
+    scratch.file(
+        "test/extension.bzl",
+        "",
+        "def analysis_test_rule_impl(ctx):",
+        "  return [AnalysisTestResultInfo(success = True, message = 'message contents')]",
+        "def middle_rule_impl(ctx):",
+        "  return []",
+        "def inner_rule_impl(ctx):",
+        "  return [AnalysisTestResultInfo(success = True, message = 'message contents')]",
+        "",
+        "my_transition = analysis_test_transition(",
+        "    settings = {",
+        "        '//command_line_option:test_arg' : ['yeehaw'] }",
+        ")",
+        "",
+        "inner_rule_test = rule(",
+        "  implementation = analysis_test_rule_impl,",
+        "  analysis_test = True,",
+        ")",
+        "middle_rule = rule(",
+        "  implementation = middle_rule_impl,",
+        "  attrs = {'dep':  attr.label()}",
+        ")",
+        "outer_rule_test = rule(",
+        "  implementation = analysis_test_rule_impl,",
+        "  analysis_test = True,",
+        "  attrs = {",
+        "    'dep':  attr.label(cfg = my_transition),",
+        "  })");
+
+    scratch.file(
+        "test/BUILD",
+        "load('//test:extension.bzl', 'outer_rule_test', 'middle_rule', 'inner_rule_test')",
+        "",
+        "outer_rule_test(name = 'outer', dep = ':middle')",
+        "middle_rule(name = 'middle', dep = ':inner')",
+        "inner_rule_test(name = 'inner')");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test:outer");
+    assertContainsEvent(
+        "analysis_test rule '//test:inner' cannot be transitively "
+            + "depended on by another analysis test rule");
+  }
+
+  @Test
+  public void testAnalysisTestOverDepsLimit() throws Exception {
+    setupAnalysisTestDepsLimitTest(10, 12, true);
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test:r");
+    assertContainsEvent(
+        "analysis test rule excedeed maximum dependency edge count. " + "Count: 13. Limit is 10.");
+  }
+
+  @Test
+  public void testAnalysisTestUnderDepsLimit() throws Exception {
+    setupAnalysisTestDepsLimitTest(10, 8, true);
+
+    assertThat(getConfiguredTarget("//test:r")).isNotNull();
+  }
+
+  @Test
+  public void testAnalysisDepsLimitOnlyForTransition() throws Exception {
+    setupAnalysisTestDepsLimitTest(3, 10, false);
+
+    assertThat(getConfiguredTarget("//test:r")).isNotNull();
+  }
+
+  private void setupAnalysisTestDepsLimitTest(
+      int limit, int dependencyChainSize, boolean useTransition) throws Exception {
+    useConfiguration("--analysis_testing_deps_limit=" + limit);
+
+    String transitionDefinition;
+    if (useTransition) {
+      transitionDefinition =
+          "my_transition = analysis_test_transition("
+              + "settings = {'//command_line_option:test_arg' : ['yeehaw'] })";
+    } else {
+      transitionDefinition = "my_transition = None";
+    }
+
+    scratch.file(
+        "test/extension.bzl",
+        "",
+        "def outer_rule_impl(ctx):",
+        "  return [AnalysisTestResultInfo(success = True, message = 'message contents')]",
+        "def dep_rule_impl(ctx):",
+        "  return []",
+        "",
+        transitionDefinition,
+        "",
+        "dep_rule = rule(",
+        "  implementation = dep_rule_impl,",
+        "  attrs = {'dep':  attr.label()}",
+        ")",
+        "outer_rule_test = rule(",
+        "  implementation = outer_rule_impl,",
+        "  fragments = ['java'],",
+        "  analysis_test = True,",
+        "  attrs = {",
+        "    'dep':  attr.label(cfg = my_transition),",
+        "  })");
+
+    // Create a chain of targets where 'innerN' depends on 'inner{N+1}' until the max length.
+    StringBuilder dependingRulesChain = new StringBuilder();
+    for (int i = 0; i < dependencyChainSize; i++) {
+      dependingRulesChain.append(
+          String.format("dep_rule(name = 'inner%s', dep = ':inner%s')\n", i, (i + 1)));
+    }
+    dependingRulesChain.append(String.format("dep_rule(name = 'inner%s')", dependencyChainSize));
+
+    scratch.file(
+        "test/BUILD",
+        "load('//test:extension.bzl', 'dep_rule', 'outer_rule_test')",
+        "",
+        "outer_rule_test(name = 'r', dep = ':inner0')",
+        dependingRulesChain.toString());
+  }
+
+  @Test
+  public void testBadWhitelistTransition_onNonLabelAttr() throws Exception {
+    scratch.file(
+        "test/rules.bzl",
+        "def _impl(ctx):",
+        "    return []",
+        "",
+        "my_rule = rule(_impl, attrs = {'"
+            + WHITELIST_ATTRIBUTE_NAME
+            + "':attr.string(default = 'blah')})");
+    scratch.file("test/BUILD", "load('//test:rules.bzl', 'my_rule')", "my_rule(name = 'my_rule')");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test:my_rule");
+    assertContainsEvent("_whitelist_function_transition attribute must be a label type");
+  }
+
+  @Test
+  public void testBadWhitelistTransition_noDefaultValue() throws Exception {
+    scratch.file(
+        "test/rules.bzl",
+        "def _impl(ctx):",
+        "    return []",
+        "",
+        "my_rule = rule(_impl, attrs = {'" + WHITELIST_ATTRIBUTE_NAME + "':attr.label()})");
+    scratch.file("test/BUILD", "load('//test:rules.bzl', 'my_rule')", "my_rule(name = 'my_rule')");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test:my_rule");
+    assertContainsEvent("_whitelist_function_transition attribute must have a default value");
+  }
+
+  @Test
+  public void testBadWhitelistTransition_wrongDefaultValue() throws Exception {
+    scratch.file(
+        "test/rules.bzl",
+        "def _impl(ctx):",
+        "    return []",
+        "",
+        "my_rule = rule(_impl, attrs = {'"
+            + WHITELIST_ATTRIBUTE_NAME
+            + "':attr.label(default = Label('//test:my_other_rule'))})");
+    scratch.file(
+        "test/BUILD",
+        "load('//test:rules.bzl', 'my_rule')",
+        "my_rule(name = 'my_rule')",
+        "my_rule(name = 'my_other_rule')");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test:my_rule");
+    assertContainsEvent(
+        "_whitelist_function_transition attribute does not have the expected value");
+  }
+
+  @Test
+  public void testBadAnalysisTestRule_notAnalysisTest() throws Exception {
+    scratch.file(
+        "test/extension.bzl",
+        "",
+        "def outer_rule_impl(ctx):",
+        "  return [AnalysisTestResultInfo(success = True, message = 'message contents')]",
+        "def dep_rule_impl(ctx):",
+        "  return []",
+        "",
+        "my_transition = analysis_test_transition(",
+        "    settings = {",
+        "        '//command_line_option:test_arg' : ['yeehaw'] }",
+        ")",
+        "dep_rule = rule(",
+        "  implementation = dep_rule_impl,",
+        "  attrs = {'dep':  attr.label()}",
+        ")",
+        "outer_rule = rule(",
+        "  implementation = outer_rule_impl,",
+        "# analysis_test = True,",
+        "  fragments = ['java'],",
+        "  attrs = {",
+        "    'dep':  attr.label(cfg = my_transition),",
+        "  })");
+
+    scratch.file(
+        "test/BUILD",
+        "load('//test:extension.bzl', 'dep_rule', 'outer_rule_test')",
+        "",
+        "outer_rule(name = 'r', dep = ':inner')",
+        "dep_rule(name = 'inner')");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test:outer_rule");
+    assertContainsEvent(
+        "Only rule definitions with analysis_test=True may have attributes with "
+            + "analysis_test_transition transitions");
+  }
+
+  @Test
+  public void testBadWhitelistTransition_noWhitelist() throws Exception {
+    scratch.file(
+        "tools/whitelists/function_transition_whitelist/BUILD",
+        "package_group(",
+        "    name = 'function_transition_whitelist',",
+        "    packages = [",
+        "        '//test/...',",
+        "    ],",
+        ")");
+    scratch.file(
+        "test/rules.bzl",
+        "def transition_func(settings):",
+        "  return {'t0': {'//command_line_option:cpu': 'k8'}}",
+        "my_transition = transition(implementation = transition_func, inputs = [],",
+        "  outputs = ['//command_line_option:cpu'])",
+        "def _my_rule_impl(ctx): ",
+        "  return []",
+        "my_rule = rule(",
+        "  implementation = _my_rule_impl,",
+        "  attrs = {",
+        "    'dep':  attr.label(cfg = my_transition),",
+        "#   '_whitelist_function_transition': attr.label(",
+        "#       default = '//tools/whitelists/function_transition_whitelist',",
+        "#   ),",
+        "  })",
+        "def _simple_rule_impl(ctx):",
+        "  return []",
+        "simple_rule = rule(_simple_rule_impl)");
+
+    scratch.file(
+        "test/BUILD",
+        "load('//test:rules.bzl', 'my_rule', 'simple_rule')",
+        "my_rule(name = 'my_rule', dep = ':dep')",
+        "simple_rule(name = 'dep')");
+    setSkylarkSemanticsOptions("--experimental_starlark_config_transitions");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test:my_rule");
+    assertContainsEvent("Use of Starlark transition without whitelist");
+  }
+
+  @Test
+  public void testPrintFromTransitionImpl() throws Exception {
+    setSkylarkSemanticsOptions("--experimental_starlark_config_transitions");
+    scratch.file(
+        "tools/whitelists/function_transition_whitelist/BUILD",
+        "package_group(",
+        "    name = 'function_transition_whitelist',",
+        "    packages = [",
+        "        '//test/...',",
+        "    ],",
+        ")");
+    scratch.file(
+        "test/rules.bzl",
+        "def _transition_impl(settings, attr):",
+        "  print('printing from transition impl', settings['//command_line_option:test_arg'])",
+        "  return {'//command_line_option:test_arg': "
+            + "settings['//command_line_option:test_arg']+['meow']}",
+        "my_transition = transition(",
+        "  implementation = _transition_impl,",
+        "  inputs = ['//command_line_option:test_arg'],",
+        "  outputs = ['//command_line_option:test_arg'],",
+        ")",
+        "def _rule_impl(ctx):",
+        "  return []",
+        "my_rule = rule(",
+        "  implementation = _rule_impl,",
+        "  cfg = my_transition,",
+        "  attrs = {",
+        "    'dep': attr.label(cfg = my_transition),",
+        "    '_whitelist_function_transition': attr.label(",
+        "        default = '//tools/whitelists/function_transition_whitelist',",
+        "    ),",
+        "  }",
+        ")");
+
+    scratch.file(
+        "test/BUILD",
+        "load('//test:rules.bzl', 'my_rule')",
+        "my_rule(name = 'test', dep = ':dep')",
+        "my_rule(name = 'dep')");
+
+    useConfiguration("--test_arg=meow");
+
+    getConfiguredTarget("//test");
+    // Test print from top level transition
+    assertContainsEventWithFrequency("printing from transition impl [\"meow\"]", 1);
+    // Test print from dep transition
+    assertContainsEventWithFrequency("printing from transition impl [\"meow\", \"meow\"]", 1);
+    // Test print from (non-top level) rule class transition
+    assertContainsEventWithFrequency(
+        "printing from transition impl [\"meow\", \"meow\", \"meow\"]", 1);
+  }
+
+  @Test
+  public void testTransitionEquality() throws Exception {
+    setSkylarkSemanticsOptions("--experimental_starlark_config_transitions");
+    scratch.file(
+        "tools/whitelists/function_transition_whitelist/BUILD",
+        "package_group(",
+        "    name = 'function_transition_whitelist',",
+        "    packages = [",
+        "        '//test/...',",
+        "    ],",
+        ")");
+    scratch.file(
+        "test/rules.bzl",
+        "def _transition_impl(settings, attr):",
+        "  return {'//command_line_option:test_arg': ['meow']}",
+        "my_transition = transition(",
+        "  implementation = _transition_impl,",
+        "  inputs = [],",
+        "  outputs = ['//command_line_option:test_arg'],",
+        ")",
+        "def _rule_impl(ctx):",
+        "  return []",
+        "my_rule = rule(",
+        "  implementation = _rule_impl,",
+        "  cfg = my_transition,",
+        "  attrs = {",
+        "    'dep': attr.label(cfg = my_transition),",
+        "    '_whitelist_function_transition': attr.label(",
+        "        default = '//tools/whitelists/function_transition_whitelist',",
+        "    ),",
+        "  }",
+        ")");
+
+    scratch.file(
+        "test/BUILD",
+        "load('//test:rules.bzl', 'my_rule')",
+        "my_rule(name = 'test', dep = ':dep')",
+        "my_rule(name = 'dep')");
+
+    useConfiguration("--test_arg=meow");
+
+    StarlarkDefinedConfigTransition ruleTransition =
+        ((StarlarkAttributeTransitionProvider)
+                getTarget("//test")
+                    .getAssociatedRule()
+                    .getRuleClassObject()
+                    .getAttributeByName("dep")
+                    .getTransitionFactory())
+            .getStarlarkDefinedConfigTransitionForTesting();
+
+    StarlarkDefinedConfigTransition attrTransition =
+        ((StarlarkRuleTransitionProvider)
+                getTarget("//test").getAssociatedRule().getRuleClassObject().getTransitionFactory())
+            .getStarlarkDefinedConfigTransitionForTesting();
+
+    assertThat(ruleTransition).isEqualTo(attrTransition);
+    assertThat(attrTransition).isEqualTo(ruleTransition);
+    assertThat(ruleTransition.hashCode()).isEqualTo(attrTransition.hashCode());
+  }
+
+  @Test
+  public void testBadWhitelistTransition_whitelistNoCfg() throws Exception {
+    scratch.file(
+        "tools/whitelists/function_transition_whitelist/BUILD",
+        "package_group(",
+        "    name = 'function_transition_whitelist',",
+        "    packages = [",
+        "        '//test/...',",
+        "    ],",
+        ")");
+    scratch.file(
+        "test/rules.bzl",
+        "def _my_rule_impl(ctx): ",
+        "  return []",
+        "my_rule = rule(",
+        "  implementation = _my_rule_impl,",
+        "  attrs = {",
+        "#   'dep':  attr.label(cfg = my_transition),",
+        "    '_whitelist_function_transition': attr.label(",
+        "        default = '//tools/whitelists/function_transition_whitelist',",
+        "    ),",
+        "  })",
+        "def _simple_rule_impl(ctx):",
+        "  return []",
+        "simple_rule = rule(_simple_rule_impl)");
+
+    scratch.file(
+        "test/BUILD",
+        "load('//test:rules.bzl', 'my_rule', 'simple_rule')",
+        "my_rule(name = 'my_rule', dep = ':dep')",
+        "simple_rule(name = 'dep')");
+    setSkylarkSemanticsOptions("--experimental_starlark_config_transitions");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test:my_rule");
+    assertContainsEvent("Unused function-based split transition whitelist");
+  }
+
+  @Test
+  public void testLicenseType() throws Exception {
+    // Note that attr.license is deprecated, and thus this test is subject to imminent removal.
+    // (See --incompatible_no_attr_license). However, this verifies that until the attribute
+    // is removed, values of the attribute are a valid Starlark type.
+    setSkylarkSemanticsOptions("--incompatible_no_attr_license=false");
+    scratch.file(
+        "test/rule.bzl",
+        "def _my_rule_impl(ctx): ",
+        "  print(ctx.attr.my_license)",
+        "  return []",
+        "my_rule = rule(",
+        "  implementation = _my_rule_impl,",
+        "  attrs = {",
+        "    'my_license':  attr.license(),",
+        "  })");
+    scratch.file("test/BUILD", "load(':rule.bzl', 'my_rule')", "my_rule(name = 'test')");
+
+    getConfiguredTarget("//test:test");
+
+    assertContainsEvent("<license object>");
+  }
+
+  @Test
+  public void testNativeModuleFields() throws Exception {
+    // Check that
+    scratch.file(
+        "test/file.bzl",
+        "def valid(s):",
+        "    if not s[0].isalpha(): return False",
+        "    for c in s.elems():",
+        "        if not (c.isalpha() or c == '_' or c.isdigit()): return False",
+        "    return True",
+        "",
+        "bad_names = [name for name in dir(native) if not valid(name)]",
+        "print('bad_names =', bad_names)");
+    scratch.file("test/BUILD", "load('//test:file.bzl', 'bad_names')");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test:anything");
+    assertContainsEvent("bad_names = []");
+  }
+
+  @Test
+  public void testDisallowStructProviderSyntax() throws Exception {
+    setSkylarkSemanticsOptions("--incompatible_disallow_struct_provider_syntax=true");
+    scratch.file(
+        "test/skylark/extension.bzl",
+        "def custom_rule_impl(ctx):",
+        "  return struct()",
+        "",
+        "custom_rule = rule(implementation = custom_rule_impl)");
+    scratch.file(
+        "test/skylark/BUILD",
+        "load('//test/skylark:extension.bzl', 'custom_rule')",
+        "",
+        "custom_rule(name = 'cr')");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//test/skylark:cr");
+    assertContainsEvent(
+        "Returning a struct from a rule implementation function is deprecated and will be "
+            + "removed soon. It may be temporarily re-enabled by setting "
+            + "--incompatible_disallow_struct_provider_syntax=false");
+  }
+
   /**
    * Skylark integration test that forces inlining.
    */
@@ -1801,9 +2905,9 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
       } catch (BuildFileContainsErrorsException e) {
         // The reason that this is an exception and not reported to the event handler is that the
         // error is reported by the parent sky function, which we don't have here.
-        assertThat(e).hasMessageThat().contains("Skylark import cycle");
-        assertThat(e).hasMessageThat().contains("test/skylark:ext1.bzl");
-        assertThat(e).hasMessageThat().contains("test/skylark:ext2.bzl");
+        assertThat(e)
+            .hasMessageThat()
+            .contains("Starlark import cycle: [//test/skylark:ext1.bzl, //test/skylark:ext2.bzl]");
       }
     }
 
@@ -1827,10 +2931,11 @@ public class SkylarkIntegrationTest extends BuildViewTestCase {
       } catch (BuildFileContainsErrorsException e) {
         // The reason that this is an exception and not reported to the event handler is that the
         // error is reported by the parent sky function, which we don't have here.
-        assertThat(e).hasMessageThat().contains("Skylark import cycle");
-        assertThat(e).hasMessageThat().contains("//test/skylark:ext2.bzl");
-        assertThat(e).hasMessageThat().contains("//test/skylark:ext3.bzl");
-        assertThat(e).hasMessageThat().contains("//test/skylark:ext4.bzl");
+        assertThat(e)
+            .hasMessageThat()
+            .contains(
+                "Starlark import cycle: [//test/skylark:ext2.bzl, "
+                    + "//test/skylark:ext3.bzl, //test/skylark:ext4.bzl]");
       }
     }
   }

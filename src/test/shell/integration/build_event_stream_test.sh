@@ -28,6 +28,8 @@ add_to_bazelrc "build --experimental_build_event_upload_strategy=local"
 set -e
 
 function set_up() {
+  setup_skylib_support
+
   mkdir -p pkg
   touch pkg/somesourcefile
   cat > pkg/true.sh <<'EOF'
@@ -230,7 +232,7 @@ done
 
 function test_basic() {
   # Basic properties of the event stream
-  # - a completed target explicity requested should be reported
+  # - a completed target explicitly requested should be reported
   # - after success the stream should close naturally, without any
   #   reports about aborted events
   # - the command line is reported in structured and unstructured form
@@ -582,25 +584,6 @@ function test_build_only() {
   expect_log_once '^build_tool_logs'
 }
 
-function test_query() {
-  # Verify that at least a minimally meaningful event stream is generated
-  # for non-build. In particular, we expect bazel not to crash.
-  bazel query --build_event_text_file=$TEST_log 'tests(//...)' \
-    || fail "bazel query failed"
-  expect_log '^started'
-  expect_log 'command: "query"'
-  expect_log 'args: "--build_event_text_file='
-  expect_log 'build_finished'
-  expect_not_log 'aborted'
-  # For query, we also expect the full output to be contained in the protocol,
-  # as well as a proper finished event.
-  expect_log '//pkg:true'
-  expect_log '//pkg:slow'
-  expect_log '^finished'
-  expect_log 'name: "SUCCESS"'
-  expect_log 'last_message: true'
-}
-
 function test_command_whitelisting() {
   # We expect the "help" command to not generate a build-event stream,
   # but the "build" command to do.
@@ -943,6 +926,14 @@ function test_nobuild() {
     || fail "build failed"
   expect_log_once '^aborted'
   expect_log 'reason: NO_BUILD'
+}
+
+function test_server_pid() {
+  bazel build --test_output=all --build_event_text_file=bep.txt \
+    || fail "Build failed but should have succeeded"
+  cat bep.txt | grep server_pid >> "$TEST_log"
+  expect_log_once "server_pid:.*$(bazel info server_pid)$"
+  rm bep.txt
 }
 
 run_suite "Integration tests for the build event stream"

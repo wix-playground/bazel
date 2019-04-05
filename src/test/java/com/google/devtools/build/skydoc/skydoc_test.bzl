@@ -20,7 +20,17 @@
 #    the golden file if changes are made to skydoc.
 """Convenience macro for skydoc tests."""
 
-def skydoc_test(name, input_file, golden_file, skydoc, deps = [], whitelisted_symbols = []):
+load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load("@io_bazel_skydoc//stardoc:stardoc.bzl", "stardoc")
+
+def skydoc_test(
+        name,
+        input_file,
+        golden_file,
+        skydoc,
+        deps = [],
+        whitelisted_symbols = [],
+        semantic_flags = []):
     """Creates a test target and golden-file regeneration target for skydoc testing.
 
     The test target is named "{name}_e2e_test".
@@ -37,8 +47,14 @@ def skydoc_test(name, input_file, golden_file, skydoc, deps = [], whitelisted_sy
       whitelisted_symbols: A list of strings representing top-level symbols in the input file
           to generate documentation for. If empty, documentation for all top-level symbols
           will be generated.
+      semantic_flags: A list of canonical flags to affect Starlark semantics for the Starlark interpretter
+          during documentation generation. This should only be used to maintain compatibility with
+          non-default semantic flags required to use the given Starlark symbols. For example, if
+          <code>//foo:bar.bzl</code> does not build except when a user would specify
+          <code>--incompatible_foo_semantic=false</code>, then this attribute should contain
+          "--incompatible_foo_semantic=false"
     """
-    output_golden_file = "%s_output.txt" % name
+    actual_generated_doc = "%s_output.txt" % name
 
     # Skydoc requires an absolute input file label to both load the target file and
     # track what its target is for the purpose of resolving relative labels.
@@ -46,28 +62,29 @@ def skydoc_test(name, input_file, golden_file, skydoc, deps = [], whitelisted_sy
 
     native.sh_test(
         name = "%s_e2e_test" % name,
-        srcs = ["skydoc_e2e_test_runner.sh"],
+        srcs = ["diff_test_runner.sh"],
         args = [
-            "$(location %s)" % skydoc,
-            abs_input_file_label,
+            "$(location %s)" % actual_generated_doc,
             "$(location %s)" % golden_file,
-        ] + whitelisted_symbols,
+        ],
         data = [
-            input_file,
+            actual_generated_doc,
             golden_file,
-            skydoc,
-        ] + deps,
+        ],
     )
 
-    native.genrule(
+    bzl_library(
+        name = "%s_lib" % name,
+        srcs = [input_file],
+        deps = deps,
+    )
+
+    stardoc(
         name = "regenerate_%s_golden" % name,
-        srcs = [
-            input_file,
-        ] + deps,
-        outs = [output_golden_file],
-        heuristic_label_expansion = 0,
-        cmd = "$(location %s) " % skydoc +
-              "%s $(location %s) " % (abs_input_file_label, output_golden_file) +
-              " ".join(whitelisted_symbols),
-        tools = [skydoc],
+        out = actual_generated_doc,
+        input = input_file,
+        symbol_names = whitelisted_symbols,
+        deps = ["%s_lib" % name],
+        stardoc = skydoc,
+        semantic_flags = semantic_flags,
     )

@@ -25,12 +25,16 @@ import com.google.common.eventbus.EventBus;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.events.Reporter;
+import com.google.devtools.build.lib.packages.PackageFactory.GlobPatternExtractor;
 import com.google.devtools.build.lib.packages.util.PackageFactoryApparatus;
 import com.google.devtools.build.lib.packages.util.PackageFactoryTestBase;
+import com.google.devtools.build.lib.syntax.BuildFileAST;
 import com.google.devtools.build.lib.syntax.Type;
+import com.google.devtools.build.lib.testutil.MoreAsserts;
 import com.google.devtools.build.lib.testutil.TestUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.RootedPath;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -54,7 +58,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
   @Test
   public void testCreatePackage() throws Exception {
     Path buildFile = scratch.file("/pkgname/BUILD", "# empty build file ");
-    Package pkg = packages.createPackage("pkgname", buildFile);
+    Package pkg = packages.createPackage("pkgname", RootedPath.toRootedPath(root, buildFile));
     assertThat(pkg.getName()).isEqualTo("pkgname");
     assertThat(Sets.newHashSet(pkg.getTargets(Rule.class))).isEmpty();
   }
@@ -89,7 +93,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
     events.setFailFast(false);
 
     Path buildFile = scratch.file("/badrulename/BUILD", "cc_library(name = 3)");
-    Package pkg = packages.createPackage("badrulename", buildFile);
+    Package pkg = packages.createPackage("badrulename", RootedPath.toRootedPath(root, buildFile));
 
     events.assertContainsError("cc_library 'name' attribute must be a string");
     assertThat(pkg.containsErrors()).isTrue();
@@ -100,7 +104,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
     events.setFailFast(false);
 
     Path buildFile = scratch.file("/badrulename/BUILD", "cc_library()");
-    Package pkg = packages.createPackage("badrulename", buildFile);
+    Package pkg = packages.createPackage("badrulename", RootedPath.toRootedPath(root, buildFile));
 
     events.assertContainsError("cc_library rule has no 'name' attribute");
     assertThat(pkg.containsErrors()).isTrue();
@@ -111,8 +115,9 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
     try {
       // PathFragment parsing de-double slashes, and normalization of the path fragment removes
       // up reference (/../), so use triple dot /.../ that will always be a forbidden package name.
-      packages.createPackage("not even a legal/.../label",
-          emptyBuildFile("not even a legal/.../label"));
+      packages.createPackage(
+          "not even a legal/.../label",
+          RootedPath.toRootedPath(root, emptyBuildFile("not even a legal/.../label")));
       fail();
     } catch (NoSuchPackageException e) {
       assertThat(e)
@@ -130,7 +135,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
         scratch.file(
             "/googledata/cafe/BUILD",
             "exports_files(['houseads/house_ads:ca-aol_parenting_html'])");
-    Package pkg = packages.createPackage("googledata/cafe", path);
+    Package pkg = packages.createPackage("googledata/cafe", RootedPath.toRootedPath(root, path));
     events.assertContainsError("target names may not contain ':'");
     assertThat(pkg.getTargets(FileTarget.class).toString())
         .doesNotContain("houseads/house_ads:ca-aol_parenting_html");
@@ -155,7 +160,8 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "# -*- python -*-",
             "proto_library(name = 'spell_proto', srcs = ['spell.proto'], cc_api_version = 2)",
             "cc_library(name = 'spell_proto')");
-    Package pkg = packages.createPackage("duplicaterulename", buildFile);
+    Package pkg =
+        packages.createPackage("duplicaterulename", RootedPath.toRootedPath(root, buildFile));
 
     events.assertContainsError(
         "cc_library rule 'spell_proto' in package "
@@ -172,7 +178,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "cc_library(name='dep')",
             "cc_library(name='has_dupe', deps=[':dep', ':dep'])");
 
-    Package pkg = packages.createPackage("has_dupe", buildFile);
+    Package pkg = packages.createPackage("has_dupe", RootedPath.toRootedPath(root, buildFile));
     events.assertContainsError(
         "Label '//has_dupe:dep' is duplicated in the 'deps' " + "attribute of rule 'has_dupe'");
     assertThat(pkg.containsErrors()).isTrue();
@@ -192,7 +198,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "/fruit/orange/BUILD",
             "genrule(name='orange', srcs=[], outs=['a', 'a/b'], cmd='')");
 
-    packages.createPackage("fruit/orange", buildFile);
+    packages.createPackage("fruit/orange", RootedPath.toRootedPath(root, buildFile));
     events.assertContainsError("rule 'orange' has conflicting output files 'a/b' and 'a");
   }
 
@@ -204,7 +210,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "/fruit/orange/BUILD",
             "genrule(name='orange', srcs=[], outs=['a/b', 'a'], cmd='')");
 
-    packages.createPackage("fruit/orange", buildFile);
+    packages.createPackage("fruit/orange", RootedPath.toRootedPath(root, buildFile));
     events.assertContainsError("rule 'orange' has conflicting output files 'a' and 'a/b");
   }
 
@@ -216,7 +222,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "/fruit/kiwi/BUILD",
             "genrule(name='kiwi1', srcs=[], outs=['a'], cmd='')",
             "genrule(name='kiwi2', srcs=[], outs=['a/b'], cmd='')");
-    packages.createPackage("fruit/kiwi", buildFile);
+    packages.createPackage("fruit/kiwi", RootedPath.toRootedPath(root, buildFile));
     events.assertContainsError(
         "output file 'a/b' of rule 'kiwi2' conflicts " + "with output file 'a' of rule 'kiwi1'");
   }
@@ -229,29 +235,16 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "/fruit/kiwi/BUILD",
             "genrule(name='kiwi1', srcs=[], outs=['a/b'], cmd='')",
             "genrule(name='kiwi2', srcs=[], outs=['a'], cmd='')");
-    packages.createPackage("fruit/kiwi", buildFile);
+    packages.createPackage("fruit/kiwi", RootedPath.toRootedPath(root, buildFile));
     events.assertContainsError(
         "output file 'a' of rule 'kiwi2' conflicts " + "with output file 'a/b' of rule 'kiwi1'");
-  }
-
-  @Test
-  public void testPackageConstant() throws Exception {
-    Path buildFile =
-        scratch.file("/pina/BUILD", "cc_library(name=PACKAGE_NAME + '-colada')");
-
-    Package pkg = packages.createPackage("pina", buildFile);
-    events.assertNoWarningsOrErrors();
-    assertThat(pkg.containsErrors()).isFalse();
-    assertThat(pkg.getRule("pina-colada")).isNotNull();
-    assertThat(pkg.getRule("pina-colada").containsErrors()).isFalse();
-    assertThat(Sets.newHashSet(pkg.getTargets(Rule.class)).size()).isSameAs(1);
   }
 
   @Test
   public void testPackageConstantIsForbidden() throws Exception {
     events.setFailFast(false);
     Path buildFile = scratch.file("/pina/BUILD", "cc_library(name=PACKAGE_NAME + '-colada')");
-    packages.createPackage("pina", buildFile, "--incompatible_package_name_is_a_function=true");
+    packages.createPackage("pina", RootedPath.toRootedPath(root, buildFile));
     events.assertContainsError("The value 'PACKAGE_NAME' has been removed");
   }
 
@@ -259,25 +252,12 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
   public void testPackageNameFunction() throws Exception {
     Path buildFile = scratch.file("/pina/BUILD", "cc_library(name=package_name() + '-colada')");
 
-    Package pkg = packages.createPackage("pina", buildFile);
+    Package pkg = packages.createPackage("pina", RootedPath.toRootedPath(root, buildFile));
     events.assertNoWarningsOrErrors();
     assertThat(pkg.containsErrors()).isFalse();
     assertThat(pkg.getRule("pina-colada")).isNotNull();
     assertThat(pkg.getRule("pina-colada").containsErrors()).isFalse();
     assertThat(Sets.newHashSet(pkg.getTargets(Rule.class)).size()).isSameAs(1);
-  }
-
-  @Test
-  public void testPackageConstantInExternalRepository() throws Exception {
-    Path buildFile =
-        scratch.file(
-            "/external/a/b/BUILD",
-            "genrule(name='c', srcs=[], outs=['ao'], cmd=REPOSITORY_NAME + ' ' + PACKAGE_NAME)");
-    Package pkg =
-        packages.createPackage(
-            PackageIdentifier.create("@a", PathFragment.create("b")), buildFile, events.reporter());
-    Rule c = pkg.getRule("c");
-    assertThat(AggregatingAttributeMapper.of(c).get("cmd", Type.STRING)).isEqualTo("@a b");
   }
 
   @Test
@@ -288,9 +268,8 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "/external/a/b/BUILD", "genrule(name='c', srcs=[], outs=['ao'], cmd=REPOSITORY_NAME)");
     packages.createPackage(
         PackageIdentifier.create("@a", PathFragment.create("b")),
-        buildFile,
-        events.reporter(),
-        "--incompatible_package_name_is_a_function=true");
+        RootedPath.toRootedPath(root, buildFile),
+        events.reporter());
     events.assertContainsError("The value 'REPOSITORY_NAME' has been removed");
   }
 
@@ -302,7 +281,9 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "genrule(name='c', srcs=[], outs=['o'], cmd=repository_name() + ' ' + package_name())");
     Package pkg =
         packages.createPackage(
-            PackageIdentifier.create("@a", PathFragment.create("b")), buildFile, events.reporter());
+            PackageIdentifier.create("@a", PathFragment.create("b")),
+            RootedPath.toRootedPath(root, buildFile),
+            events.reporter());
     Rule c = pkg.getRule("c");
     assertThat(AggregatingAttributeMapper.of(c).get("cmd", Type.STRING)).isEqualTo("@a b");
   }
@@ -323,7 +304,9 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "         srcs = ['spell.proto'],",
             "         cc_api_version = 2)",
             "cc_library(name = 'spell_proto')");
-    Package pkg = packages.createPackage("multipleduplicaterulename", buildFile);
+    Package pkg =
+        packages.createPackage(
+            "multipleduplicaterulename", RootedPath.toRootedPath(root, buildFile));
 
     events.assertContainsError(
         "cc_library rule 'spellcheck_proto' in package "
@@ -337,7 +320,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
   @Test
   public void testBuildFileTargetExists() throws Exception {
     Path buildFile = scratch.file("/foo/BUILD", "");
-    Package pkg = packages.createPackage("foo", buildFile);
+    Package pkg = packages.createPackage("foo", RootedPath.toRootedPath(root, buildFile));
 
     Target target = pkg.getTarget("BUILD");
     assertThat(target.getName()).isEqualTo("BUILD");
@@ -355,7 +338,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "cc_library(name='W', deps=['X', 'Y'])",
             "cc_library(name='X', srcs=['X'])",
             "cc_library(name='Y')");
-    Package pkg = packages.createPackage("foo", buildFile);
+    Package pkg = packages.createPackage("foo", RootedPath.toRootedPath(root, buildFile));
     assertThat(pkg.containsErrors()).isFalse();
 
     // X is a rule with a circular self-dependency.
@@ -373,7 +356,8 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
       fail();
     } catch (NoSuchTargetException e) {
       assertThat(e)
-          .hasMessage(
+          .hasMessageThat()
+          .isEqualTo(
               "no such target '//foo:A': "
                   + "target 'A' not declared in package 'foo' defined by /foo/BUILD");
     }
@@ -384,31 +368,6 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
       inputFiles.add(inputFile.getName());
     }
     assertThat(Lists.newArrayList(inputFiles)).containsExactly("BUILD", "Z").inOrder();
-  }
-
-  @Test
-  public void testThirdPartyLicenseError() throws Exception {
-    events.setFailFast(false);
-    Path buildFile =
-        scratch.file("/third_party/foo/BUILD", "# line 1", "cc_library(name='bar')", "# line 3");
-    Package pkg = packages.createPackage("third_party/foo", buildFile);
-    events.assertContainsError(
-        "third-party rule '//third_party/foo:bar' lacks a license "
-            + "declaration with one of the following types: "
-            + "notice, reciprocal, permissive, restricted, unencumbered, by_exception_only");
-    assertThat(pkg.containsErrors()).isTrue();
-  }
-
-  @Test
-  public void testThirdPartyLicenseExportsFileError() throws Exception {
-    events.setFailFast(false);
-    Path buildFile = scratch.file("/third_party/foo/BUILD", "exports_files(['bar'])");
-    Package pkg = packages.createPackage("third_party/foo", buildFile);
-    events.assertContainsError(
-        "third-party file 'bar' lacks a license "
-            + "declaration with one of the following types: "
-            + "notice, reciprocal, permissive, restricted, unencumbered, by_exception_only");
-    assertThat(pkg.containsErrors()).isTrue();
   }
 
   @Test
@@ -423,7 +382,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "",
             "cc_library(name = 'dup_proto',",
             "           srcs = ['dup.pb.cc', 'dup.pb.h'])");
-    Package pkg = packages.createPackage("dup", path);
+    Package pkg = packages.createPackage("dup", RootedPath.toRootedPath(root, path));
     events.assertContainsError(
         "cc_library rule 'dup_proto' in package 'dup' "
             + "conflicts with existing proto_library rule");
@@ -457,7 +416,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "        cmd = '',",
             "        srcs = ['in3', 'in4'],",
             "        outs = ['out3', 'out2'])");
-    Package pkg = packages.createPackage("conflict", path);
+    Package pkg = packages.createPackage("conflict", RootedPath.toRootedPath(root, path));
     events.assertContainsError(
         "generated file 'out2' in rule 'rule2' "
             + "conflicts with existing generated file from rule 'rule1'");
@@ -474,6 +433,8 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
     for (String targetName : ImmutableList.of("rule2", "in3", "in4", "out3")) {
       try {
         found.add(pkg.getTarget(targetName));
+        // No fail() here: if there's no exception, we add the name to a list
+        // and we check below that it's empty.
       } catch (NoSuchTargetException e) {
         /* good! */
       }
@@ -499,7 +460,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "genrule(name = 'rule2',",
             "        cmd = ':',",
             "        outs = list)");
-    Package pkg = packages.createPackage("error", path);
+    Package pkg = packages.createPackage("error", RootedPath.toRootedPath(root, path));
     events.assertContainsError("name 'PopulateList' is not defined");
 
     assertThat(pkg.containsErrors()).isTrue();
@@ -523,7 +484,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
     scratch.file("/x/y.cc");
     scratch.file("/x/dir/dummy");
 
-    Package pkg = packages.createPackage("x", path);
+    Package pkg = packages.createPackage("x", RootedPath.toRootedPath(root, path));
 
     assertThat(pkg.getTarget("x.cc")).isNotNull(); // existing and mentioned.
 
@@ -532,7 +493,8 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
       fail();
     } catch (NoSuchTargetException e) {
       assertThat(e)
-          .hasMessage(
+          .hasMessageThat()
+          .isEqualTo(
               "no such target '//x:y.cc': "
                   + "target 'y.cc' not declared in package 'x'; "
                   + "however, a source file of this name exists.  "
@@ -545,7 +507,8 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
       fail();
     } catch (NoSuchTargetException e) {
       assertThat(e)
-          .hasMessage(
+          .hasMessageThat()
+          .isEqualTo(
               "no such target '//x:z.cc': "
                   + "target 'z.cc' not declared in package 'x' (did you mean 'x.cc'?) "
                   + "defined by /x/BUILD");
@@ -556,7 +519,8 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
       fail();
     } catch (NoSuchTargetException e) {
       assertThat(e)
-          .hasMessage(
+          .hasMessageThat()
+          .isEqualTo(
               "no such target '//x:dir': target 'dir' not declared in package 'x'; "
                   + "however, a source directory of this name exists.  "
                   + "(Perhaps add 'exports_files([\"dir\"])' to x/BUILD, "
@@ -574,7 +538,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "test_suite(name='t2', tests=['//foo'])",
             "test_suite(name='t3', tests=['//foo'])",
             "cc_test(name='c')");
-    Package pkg = packages.createPackage("x", path);
+    Package pkg = packages.createPackage("x", RootedPath.toRootedPath(root, path));
 
     // Things to note:
     // - the t1 refers to both :j and :c, even though :c is a forward reference.
@@ -602,7 +566,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "/fruit/BUILD",
             "cc_library(name = 'yes', srcs = glob(['data/*']))",
             "cc_library(name = 'no',  srcs = glob(['data/*'], exclude_directories=0))");
-    Package pkg = packages.eval("fruit", file);
+    Package pkg = packages.eval("fruit", RootedPath.toRootedPath(root, file));
     events.assertNoWarningsOrErrors();
     List<Label> yesFiles = attributes(pkg.getRule("yes")).get("srcs", BuildType.LABEL_LIST);
     List<Label> noFiles = attributes(pkg.getRule("no")).get("srcs", BuildType.LABEL_LIST);
@@ -633,7 +597,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "/rg/BUILD",
             "cc_library(name = 'ri', srcs = glob(['**/*.cc']))",
             "cc_library(name = 're', srcs = glob(['*.cc'], exclude=['**/*.c']))");
-    Package pkg = packages.eval("rg", file);
+    Package pkg = packages.eval("rg", RootedPath.toRootedPath(root, file));
     events.assertNoWarningsOrErrors();
 
     assertEvaluates(
@@ -764,7 +728,9 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
           /* excludeDirs= */ true);
       fail();
     } catch (IllegalArgumentException e) {
-      assertThat(e).hasMessage("ERROR /globs/BUILD:2:73: name 'this_will_fail' is not defined");
+      assertThat(e)
+          .hasMessageThat()
+          .isEqualTo("ERROR /globs/BUILD:2:73: name 'this_will_fail' is not defined");
     }
   }
 
@@ -853,11 +819,33 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
     unreadableSubdir.setReadable(false);
 
     Path file = scratch.file("/pkg/BUILD", "cc_library(name = 'c', srcs = glob(['globs/**']))");
-    try {
-      packages.eval("pkg", file);
-    } catch (NoSuchPackageException expected) {
-    }
+    MoreAsserts.assertThrows(
+        NoSuchPackageException.class,
+        () -> packages.eval("pkg", RootedPath.toRootedPath(root, file)));
     events.assertContainsError("Directory is not readable");
+  }
+
+  @Test
+  public void testNativeModuleIsAvailable() throws Exception {
+    Path buildFile = scratch.file("/pkg/BUILD", "native.cc_library(name='bar')");
+    Package pkg =
+        packages.createPackage(
+            "pkg",
+            RootedPath.toRootedPath(root, buildFile),
+            "--incompatible_disallow_native_in_build_file=false");
+    assertThat(pkg.containsErrors()).isFalse();
+  }
+
+  @Test
+  public void testNativeModuleIsDisabled() throws Exception {
+    events.setFailFast(false);
+    Path buildFile = scratch.file("/pkg/BUILD", "native.cc_library(name='bar')");
+    Package pkg =
+        packages.createPackage(
+            "pkg",
+            RootedPath.toRootedPath(root, buildFile),
+            "--incompatible_disallow_native_in_build_file=true");
+    assertThat(pkg.containsErrors()).isTrue();
   }
 
   @Test
@@ -958,7 +946,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "/foo/BUILD",
             "package(default_deprecation = \"" + msg + "\")",
             "sh_library(name = 'bar', srcs=['b'])");
-    Package pkg = packages.eval("foo", file);
+    Package pkg = packages.eval("foo", RootedPath.toRootedPath(root, file));
 
     Rule fooRule = (Rule) pkg.getTarget("bar");
     String deprAttr =
@@ -974,7 +962,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "package(default_testonly = 1)",
             "sh_library(name = 'foo', srcs=['b'])",
             "sh_library(name = 'bar', srcs=['b'], testonly = 0)");
-    Package pkg = packages.eval("foo", file);
+    Package pkg = packages.eval("foo", RootedPath.toRootedPath(root, file));
 
     Rule fooRule = (Rule) pkg.getTarget("foo");
     assertThat(
@@ -996,7 +984,7 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "/foo/BUILD",
             "package(default_deprecation = \"" + deceive + "\")",
             "sh_library(name = 'bar', srcs=['b'], deprecation = \"" + msg + "\")");
-    Package pkg = packages.eval("foo", file);
+    Package pkg = packages.eval("foo", RootedPath.toRootedPath(root, file));
 
     Rule fooRule = (Rule) pkg.getTarget("bar");
     String deprAttr =
@@ -1012,10 +1000,8 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
             "sh_library(name='before')",
             "package(features=['b', 'c'])",
             "sh_library(name='after')");
-    Package pkg = packages.eval("a", file);
+    Package pkg = packages.eval("a", RootedPath.toRootedPath(root, file));
 
-    assertThat(pkg.getRule("before").getFeatures()).containsExactly("b", "c");
-    assertThat(pkg.getRule("after").getFeatures()).containsExactly("b", "c");
     assertThat(pkg.getFeatures()).containsExactly("b", "c");
   }
 
@@ -1027,13 +1013,12 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
     Path parentDir = buildFile.getParentDirectory();
     scratch.file("/e/data.txt");
     throwOnReaddir = parentDir;
-    try {
-      packages.createPackage("e", buildFile);
-    } catch (NoSuchPackageException expected) {
-    }
+    MoreAsserts.assertThrows(
+        NoSuchPackageException.class,
+        () -> packages.createPackage("e", RootedPath.toRootedPath(root, buildFile)));
     events.setFailFast(true);
     throwOnReaddir = null;
-    Package pkg = packages.createPackage("e", buildFile);
+    Package pkg = packages.createPackage("e", RootedPath.toRootedPath(root, buildFile));
     assertThat(pkg.containsErrors()).isFalse();
     assertThat(pkg.getRule("e")).isNotNull();
     List globList = (List) pkg.getRule("e").getAttributeContainer().getAttr("data");
@@ -1246,5 +1231,26 @@ public class PackageFactoryTest extends PackageFactoryTestBase {
   @Override
   protected String getPathPrefix() {
     return "";
+  }
+
+  @Test
+  public void testGlobPatternExtractor() {
+    GlobPatternExtractor globPatternExtractor = new GlobPatternExtractor();
+    globPatternExtractor.visit(
+        BuildFileAST.parseString(
+            event -> {
+              throw new IllegalArgumentException(event.getMessage());
+            },
+            "pattern = '*'",
+            "some_variable = glob([",
+            "  '**/*',",
+            "  'a' + 'b',",
+            "  pattern,",
+            "])",
+            "other_variable = glob(include = ['a'], exclude = ['b'])",
+            "third_variable = glob(['c'], exclude_directories = 0)"));
+    assertThat(globPatternExtractor.getExcludeDirectoriesPatterns())
+        .containsExactly("ab", "a", "**/*");
+    assertThat(globPatternExtractor.getIncludeDirectoriesPatterns()).containsExactly("c");
   }
 }

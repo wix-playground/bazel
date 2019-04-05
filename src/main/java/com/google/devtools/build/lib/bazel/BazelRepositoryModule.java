@@ -27,16 +27,12 @@ import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.bazel.commands.FetchCommand;
 import com.google.devtools.build.lib.bazel.commands.SyncCommand;
-import com.google.devtools.build.lib.bazel.repository.GitRepositoryFunction;
-import com.google.devtools.build.lib.bazel.repository.HttpArchiveFunction;
-import com.google.devtools.build.lib.bazel.repository.HttpFileFunction;
-import com.google.devtools.build.lib.bazel.repository.HttpJarFunction;
+import com.google.devtools.build.lib.bazel.repository.LocalConfigPlatformFunction;
+import com.google.devtools.build.lib.bazel.repository.LocalConfigPlatformRule;
 import com.google.devtools.build.lib.bazel.repository.MavenDownloader;
 import com.google.devtools.build.lib.bazel.repository.MavenJarFunction;
 import com.google.devtools.build.lib.bazel.repository.MavenServerFunction;
 import com.google.devtools.build.lib.bazel.repository.MavenServerRepositoryFunction;
-import com.google.devtools.build.lib.bazel.repository.NewGitRepositoryFunction;
-import com.google.devtools.build.lib.bazel.repository.NewHttpArchiveFunction;
 import com.google.devtools.build.lib.bazel.repository.RepositoryOptions;
 import com.google.devtools.build.lib.bazel.repository.RepositoryOptions.RepositoryOverride;
 import com.google.devtools.build.lib.bazel.repository.cache.RepositoryCache;
@@ -47,14 +43,8 @@ import com.google.devtools.build.lib.bazel.rules.android.AndroidNdkRepositoryFun
 import com.google.devtools.build.lib.bazel.rules.android.AndroidNdkRepositoryRule;
 import com.google.devtools.build.lib.bazel.rules.android.AndroidSdkRepositoryFunction;
 import com.google.devtools.build.lib.bazel.rules.android.AndroidSdkRepositoryRule;
-import com.google.devtools.build.lib.bazel.rules.workspace.GitRepositoryRule;
-import com.google.devtools.build.lib.bazel.rules.workspace.HttpArchiveRule;
-import com.google.devtools.build.lib.bazel.rules.workspace.HttpFileRule;
-import com.google.devtools.build.lib.bazel.rules.workspace.HttpJarRule;
 import com.google.devtools.build.lib.bazel.rules.workspace.MavenJarRule;
 import com.google.devtools.build.lib.bazel.rules.workspace.MavenServerRule;
-import com.google.devtools.build.lib.bazel.rules.workspace.NewGitRepositoryRule;
-import com.google.devtools.build.lib.bazel.rules.workspace.NewHttpArchiveRule;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.pkgcache.PackageCacheOptions;
@@ -90,7 +80,7 @@ import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 import com.google.devtools.common.options.OptionsBase;
-import com.google.devtools.common.options.OptionsProvider;
+import com.google.devtools.common.options.OptionsParsingResult;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.util.Map;
@@ -116,6 +106,7 @@ public class BazelRepositoryModule extends BlazeModule {
       new MutableSupplier<>();
   private ImmutableMap<RepositoryName, PathFragment> overrides = ImmutableMap.of();
   private Optional<RootedPath> resolvedFile = Optional.<RootedPath>absent();
+  private Optional<RootedPath> resolvedFileReplacingWorkspace = Optional.<RootedPath>absent();
   private Set<String> outputVerificationRules = ImmutableSet.<String>of();
   private FileSystem filesystem;
 
@@ -128,17 +119,12 @@ public class BazelRepositoryModule extends BlazeModule {
       HttpDownloader httpDownloader, MavenDownloader mavenDownloader) {
     return ImmutableMap.<String, RepositoryFunction>builder()
         .put(LocalRepositoryRule.NAME, new LocalRepositoryFunction())
-        .put(HttpArchiveRule.NAME, new HttpArchiveFunction(httpDownloader))
-        .put(GitRepositoryRule.NAME, new GitRepositoryFunction(httpDownloader))
-        .put(HttpJarRule.NAME, new HttpJarFunction(httpDownloader))
-        .put(HttpFileRule.NAME, new HttpFileFunction(httpDownloader))
         .put(MavenJarRule.NAME, new MavenJarFunction(mavenDownloader))
-        .put(NewHttpArchiveRule.NAME, new NewHttpArchiveFunction(httpDownloader))
-        .put(NewGitRepositoryRule.NAME, new NewGitRepositoryFunction(httpDownloader))
         .put(NewLocalRepositoryRule.NAME, new NewLocalRepositoryFunction())
         .put(AndroidSdkRepositoryRule.NAME, new AndroidSdkRepositoryFunction())
         .put(AndroidNdkRepositoryRule.NAME, new AndroidNdkRepositoryFunction())
         .put(MavenServerRule.NAME, new MavenServerRepositoryFunction())
+        .put(LocalConfigPlatformRule.NAME, new LocalConfigPlatformFunction())
         .build();
   }
 
@@ -187,7 +173,7 @@ public class BazelRepositoryModule extends BlazeModule {
   }
 
   @Override
-  public void serverInit(OptionsProvider startupOptions, ServerBuilder builder) {
+  public void serverInit(OptionsParsingResult startupOptions, ServerBuilder builder) {
     builder.addCommands(new FetchCommand());
     builder.addCommands(new SyncCommand());
     builder.addInfoItems(new RepositoryCacheInfoItem(repositoryCache));
@@ -235,22 +221,27 @@ public class BazelRepositoryModule extends BlazeModule {
     PackageCacheOptions pkgOptions = env.getOptions().getOptions(PackageCacheOptions.class);
     isFetch.set(pkgOptions != null && pkgOptions.fetch);
     resolvedFile = Optional.<RootedPath>absent();
+    resolvedFileReplacingWorkspace = Optional.<RootedPath>absent();
     outputVerificationRules = ImmutableSet.<String>of();
 
     RepositoryOptions repoOptions = env.getOptions().getOptions(RepositoryOptions.class);
     if (repoOptions != null) {
       repositoryCache.setHardlink(repoOptions.useHardlinks);
+      skylarkRepositoryFunction.setTimeoutScaling(repoOptions.experimentalScaleTimeouts);
       if (repoOptions.experimentalRepositoryCache != null) {
-        Path repositoryCachePath;
-        if (repoOptions.experimentalRepositoryCache.isAbsolute()) {
-          repositoryCachePath = filesystem.getPath(repoOptions.experimentalRepositoryCache);
-        } else {
-          repositoryCachePath =
-              env.getBlazeWorkspace()
-                  .getWorkspace()
-                  .getRelative(repoOptions.experimentalRepositoryCache);
+        // A set but empty path indicates a request to disable the repository cache.
+        if (!repoOptions.experimentalRepositoryCache.isEmpty()) {
+          Path repositoryCachePath;
+          if (repoOptions.experimentalRepositoryCache.isAbsolute()) {
+            repositoryCachePath = filesystem.getPath(repoOptions.experimentalRepositoryCache);
+          } else {
+            repositoryCachePath =
+                env.getBlazeWorkspace()
+                    .getWorkspace()
+                    .getRelative(repoOptions.experimentalRepositoryCache);
+          }
+          repositoryCache.setRepositoryCachePath(repositoryCachePath);
         }
-        repositoryCache.setRepositoryCachePath(repositoryCachePath);
       } else {
         Path repositoryCachePath =
             env.getDirectories()
@@ -282,6 +273,8 @@ public class BazelRepositoryModule extends BlazeModule {
                             ? filesystem.getPath(path)
                             : env.getBlazeWorkspace().getWorkspace().getRelative(path))
                 .collect(Collectors.toList()));
+      } else {
+        httpDownloader.setDistdir(ImmutableList.<Path>of());
       }
 
       if (repoOptions.repositoryOverrides != null) {
@@ -298,11 +291,27 @@ public class BazelRepositoryModule extends BlazeModule {
       }
 
       if (!Strings.isNullOrEmpty(repoOptions.repositoryHashFile)) {
+        Path hashFile;
+        if (env.getWorkspace() != null) {
+          hashFile = env.getWorkspace().getRelative(repoOptions.repositoryHashFile);
+        } else {
+          hashFile = filesystem.getPath(repoOptions.repositoryHashFile);
+        }
         resolvedFile =
-            Optional.of(
-                RootedPath.toRootedPath(
-                    Root.absoluteRoot(filesystem),
-                    filesystem.getPath(repoOptions.repositoryHashFile)));
+            Optional.of(RootedPath.toRootedPath(Root.absoluteRoot(filesystem), hashFile));
+      }
+
+      if (!Strings.isNullOrEmpty(repoOptions.experimentalResolvedFileInsteadOfWorkspace)) {
+        Path resolvedFile;
+        if (env.getWorkspace() != null) {
+          resolvedFile =
+              env.getWorkspace()
+                  .getRelative(repoOptions.experimentalResolvedFileInsteadOfWorkspace);
+        } else {
+          resolvedFile = filesystem.getPath(repoOptions.experimentalResolvedFileInsteadOfWorkspace);
+        }
+        resolvedFileReplacingWorkspace =
+            Optional.of(RootedPath.toRootedPath(Root.absoluteRoot(filesystem), resolvedFile));
       }
 
       if (repoOptions.experimentalVerifyRepositoryRules != null) {
@@ -321,6 +330,9 @@ public class BazelRepositoryModule extends BlazeModule {
         PrecomputedValue.injected(
             RepositoryDelegatorFunction.OUTPUT_VERIFICATION_REPOSITORY_RULES,
             outputVerificationRules),
+        PrecomputedValue.injected(
+            RepositoryDelegatorFunction.RESOLVED_FILE_INSTEAD_OF_WORKSPACE,
+            resolvedFileReplacingWorkspace),
         // That key will be reinjected by the sync command with a universally unique identifier.
         // Nevertheless, we need to provide a default value for other commands.
         PrecomputedValue.injected(

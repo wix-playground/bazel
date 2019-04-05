@@ -20,6 +20,8 @@ import static java.util.Locale.ENGLISH;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
+import com.google.common.io.MoreFiles;
+import com.google.common.io.RecursiveDeleteOption;
 import com.google.devtools.build.buildjar.jarhelper.JarCreator;
 import com.google.devtools.build.buildjar.javac.JavacOptions;
 import com.google.devtools.build.buildjar.proto.JavaCompilation.Manifest;
@@ -50,7 +52,6 @@ import javax.tools.DiagnosticCollector;
 import javax.tools.JavaCompiler;
 import javax.tools.JavaCompiler.CompilationTask;
 import javax.tools.JavaFileObject;
-import javax.tools.JavaFileObject.Kind;
 import javax.tools.SimpleJavaFileObject;
 import javax.tools.StandardJavaFileManager;
 import javax.tools.StandardLocation;
@@ -151,29 +152,28 @@ public class VanillaJavaBuilder implements Closeable {
     DiagnosticCollector<JavaFileObject> diagnosticCollector = new DiagnosticCollector<>();
     StringWriter output = new StringWriter();
     JavaCompiler javaCompiler = ToolProvider.getSystemJavaCompiler();
-    StandardJavaFileManager fileManager =
-        javaCompiler.getStandardFileManager(diagnosticCollector, ENGLISH, UTF_8);
-
     Path tempDir = Paths.get(firstNonNull(optionsParser.getTempDir(), "_tmp"));
     Path nativeHeaderDir = tempDir.resolve("native_headers");
     Files.createDirectories(nativeHeaderDir);
-
-    setLocations(optionsParser, fileManager, nativeHeaderDir);
-    ImmutableList<JavaFileObject> sources = getSources(optionsParser, fileManager);
     boolean ok;
-    if (sources.isEmpty()) {
-      ok = true;
-    } else {
-      CompilationTask task =
-          javaCompiler.getTask(
-              new PrintWriter(output, true),
-              fileManager,
-              diagnosticCollector,
-              JavacOptions.removeBazelSpecificFlags(optionsParser.getJavacOpts()),
-              ImmutableList.<String>of() /*classes*/,
-              sources);
-      setProcessors(optionsParser, fileManager, task);
-      ok = task.call();
+    try (StandardJavaFileManager fileManager =
+        javaCompiler.getStandardFileManager(diagnosticCollector, ENGLISH, UTF_8)) {
+      setLocations(optionsParser, fileManager, nativeHeaderDir);
+      ImmutableList<JavaFileObject> sources = getSources(optionsParser, fileManager);
+      if (sources.isEmpty()) {
+        ok = true;
+      } else {
+        CompilationTask task =
+            javaCompiler.getTask(
+                new PrintWriter(output, true),
+                fileManager,
+                diagnosticCollector,
+                JavacOptions.removeBazelSpecificFlags(optionsParser.getJavacOpts()),
+                ImmutableList.<String>of() /*classes*/,
+                sources);
+        setProcessors(optionsParser, fileManager, task);
+        ok = task.call();
+      }
     }
     if (ok) {
       writeOutput(optionsParser);
@@ -370,24 +370,7 @@ public class VanillaJavaBuilder implements Closeable {
   private static void createOutputDirectory(Path dir) throws IOException {
     if (Files.exists(dir)) {
       try {
-        // TODO(b/27069912): handle symlinks
-        Files.walkFileTree(
-            dir,
-            new SimpleFileVisitor<Path>() {
-              @Override
-              public FileVisitResult visitFile(Path file, BasicFileAttributes attrs)
-                  throws IOException {
-                Files.delete(file);
-                return FileVisitResult.CONTINUE;
-              }
-
-              @Override
-              public FileVisitResult postVisitDirectory(Path dir, IOException exc)
-                  throws IOException {
-                Files.delete(dir);
-                return FileVisitResult.CONTINUE;
-              }
-            });
+        MoreFiles.deleteRecursively(dir, RecursiveDeleteOption.ALLOW_INSECURE);
       } catch (IOException e) {
         throw new IOException("Cannot clean output directory '" + dir + "'", e);
       }

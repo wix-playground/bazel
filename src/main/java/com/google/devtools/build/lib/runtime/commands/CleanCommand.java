@@ -29,14 +29,13 @@ import com.google.devtools.build.lib.util.ExitCode;
 import com.google.devtools.build.lib.util.OS;
 import com.google.devtools.build.lib.util.ProcessUtils;
 import com.google.devtools.build.lib.util.ShellEscaper;
-import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
 import com.google.devtools.common.options.OptionsBase;
 import com.google.devtools.common.options.OptionsParser;
-import com.google.devtools.common.options.OptionsProvider;
+import com.google.devtools.common.options.OptionsParsingResult;
 import java.io.FileDescriptor;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -99,14 +98,14 @@ public final class CleanCommand implements BlazeCommand {
 
   /** Posted on the public event stream to announce that a clean is happening. */
   public static class CleanStartingEvent {
-    private final OptionsProvider optionsProvider;
+    private final OptionsParsingResult optionsParsingResult;
 
-    public CleanStartingEvent(OptionsProvider optionsProvider) {
-      this.optionsProvider = optionsProvider;
+    public CleanStartingEvent(OptionsParsingResult optionsParsingResult) {
+      this.optionsParsingResult = optionsParsingResult;
     }
 
-    public OptionsProvider getOptionsProvider() {
-      return optionsProvider;
+    public OptionsParsingResult getOptionsProvider() {
+      return optionsParsingResult;
     }
   }
 
@@ -124,7 +123,7 @@ public final class CleanCommand implements BlazeCommand {
   private static final Logger logger = Logger.getLogger(CleanCommand.class.getName());
 
   @Override
-  public BlazeCommandResult exec(CommandEnvironment env, OptionsProvider options) {
+  public BlazeCommandResult exec(CommandEnvironment env, OptionsParsingResult options) {
     Options cleanOptions = options.getOptions(Options.class);
     boolean async = cleanOptions.async;
     env.getEventBus().post(new NoBuildEvent());
@@ -191,7 +190,7 @@ public final class CleanCommand implements BlazeCommand {
             "exec >&- 2>&- <&- && (/usr/bin/setsid /bin/rm -rf %s &)&",
             ShellEscaper.escapeString(tempPath.getPathString()));
 
-    logger.info("Executing shell commmand " + ShellEscaper.escapeString(command));
+    logger.info("Executing shell command " + ShellEscaper.escapeString(command));
 
     // Doesn't throw iff command exited and was successful.
     new CommandBuilder()
@@ -231,8 +230,8 @@ public final class CleanCommand implements BlazeCommand {
       // and links right before we exit. Once the lock file is gone there will
       // be a small possibility of a server race if a client is waiting, but
       // all significant files will be gone by then.
-      FileSystemUtils.deleteTreesBelow(outputBase);
-      FileSystemUtils.deleteTree(outputBase);
+      outputBase.deleteTreesBelow();
+      outputBase.deleteTree();
     } else if (expunge && async) {
       logger.info("Expunging asynchronously...");
       env.getRuntime().prepareForAbruptShutdown();
@@ -246,7 +245,7 @@ public final class CleanCommand implements BlazeCommand {
         if (async) {
           asyncClean(env, execroot, "Output tree");
         } else {
-          FileSystemUtils.deleteTreesBelow(execroot);
+          execroot.deleteTreesBelow();
         }
       }
     }

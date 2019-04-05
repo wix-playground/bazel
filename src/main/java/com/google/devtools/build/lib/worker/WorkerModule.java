@@ -37,8 +37,10 @@ import com.google.devtools.build.lib.runtime.BlazeModule;
 import com.google.devtools.build.lib.runtime.Command;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
 import com.google.devtools.build.lib.runtime.commands.CleanCommand.CleanStartingEvent;
+import com.google.devtools.build.lib.sandbox.SandboxOptions;
 import com.google.devtools.build.lib.util.OS;
 import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.worker.WorkerOptions.MultiResourceConverter;
 import com.google.devtools.common.options.OptionsBase;
 import java.io.IOException;
 import java.util.LinkedHashMap;
@@ -50,9 +52,9 @@ public class WorkerModule extends BlazeModule {
 
   private WorkerFactory workerFactory;
   private WorkerPool workerPool;
-  private ImmutableMap<String, Integer> workerPoolConfig;
   private WorkerOptions options;
-
+  private ImmutableMap<String, Integer> workerPoolConfig;
+  
   @Override
   public Iterable<Class<? extends OptionsBase>> getCommandOptions(Command command) {
     return "build".equals(command.name())
@@ -114,11 +116,15 @@ public class WorkerModule extends BlazeModule {
     for (Map.Entry<String, Integer> entry : options.workerMaxInstances) {
       newConfigBuilder.put(entry.getKey(), entry.getValue());
     }
+
     if (!newConfigBuilder.containsKey("")) {
       // Empty string gives the number of workers for any type of worker not explicitly specified.
       // If no value is given, use the default, 4.
-      newConfigBuilder.put("", 4);
+      // TODO(steinman): Calculate a reasonable default value instead of arbitrarily defaulting to
+      // 4.
+      newConfigBuilder.put("", MultiResourceConverter.DEFAULT_VALUE);
     }
+
     ImmutableMap<String, Integer> newConfig = ImmutableMap.copyOf(newConfigBuilder);
 
     // If the config changed compared to the last run, we have to create a new pool.
@@ -139,33 +145,43 @@ public class WorkerModule extends BlazeModule {
     Preconditions.checkNotNull(workerPool);
     ImmutableMultimap<String, String> extraFlags =
         ImmutableMultimap.copyOf(env.getOptions().getOptions(WorkerOptions.class).workerExtraFlags);
+    LocalEnvProvider localEnvProvider = createLocalEnvProvider(env);
     WorkerSpawnRunner spawnRunner =
         new WorkerSpawnRunner(
             env.getExecRoot(),
             workerPool,
             extraFlags,
             env.getReporter(),
-            createFallbackRunner(env));
+            createFallbackRunner(env, localEnvProvider),
+            localEnvProvider,
+            env.getOptions()
+                .getOptions(SandboxOptions.class)
+                .symlinkedSandboxExpandsTreeArtifactsInRunfilesTree,
+            env.getBlazeWorkspace().getBinTools());
     builder.addActionContext(new WorkerSpawnStrategy(env.getExecRoot(), spawnRunner));
 
     builder.addStrategyByContext(SpawnActionContext.class, "standalone");
     builder.addStrategyByContext(SpawnActionContext.class, "worker");
   }
 
-  private static SpawnRunner createFallbackRunner(CommandEnvironment env) {
+  private static SpawnRunner createFallbackRunner(
+      CommandEnvironment env, LocalEnvProvider localEnvProvider) {
     LocalExecutionOptions localExecutionOptions =
         env.getOptions().getOptions(LocalExecutionOptions.class);
-    LocalEnvProvider localEnvProvider =
-        OS.getCurrent() == OS.DARWIN
-            ? new XcodeLocalEnvProvider(env.getClientEnv())
-            : (OS.getCurrent() == OS.WINDOWS
-                ? new WindowsLocalEnvProvider(env.getClientEnv())
-                : new PosixLocalEnvProvider(env.getClientEnv()));
     return new LocalSpawnRunner(
         env.getExecRoot(),
         localExecutionOptions,
         ResourceManager.instance(),
-        localEnvProvider);
+        localEnvProvider,
+        env.getBlazeWorkspace().getBinTools());
+  }
+
+  private static LocalEnvProvider createLocalEnvProvider(CommandEnvironment env) {
+    return OS.getCurrent() == OS.DARWIN
+        ? new XcodeLocalEnvProvider(env.getClientEnv())
+        : (OS.getCurrent() == OS.WINDOWS
+            ? new WindowsLocalEnvProvider(env.getClientEnv())
+            : new PosixLocalEnvProvider(env.getClientEnv()));
   }
 
   @Subscribe

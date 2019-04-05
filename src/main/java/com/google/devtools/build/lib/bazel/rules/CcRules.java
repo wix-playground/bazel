@@ -22,18 +22,18 @@ import com.google.devtools.build.lib.bazel.rules.cpp.BazelCcLibraryRule;
 import com.google.devtools.build.lib.bazel.rules.cpp.BazelCcModule;
 import com.google.devtools.build.lib.bazel.rules.cpp.BazelCcTestRule;
 import com.google.devtools.build.lib.bazel.rules.cpp.BazelCppRuleClasses;
+import com.google.devtools.build.lib.bazel.rules.cpp.BazelCppRuleClasses.CcToolchainRequiringRule;
 import com.google.devtools.build.lib.rules.core.CoreRules;
-import com.google.devtools.build.lib.rules.cpp.CcCompilationInfo;
 import com.google.devtools.build.lib.rules.cpp.CcHostToolchainAliasRule;
 import com.google.devtools.build.lib.rules.cpp.CcImportRule;
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
 import com.google.devtools.build.lib.rules.cpp.CcLibcTopAlias;
-import com.google.devtools.build.lib.rules.cpp.CcLinkingInfo;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainAliasRule;
+import com.google.devtools.build.lib.rules.cpp.CcToolchainConfigInfo;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainRule;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainSuiteRule;
 import com.google.devtools.build.lib.rules.cpp.CppBuildInfo;
 import com.google.devtools.build.lib.rules.cpp.CppConfigurationLoader;
-import com.google.devtools.build.lib.rules.cpp.CppOptions;
 import com.google.devtools.build.lib.rules.cpp.CppRuleClasses.CcIncludeScanningRule;
 import com.google.devtools.build.lib.rules.cpp.CpuTransformer;
 import com.google.devtools.build.lib.rules.cpp.FdoPrefetchHintsRule;
@@ -53,7 +53,7 @@ public class CcRules implements RuleSet {
 
   @Override
   public void init(ConfiguredRuleClassProvider.Builder builder) {
-    builder.addConfig(CppOptions.class, new CppConfigurationLoader(CpuTransformer.IDENTITY));
+    builder.addConfigurationFragment(new CppConfigurationLoader(CpuTransformer.IDENTITY));
     builder.addBuildInfoFactory(new CppBuildInfo());
 
     builder.addRuleDefinition(new CcToolchainRule());
@@ -62,11 +62,10 @@ public class CcRules implements RuleSet {
     builder.addRuleDefinition(new CcHostToolchainAliasRule());
     builder.addRuleDefinition(new CcLibcTopAlias());
     builder.addRuleDefinition(new CcImportRule());
-    builder.addRuleDefinition(new BazelCppRuleClasses.CcLinkingRule());
+    builder.addRuleDefinition(new CcToolchainRequiringRule());
     builder.addRuleDefinition(new BazelCppRuleClasses.CcDeclRule());
     builder.addRuleDefinition(new BazelCppRuleClasses.CcBaseRule());
-    builder.addRuleDefinition(new BazelCppRuleClasses.CcRule(
-        BazelRuleClassProvider.TOOLS_REPOSITORY + "//tools/def_parser:def_parser"));
+    builder.addRuleDefinition(new BazelCppRuleClasses.CcRule());
     builder.addRuleDefinition(new BazelCppRuleClasses.CcBinaryBaseRule());
     builder.addRuleDefinition(new BazelCcBinaryRule());
     builder.addRuleDefinition(new BazelCcTestRule());
@@ -78,8 +77,8 @@ public class CcRules implements RuleSet {
     builder.addRuleDefinition(new FdoPrefetchHintsRule());
 
     builder.addSkylarkBootstrap(new CcBootstrap(new BazelCcModule()));
-    builder.addSkylarkAccessibleTopLevels("CcCompilationInfo", CcCompilationInfo.PROVIDER);
-    builder.addSkylarkAccessibleTopLevels("CcLinkingInfo", CcLinkingInfo.PROVIDER);
+    builder.addSkylarkAccessibleTopLevels("CcInfo", CcInfo.PROVIDER);
+    builder.addSkylarkAccessibleTopLevels("CcToolchainConfigInfo", CcToolchainConfigInfo.PROVIDER);
   }
 
   @Override

@@ -16,18 +16,25 @@ package com.google.devtools.build.lib.concurrent;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
+import com.google.common.collect.Sets;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import com.google.devtools.build.lib.concurrent.ErrorClassifier.ErrorClassification;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReadWriteLock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -71,6 +78,19 @@ public class AbstractQueueVisitor implements QuiescingExecutor {
   private final AtomicLong remainingTasks = new AtomicLong(0);
 
   /**
+   * A thread that wants to add or remove a future from {@code outstandingFutures} must first obtain
+   * the <em>read</em> lock and then check the {@code threadInterrupted} flag. The thread that
+   * cancels all futures must first set the {@code threadInterrupted} flag, and then obtain the
+   * <em>write</em> lock. Only once both have happened is the main thread allowed to iterate over
+   * the {@code outstandingFutures}. This allows concurrent future registration, but ensures that
+   * canceling only happens when there are no concurrent modifications to the set since that
+   * requires iterating over all elements.
+   */
+  private final ReadWriteLock outstandingFuturesLock = new ReentrantReadWriteLock();
+
+  private final Set<ListenableFuture<?>> outstandingFutures = Sets.newConcurrentHashSet();
+
+  /**
    * Flag used to record when all threads were killed by failed action execution. Only ever
    * transitions from {@code false} to {@code true}.
    *
@@ -93,7 +113,7 @@ public class AbstractQueueVisitor implements QuiescingExecutor {
    * <p>When this is {@code true}, adding tasks to the {@link ExecutorService} will fail quietly as
    * a part of the process of shutting down the worker threads.
    */
-  private volatile boolean threadInterrupted = false;
+  private volatile boolean threadInterrupted;
 
   /**
    * Latches used to signal when the visitor has been interrupted or seen an exception. Used only
@@ -140,26 +160,26 @@ public class AbstractQueueVisitor implements QuiescingExecutor {
             .build());
   }
 
-  /**
-   * Creates an {@link AbstractQueueVisitor}, similar to {@link #AbstractQueueVisitor(int, long,
-   * TimeUnit, boolean, String, ErrorClassifier)}, but whose work is ordered by a {@link
-   * PriorityBlockingQueue}. The {@link Runnable} objects submitted to {@link #execute(Runnable)}
-   * must implement {@link Comparable}.
-   */
-  public static AbstractQueueVisitor createWithPriorityQueue(
-      int parallelism,
-      long keepAliveTime,
-      TimeUnit units,
+  public static ExecutorService createExecutorService(int parallelism, String poolName) {
+    return createExecutorService(
+        parallelism,
+        /*keepAliveTime=*/ 1,
+        TimeUnit.SECONDS,
+        new PriorityBlockingQueue<>(),
+        poolName);
+  }
+
+  public static AbstractQueueVisitor createWithExecutorService(
+      ExecutorService executorService,
       boolean failFastOnException,
-      String poolName,
       ErrorClassifier errorClassifier) {
-    return new AbstractQueueVisitor(
-        createExecutorService(
-            parallelism, keepAliveTime, units, new PriorityBlockingQueue<>(), poolName),
-        true,
-        failFastOnException,
-        errorClassifier,
-        /*usingPriorityQueue=*/ true);
+    if (executorService instanceof ForkJoinPool) {
+      return ForkJoinQuiescingExecutor.newBuilder()
+          .withOwnershipOf((ForkJoinPool) executorService)
+          .setErrorClassifier(errorClassifier)
+          .build();
+    }
+    return new AbstractQueueVisitor(executorService, true, failFastOnException, errorClassifier);
   }
 
   /**
@@ -445,6 +465,39 @@ public class AbstractQueueVisitor implements QuiescingExecutor {
     return remainingTasks.get();
   }
 
+  @Override
+  public void dependOnFuture(ListenableFuture<?> future) throws InterruptedException {
+    outstandingFuturesLock.readLock().lock();
+    try {
+      if (threadInterrupted) {
+        future.cancel(/*mayInterruptIfRunning=*/ true);
+        throw new InterruptedException();
+      }
+      remainingTasks.incrementAndGet();
+      outstandingFutures.add(future);
+      future.addListener(() -> markFutureDone(future), MoreExecutors.directExecutor());
+    } finally {
+      outstandingFuturesLock.readLock().unlock();
+    }
+  }
+
+  private void markFutureDone(ListenableFuture<?> future) {
+    decrementRemainingTasks();
+    outstandingFuturesLock.readLock().lock();
+    try {
+      if (threadInterrupted) {
+        // Since futures get worked on asynchronously, there is an inherent race between this method
+        // being called and the future getting canceled. If we get here, the other thread either
+        // already attempted to cancel the future, or is just about to do so. In either case, no
+        // need to throw or do anything with outstandingFutures here.
+        return;
+      }
+      outstandingFutures.remove(future);
+    } finally {
+      outstandingFuturesLock.readLock().unlock();
+    }
+  }
+
   /**
    * Whether all running and pending jobs will be stopped or cancelled. Also newly submitted tasks
    * will be rejected if this is true.
@@ -487,6 +540,13 @@ public class AbstractQueueVisitor implements QuiescingExecutor {
     if (interruptWorkers && !jobs.isEmpty()) {
       interruptInFlightTasks();
     }
+    if (interruptWorkers) {
+      // If the computation is done, this does nothing because there are no outstanding futures. Do
+      // not predicate on outstandingFutures.isEmpty() here: in the case of an interrupt, there may
+      // still be threads concurrently adding futures to the set, and we need to make sure that
+      // those are canceled correctly.
+      cancelAllFutures();
+    }
 
     if (isInterrupted()) {
       interruptedLatch.countDown();
@@ -523,6 +583,19 @@ public class AbstractQueueVisitor implements QuiescingExecutor {
       if (thisThread != thread) {
         thread.interrupt();
       }
+    }
+  }
+
+  private void cancelAllFutures() {
+    // Nobody else can modify outstandingFutures while this thread is holding the write lock.
+    outstandingFuturesLock.writeLock().lock();
+    try {
+      for (ListenableFuture<?> future : outstandingFutures) {
+        future.cancel(/*mayInterruptIfRunning=*/ true);
+      }
+      outstandingFutures.clear();
+    } finally {
+      outstandingFuturesLock.writeLock().unlock();
     }
   }
 }

@@ -30,6 +30,7 @@ import com.google.devtools.build.lib.exec.apple.XcodeLocalEnvProvider;
 import com.google.devtools.build.lib.exec.local.LocalEnvProvider;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
 import com.google.devtools.build.lib.runtime.ProcessWrapperUtil;
+import com.google.devtools.build.lib.sandbox.SandboxHelpers.SandboxOutputs;
 import com.google.devtools.build.lib.shell.Command;
 import com.google.devtools.build.lib.shell.CommandException;
 import com.google.devtools.build.lib.shell.CommandResult;
@@ -111,6 +112,7 @@ final class DarwinSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
   private final Path sandboxBase;
   private final Duration timeoutKillDelay;
   private final @Nullable SandboxfsProcess sandboxfsProcess;
+  private final boolean sandboxfsMapSymlinkTargets;
 
   /**
    * The set of directories that always should be writable, independent of the Spawn itself.
@@ -129,12 +131,14 @@ final class DarwinSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
    * @param timeoutKillDelay additional grace period before killing timing out commands
    * @param sandboxfsProcess instance of the sandboxfs process to use; may be null for none, in
    *     which case the runner uses a symlinked sandbox
+   * @param sandboxfsMapSymlinkTargets map the targets of symlinks within the sandbox if true
    */
   DarwinSandboxedSpawnRunner(
       CommandEnvironment cmdEnv,
       Path sandboxBase,
       Duration timeoutKillDelay,
-      @Nullable SandboxfsProcess sandboxfsProcess)
+      @Nullable SandboxfsProcess sandboxfsProcess,
+      boolean sandboxfsMapSymlinkTargets)
       throws IOException {
     super(cmdEnv);
     this.execRoot = cmdEnv.getExecRoot();
@@ -145,6 +149,7 @@ final class DarwinSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
     this.sandboxBase = sandboxBase;
     this.timeoutKillDelay = timeoutKillDelay;
     this.sandboxfsProcess = sandboxfsProcess;
+    this.sandboxfsMapSymlinkTargets = sandboxfsMapSymlinkTargets;
   }
 
   private static void addPathToSetIfExists(FileSystem fs, Set<Path> paths, String path)
@@ -222,13 +227,13 @@ final class DarwinSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
     sandboxExecRoot.createDirectory();
 
     Map<String, String> environment =
-        localEnvProvider.rewriteLocalEnv(spawn.getEnvironment(), execRoot, "/tmp");
+        localEnvProvider.rewriteLocalEnv(spawn.getEnvironment(), binTools, "/tmp");
 
     final HashSet<Path> writableDirs = new HashSet<>(alwaysWritableDirs);
     ImmutableSet<Path> extraWritableDirs = getWritableDirs(sandboxExecRoot, environment);
     writableDirs.addAll(extraWritableDirs);
 
-    ImmutableSet<PathFragment> outputs = SandboxHelpers.getOutputFiles(spawn);
+    SandboxOutputs outputs = SandboxHelpers.getOutputs(spawn);
 
     final Path sandboxConfigPath = sandboxPath.getRelative("sandbox.sb");
     Duration timeout = context.getTimeout();
@@ -255,9 +260,16 @@ final class DarwinSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
             .addAll(processWrapperCommandLineBuilder.build())
             .build();
 
-    boolean allowNetworkForThisSpawn = allowNetwork || Spawns.requiresNetwork(spawn);
+    boolean allowNetworkForThisSpawn =
+        allowNetwork
+            || Spawns.requiresNetwork(spawn, getSandboxOptions().defaultSandboxAllowNetwork);
 
-    Map<PathFragment, Path> inputs = SandboxHelpers.processInputFiles(spawn, context, execRoot);
+    Map<PathFragment, Path> inputs =
+        SandboxHelpers.processInputFiles(
+            spawn,
+            context,
+            execRoot,
+            getSandboxOptions().symlinkedSandboxExpandsTreeArtifactsInRunfilesTree);
 
     SandboxedSpawn sandbox;
     if (sandboxfsProcess != null) {
@@ -269,7 +281,8 @@ final class DarwinSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
               environment,
               inputs,
               outputs,
-              ImmutableSet.of()) {
+              ImmutableSet.of(),
+              sandboxfsMapSymlinkTargets) {
             @Override
             public void createFileSystem() throws IOException {
               super.createFileSystem();

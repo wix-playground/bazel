@@ -13,11 +13,14 @@
 // limitations under the License.
 package com.google.devtools.build.lib.runtime;
 
+import com.google.common.eventbus.Subscribe;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.events.EventKind;
 import com.google.devtools.build.lib.events.Location;
+import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
 import com.google.devtools.build.lib.util.io.OutErr;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.common.options.EnumConverter;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
@@ -27,6 +30,7 @@ import com.google.devtools.common.options.OptionsBase;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -93,7 +97,7 @@ public class BlazeCommandEventHandler implements EventHandler {
       converter = UseColorConverter.class,
       documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
       effectTags = {OptionEffectTag.UNKNOWN},
-      help = "Use terminal controls to colorize output."
+      help = "Use terminal controls to colorize output going to stderr."
     )
     public UseColor useColorEnum;
 
@@ -103,7 +107,7 @@ public class BlazeCommandEventHandler implements EventHandler {
       converter = UseCursesConverter.class,
       documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
       effectTags = {OptionEffectTag.UNKNOWN},
-      help = "Use terminal cursor controls to minimize scrolling output"
+      help = "Use terminal cursor controls to minimize scrolling output going to stderr."
     )
     public UseCurses useCursesEnum;
 
@@ -118,18 +122,21 @@ public class BlazeCommandEventHandler implements EventHandler {
     public int terminalColumns;
 
     @Option(
-      name = "isatty",
+      name = "is_stderr_atty",
+      // TODO(b/63386499): Old name should be removed after 2019-02-28.
+      oldName = "isatty",
       defaultValue = "false",
       metadataTags = {OptionMetadataTag.HIDDEN},
       documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
       effectTags = {OptionEffectTag.UNKNOWN},
       help =
-          "A system-generated parameter which is used to notify the "
-              + "server whether this client is running in a terminal. "
-              + "If this is set to false, then '--color=auto' will be treated as '--color=no'. "
-              + "If this is set to true, then '--color=auto' will be treated as '--color=yes'."
+          "A system-generated parameter which is used to notify the server whether this client is"
+              + " running in a terminal.  If this is set to false, then '--color=auto' will be"
+              + " treated as '--color=no'.  If this is set to true, then '--color=auto' will be"
+              + " treated as '--color=yes'.  As we only treat the stderr as a terminal, we only"
+              + " care if that file descriptor is connected to a TTY."
     )
-    public boolean isATty;
+    public boolean isStderrATty;
 
     // This lives here (as opposed to the more logical BuildRequest.Options)
     // because the client passes it to the server *always*.  We don't want the
@@ -184,58 +191,75 @@ public class BlazeCommandEventHandler implements EventHandler {
     public boolean forceExternalRepositories;
 
     @Option(
-      name = "experimental_ui",
-      defaultValue = "true",
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.UNKNOWN},
-      help =
-          "Switches to an alternative progress bar that more explicitly shows progress, such "
-              + "as loaded packages and executed actions."
-    )
+        name = "attempt_to_print_relative_paths",
+        oldName = "experimental_ui_attempt_to_print_relative_paths",
+        defaultValue = "false",
+        documentationCategory = OptionDocumentationCategory.LOGGING,
+        effectTags = {OptionEffectTag.TERMINAL_OUTPUT},
+        help =
+            "When printing the location part of messages, attempt to use a path relative to the "
+                + "workspace directory or one of the directories specified by --package_path.")
+    public boolean attemptToPrintRelativePaths;
+
+    @Option(
+        name = "ui",
+        oldName = "experimental_ui",
+        defaultValue = "true",
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.UNKNOWN},
+        help =
+            "Switches to a progress bar that more explicitly shows progress, such "
+                + "as loaded packages and executed actions.")
     public boolean experimentalUi;
 
     @Option(
-      name = "experimental_ui_debug_all_events",
-      defaultValue = "false",
-      metadataTags = {OptionMetadataTag.HIDDEN},
-      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-      effectTags = {OptionEffectTag.UNKNOWN},
-      help = "Report all events known to the experimental new Bazel UI."
-    )
+        name = "experimental_ui_debug_all_events",
+        defaultValue = "false",
+        metadataTags = {OptionMetadataTag.HIDDEN},
+        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+        effectTags = {OptionEffectTag.UNKNOWN},
+        help = "Report all events known to the Bazel UI.")
     public boolean experimentalUiDebugAllEvents;
 
     @Option(
-      name = "experimental_ui_actions_shown",
-      defaultValue = "8",
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.UNKNOWN},
-      help =
-          "Number of concurrent actions shown in the alternative progress bar; each "
-              + "action is shown on a separate line. The alternative progress bar always shows "
-              + "at least one one, all numbers less than 1 are mapped to 1. "
-              + "This option has no effect unless --experimental_ui is set."
-    )
+        name = "ui_actions_shown",
+        oldName = "experimental_ui_actions_shown",
+        defaultValue = "8",
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.UNKNOWN},
+        help =
+            "Number of concurrent actions shown in the detailed progress bar; each "
+                + "action is shown on a separate line. The progress bar always shows "
+                + "at least one one, all numbers less than 1 are mapped to 1. "
+                + "This option has no effect if --noui is set.")
     public int experimentalUiActionsShown;
 
     @Option(
-      name = "experimental_ui_limit_console_output",
-      defaultValue = "0",
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.UNKNOWN},
-      help =
-          "Number of bytes to which the experimental UI will limit its output (non-positive "
-              + "values indicate unlimited). Once the limit is approaching, the experimental UI "
-              + "will try hard to limit in a meaningful way, but will ultimately just drop all "
-              + "output."
-    )
+        name = "experimental_ui_limit_console_output",
+        defaultValue = "0",
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.UNKNOWN},
+        help =
+            "Number of bytes to which the UI will limit its output (non-positive "
+                + "values indicate unlimited). Once the limit is approaching, the UI "
+                + "will try hard to limit in a meaningful way, but will ultimately just drop all "
+                + "output.")
     public int experimentalUiLimitConsoleOutput;
 
+    @Option(
+        name = "experimental_ui_deduplicate",
+        defaultValue = "false",
+        documentationCategory = OptionDocumentationCategory.LOGGING,
+        effectTags = {OptionEffectTag.TERMINAL_OUTPUT},
+        help = "Make the UI deduplicate messages to have a cleaner scroll-back log.")
+    public boolean experimentalUiDeduplicate;
+
     public boolean useColor() {
-      return useColorEnum == UseColor.YES || (useColorEnum == UseColor.AUTO && isATty);
+      return useColorEnum == UseColor.YES || (useColorEnum == UseColor.AUTO && isStderrATty);
     }
 
     public boolean useCursorControl() {
-      return useCursesEnum == UseCurses.YES || (useCursesEnum == UseCurses.AUTO && isATty);
+      return useCursesEnum == UseCurses.YES || (useCursesEnum == UseCurses.AUTO && isStderrATty);
     }
   }
 
@@ -251,7 +275,10 @@ public class BlazeCommandEventHandler implements EventHandler {
 
   protected final boolean showTimestamp;
 
-  public BlazeCommandEventHandler(OutErr outErr, Options eventOptions) {
+  protected final LocationPrinter locationPrinter;
+
+  public BlazeCommandEventHandler(
+      OutErr outErr, Options eventOptions, PathFragment workspacePathFragment) {
     this.outErr = outErr;
     this.errPrintStream = new PrintStream(outErr.getErrorStream(), true);
     if (eventOptions.showProgress) {
@@ -266,6 +293,8 @@ public class BlazeCommandEventHandler implements EventHandler {
     }
     eventMask.add(EventKind.SUBCOMMAND);
     this.showTimestamp = eventOptions.showTimestamp;
+    this.locationPrinter =
+        new LocationPrinter(eventOptions.attemptToPrintRelativePaths, workspacePathFragment);
   }
 
   /** See EventHandler.handle. */
@@ -312,7 +341,7 @@ public class BlazeCommandEventHandler implements EventHandler {
 
     Location location = event.getLocation();
     if (location != null) {
-      buf.append(location.print()).append(": ");
+      buf.append(locationPrinter.getLocationString(location)).append(": ");
     }
 
     buf.append(event.getMessage());
@@ -331,10 +360,14 @@ public class BlazeCommandEventHandler implements EventHandler {
     errPrintStream.println(buf);
 
     if (event.getStdErr() != null) {
-      handle(Event.of(EventKind.STDERR, null, event.getStdErr()));
+      handle(
+          Event.of(
+              EventKind.STDERR, null, event.getStdErr().getBytes(StandardCharsets.ISO_8859_1)));
     }
     if (event.getStdOut() != null) {
-      handle(Event.of(EventKind.STDOUT, null, event.getStdOut()));
+      handle(
+          Event.of(
+              EventKind.STDOUT, null, event.getStdOut().getBytes(StandardCharsets.ISO_8859_1)));
     }
   }
 
@@ -355,5 +388,10 @@ public class BlazeCommandEventHandler implements EventHandler {
    */
   protected String timestamp() {
     return TIMESTAMP_FORMAT.format(ZonedDateTime.now(ZoneId.systemDefault()));
+  }
+
+  @Subscribe
+  public void packageLocatorCreated(PathPackageLocator packageLocator) {
+    locationPrinter.packageLocatorCreated(packageLocator);
   }
 }

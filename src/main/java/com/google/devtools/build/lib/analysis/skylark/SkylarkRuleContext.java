@@ -13,7 +13,9 @@
 // limitations under the License.
 
 package com.google.devtools.build.lib.analysis.skylark;
-  
+
+import static com.google.devtools.build.lib.packages.RuleClass.Builder.SKYLARK_BUILD_SETTING_DEFAULT_ATTR_NAME;
+
 import com.google.common.base.Function;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
@@ -23,6 +25,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Ordering;
+import com.google.common.hash.Hashing;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactRoot;
 import com.google.devtools.build.lib.analysis.ActionsProvider;
@@ -47,7 +50,7 @@ import com.google.devtools.build.lib.analysis.config.transitions.NoTransition;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.analysis.stringtemplate.ExpansionException;
 import com.google.devtools.build.lib.analysis.test.InstrumentedFilesCollector;
-import com.google.devtools.build.lib.analysis.test.InstrumentedFilesProvider;
+import com.google.devtools.build.lib.analysis.test.InstrumentedFilesInfo;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.packages.Aspect;
@@ -56,16 +59,16 @@ import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.ImplicitOutputsFunction;
 import com.google.devtools.build.lib.packages.ImplicitOutputsFunction.SkylarkImplicitOutputsFunction;
-import com.google.devtools.build.lib.packages.Info;
 import com.google.devtools.build.lib.packages.OutputFile;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.packages.Provider;
 import com.google.devtools.build.lib.packages.RawAttributeMapper;
+import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
+import com.google.devtools.build.lib.packages.StructImpl;
 import com.google.devtools.build.lib.packages.StructProvider;
 import com.google.devtools.build.lib.shell.ShellUtils;
 import com.google.devtools.build.lib.shell.ShellUtils.TokenizationException;
 import com.google.devtools.build.lib.skylarkbuildapi.FileApi;
-import com.google.devtools.build.lib.skylarkbuildapi.FileRootApi;
 import com.google.devtools.build.lib.skylarkbuildapi.SkylarkRuleContextApi;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkPrinter;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkValue;
@@ -82,7 +85,7 @@ import com.google.devtools.build.lib.syntax.SkylarkList;
 import com.google.devtools.build.lib.syntax.SkylarkList.MutableList;
 import com.google.devtools.build.lib.syntax.SkylarkList.Tuple;
 import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
-import com.google.devtools.build.lib.syntax.SkylarkSemantics;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import com.google.devtools.build.lib.syntax.Type;
 import com.google.devtools.build.lib.syntax.Type.ConversionException;
 import com.google.devtools.build.lib.syntax.Type.LabelClass;
@@ -132,12 +135,12 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
   private FragmentCollection fragments;
   private FragmentCollection hostFragments;
   private AspectDescriptor aspectDescriptor;
-  private final SkylarkSemantics skylarkSemantics;
+  private final StarlarkSemantics starlarkSemantics;
 
   private SkylarkDict<String, String> makeVariables;
   private SkylarkAttributesCollection attributesCollection;
   private SkylarkAttributesCollection ruleAttributesCollection;
-  private Info splitAttributes;
+  private StructImpl splitAttributes;
 
   // TODO(bazel-team): we only need this because of the css_binary rule.
   private ImmutableMap<Artifact, Label> artifactsLabelMap;
@@ -145,21 +148,23 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
 
   /**
    * Creates a new SkylarkRuleContext using ruleContext.
-   * @param aspectDescriptor aspect for which the context is created, or <code>null</code>
-   *        if it is for a rule.
+   *
+   * @param aspectDescriptor aspect for which the context is created, or <code>null</code> if it is
+   *     for a rule.
    * @throws InterruptedException
    */
-  public SkylarkRuleContext(RuleContext ruleContext,
+  public SkylarkRuleContext(
+      RuleContext ruleContext,
       @Nullable AspectDescriptor aspectDescriptor,
-      SkylarkSemantics skylarkSemantics)
-      throws EvalException, InterruptedException {
-    this.actionFactory = new SkylarkActionFactory(this, skylarkSemantics, ruleContext);
+      StarlarkSemantics starlarkSemantics)
+      throws EvalException, InterruptedException, RuleErrorException {
+    this.actionFactory = new SkylarkActionFactory(this, starlarkSemantics, ruleContext);
     this.ruleContext = Preconditions.checkNotNull(ruleContext);
     this.ruleLabelCanonicalName = ruleContext.getLabel().getCanonicalForm();
     this.fragments = new FragmentCollection(ruleContext, NoTransition.INSTANCE);
     this.hostFragments = new FragmentCollection(ruleContext, HostTransition.INSTANCE);
     this.aspectDescriptor = aspectDescriptor;
-    this.skylarkSemantics = skylarkSemantics;
+    this.starlarkSemantics = starlarkSemantics;
 
     if (aspectDescriptor == null) {
       this.isForAspect = false;
@@ -257,7 +262,11 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
       this.ruleAttributesCollection = ruleBuilder.build();
     }
 
-    makeVariables = ruleContext.getConfigurationMakeVariableContext().collectMakeVariables();
+    try {
+      makeVariables = ruleContext.getConfigurationMakeVariableContext().collectMakeVariables();
+    } catch (ExpansionException e) {
+      throw ruleContext.throwWithRuleError(e.getMessage());
+    }
   }
 
   /**
@@ -413,13 +422,13 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
     return ruleLabelCanonicalName;
   }
 
-  private static Info buildSplitAttributeInfo(
+  private static StructImpl buildSplitAttributeInfo(
       Collection<Attribute> attributes, RuleContext ruleContext) {
 
     ImmutableMap.Builder<String, Object> splitAttrInfos = ImmutableMap.builder();
     for (Attribute attr : attributes) {
 
-      if (attr.hasSplitConfigurationTransition()) {
+      if (attr.getTransitionFactory().isSplit()) {
 
         Map<Optional<String>, ? extends List<? extends TransitiveInfoCollection>> splitPrereqs =
             ruleContext.getSplitPrerequisites(attr.getName());
@@ -502,13 +511,13 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
   }
 
   @Override
-  public Info getAttr() throws EvalException {
+  public StructImpl getAttr() throws EvalException {
     checkMutable("attr");
     return attributesCollection.getAttr();
   }
 
   @Override
-  public Info getSplitAttr() throws EvalException {
+  public StructImpl getSplitAttr() throws EvalException {
     checkMutable("split_attr");
     if (splitAttributes == null) {
       throw new EvalException(
@@ -519,21 +528,21 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
 
   /** See {@link RuleContext#getExecutablePrerequisite(String, Mode)}. */
   @Override
-  public Info getExecutable() throws EvalException {
+  public StructImpl getExecutable() throws EvalException {
     checkMutable("executable");
     return attributesCollection.getExecutable();
   }
 
   /** See {@link RuleContext#getPrerequisiteArtifact(String, Mode)}. */
   @Override
-  public Info getFile() throws EvalException {
+  public StructImpl getFile() throws EvalException {
     checkMutable("file");
     return attributesCollection.getFile();
   }
 
   /** See {@link RuleContext#getPrerequisiteArtifacts(String, Mode)}. */
   @Override
-  public Info getFiles() throws EvalException {
+  public StructImpl getFiles() throws EvalException {
     checkMutable("files");
     return attributesCollection.getFiles();
   }
@@ -574,6 +583,32 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
     return ruleContext.getHostConfiguration();
   }
 
+  // TODO(juliexxia): special-case label-typed build settings so they return the providers of the
+  // target represented by the label instead of the actual label.
+  @Override
+  @Nullable
+  public Object getBuildSettingValue() throws EvalException {
+    if (ruleContext.getRule().getRuleClassObject().getBuildSetting() == null) {
+      throw new EvalException(
+          Location.BUILTIN,
+          String.format(
+              "attempting to access 'build_setting_value' of non-build setting %s",
+              ruleLabelCanonicalName));
+    }
+    ImmutableMap<Label, Object> skylarkFlagSettings =
+        ruleContext.getConfiguration().getOptions().getStarlarkOptions();
+
+    Type<?> buildSettingType =
+        ruleContext.getRule().getRuleClassObject().getBuildSetting().getType();
+    if (skylarkFlagSettings.containsKey(ruleContext.getLabel())) {
+      return skylarkFlagSettings.get(ruleContext.getLabel());
+    } else {
+      return ruleContext
+          .attributes()
+          .get(SKYLARK_BUILD_SETTING_DEFAULT_ATTR_NAME, buildSettingType);
+    }
+  }
+
   @Override
   public boolean instrumentCoverage(Object targetUnchecked) throws EvalException {
     checkMutable("coverage_instrumented");
@@ -582,10 +617,11 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
       return false;
     }
     if (targetUnchecked == Runtime.NONE) {
-      return InstrumentedFilesCollector.shouldIncludeLocalSources(ruleContext);
+      return InstrumentedFilesCollector.shouldIncludeLocalSources(
+          ruleContext.getConfiguration(), ruleContext.getLabel(), ruleContext.isTestTarget());
     }
     TransitiveInfoCollection target = (TransitiveInfoCollection) targetUnchecked;
-    return (target.getProvider(InstrumentedFilesProvider.class) != null)
+    return (target.get(InstrumentedFilesInfo.SKYLARK_CONSTRUCTOR) != null)
         && InstrumentedFilesCollector.shouldIncludeLocalSources(config, target);
   }
 
@@ -697,41 +733,66 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
   }
 
   @Override
-  public Artifact newFileFromFilename(String filename) throws EvalException {
-    checkDeprecated("ctx.actions.declare_file", "ctx.new_file", null, skylarkSemantics);
+  public Artifact newFile(Object var1,
+      Object var2,
+      Object fileSuffix,
+      Location loc) throws EvalException {
+    checkDeprecated("ctx.actions.declare_file", "ctx.new_file", null, starlarkSemantics);
     checkMutable("new_file");
-    return actionFactory.declareFile(filename, Runtime.NONE);
+
+    // Determine which of new_file's four signatures is being used. Yes, this is terrible.
+    // It's one major reason that this method is deprecated.
+    if (fileSuffix != Runtime.UNBOUND) {
+      // new_file(file_root, sibling_file, suffix)
+      ArtifactRoot root =
+          assertTypeForNewFile(var1, ArtifactRoot.class, loc,
+              "expected first param to be of type 'root'");
+      Artifact siblingFile =
+          assertTypeForNewFile(var2, Artifact.class, loc,
+              "expected second param to be of type 'File'");
+      PathFragment original = siblingFile.getRootRelativePath();
+      PathFragment fragment = original.replaceName(original.getBaseName() + fileSuffix);
+      return ruleContext.getDerivedArtifact(fragment, root);
+
+    } else if (var2 == Runtime.UNBOUND) {
+      // new_file(filename)
+      String filename =
+          assertTypeForNewFile(var1, String.class, loc,
+              "expected first param to be of type 'string'");
+      return actionFactory.declareFile(filename, Runtime.NONE);
+
+    } else {
+      String filename = assertTypeForNewFile(var2, String.class, loc,
+          "expected second param to be of type 'string'");
+      if (var1 instanceof ArtifactRoot) {
+        // new_file(root, filename)
+        ArtifactRoot root = (ArtifactRoot) var1;
+
+        return ruleContext.getPackageRelativeArtifact(filename, root);
+      } else {
+        // new_file(sibling_file, filename)
+        Artifact siblingFile =
+            assertTypeForNewFile(var1, Artifact.class, loc,
+                "expected first param to be of type 'File' or 'root'");
+
+        return actionFactory.declareFile(filename, siblingFile);
+      }
+    }
   }
 
-  // Kept for compatibility with old code.
-  @Override
-  public Artifact newFileFromRoot(FileRootApi root, String filename) throws EvalException {
-    checkMutable("new_file");
-    return ruleContext.getPackageRelativeArtifact(filename, (ArtifactRoot) root);
-  }
-
-  @Override
-  public Artifact newFileFromBaseFile(FileApi baseArtifact, String newBaseName)
-      throws EvalException {
-    checkDeprecated("ctx.actions.declare_file", "ctx.new_file", null, skylarkSemantics);
-    checkMutable("new_file");
-    return actionFactory.declareFile(newBaseName, baseArtifact);
-  }
-
-  // Kept for compatibility with old code.
-  @Override
-  public Artifact newFileFromRootAndBase(FileRootApi root, FileApi baseArtifact, String suffix)
-      throws EvalException {
-    checkMutable("new_file");
-    PathFragment original = ((Artifact) baseArtifact).getRootRelativePath();
-    PathFragment fragment = original.replaceName(original.getBaseName() + suffix);
-    return ruleContext.getDerivedArtifact(fragment, (ArtifactRoot) root);
+  private static <T> T assertTypeForNewFile(Object obj, Class<T> type, Location loc,
+      String errorMessage) throws EvalException {
+    if (type.isInstance(obj)) {
+      return (T) obj;
+    } else {
+      throw new EvalException(loc, errorMessage);
+    }
   }
 
   @Override
   public Artifact newDirectory(String name, Object siblingArtifactUnchecked) throws EvalException {
     checkDeprecated(
-        "ctx.actions.declare_directory", "ctx.experimental_new_directory", null, skylarkSemantics);
+        "ctx.actions.declare_directory", "ctx.experimental_new_directory", null, starlarkSemantics);
     checkMutable("experimental_new_directory");
     return actionFactory.declareDirectory(name, siblingArtifactUnchecked);
   }
@@ -884,7 +945,7 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
       throws EvalException {
     checkDeprecated("ctx.actions.write", "ctx.file_action", loc, env.getSemantics());
     checkMutable("file_action");
-    actions().write(output, content, executable);
+    actions().write(output, content, executable, loc);
     return Runtime.NONE;
   }
 
@@ -893,7 +954,7 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
       throws EvalException {
     checkDeprecated("ctx.actions.do_nothing", "ctx.empty_action", loc, env.getSemantics());
     checkMutable("empty_action");
-    actions().doNothing(mnemonic, inputs);
+    actions().doNothing(mnemonic, inputs, loc);
     return Runtime.NONE;
   }
 
@@ -908,7 +969,7 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
       throws EvalException {
     checkDeprecated("ctx.actions.expand_template", "ctx.template_action", loc, env.getSemantics());
     checkMutable("template_action");
-    actions().expandTemplate(template, output, substitutionsUnchecked, executable);
+    actions().expandTemplate(template, output, substitutionsUnchecked, executable, loc);
     return Runtime.NONE;
   }
 
@@ -978,10 +1039,10 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
     Map<Label, Iterable<Artifact>> labelDict = checkLabelDict(labelDictUnchecked, loc, env);
     // The best way to fix this probably is to convert CommandHelper to Skylark.
     CommandHelper helper =
-        new CommandHelper(
-            getRuleContext(),
-            tools.getContents(TransitiveInfoCollection.class, "tools"),
-            ImmutableMap.copyOf(labelDict));
+        CommandHelper.builder(getRuleContext())
+            .addToolDependencies(tools.getContents(TransitiveInfoCollection.class, "tools"))
+            .addLabelMap(labelDict)
+            .build();
     String attribute = Type.STRING.convertOptional(attributeUnchecked, "attribute", ruleLabel);
     if (expandLocations) {
       command =
@@ -993,7 +1054,10 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
       command = expandMakeVariables(attribute, command, makeVariables);
     }
     List<Artifact> inputs = new ArrayList<>();
-    inputs.addAll(helper.getResolvedTools());
+    // TODO(lberki): This flattens a NestedSet.
+    // However, we can't turn this into a SkylarkNestedSet because it's an incompatible change to
+    // Skylark.
+    Iterables.addAll(inputs, helper.getResolvedTools());
 
     ImmutableMap<String, String> executionRequirements =
         ImmutableMap.copyOf(
@@ -1005,11 +1069,33 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
     PathFragment shExecutable = ShToolchain.getPathOrError(ruleContext);
     List<String> argv =
         helper.buildCommandLine(
-            shExecutable, command, inputs, SCRIPT_SUFFIX, executionRequirements);
+            shExecutable,
+            command,
+            inputs,
+            // Hash the command-line to prevent multiple actions from the same rule invocation
+            // conflicting with each other.
+            "." + Hashing.murmur3_32().hashUnencodedChars(command).toString() + SCRIPT_SUFFIX,
+            executionRequirements);
     return Tuple.<Object>of(
         MutableList.copyOf(env, inputs),
         MutableList.copyOf(env, argv),
         helper.getToolsRunfilesSuppliers());
+  }
+
+  @Override
+  public Tuple<Object> resolveTools(SkylarkList tools) throws ConversionException, EvalException {
+    checkMutable("resolve_tools");
+    CommandHelper helper =
+        CommandHelper.builder(getRuleContext())
+            .addToolDependencies(tools.getContents(TransitiveInfoCollection.class, "tools"))
+            .build();
+    return Tuple.<Object>of(
+        SkylarkNestedSet.of(Artifact.class, helper.getResolvedTools()),
+        helper.getToolsRunfilesSuppliers());
+  }
+
+  public StarlarkSemantics getSkylarkSemantics() {
+    return starlarkSemantics;
   }
 
   /**
@@ -1052,7 +1138,8 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
   private static final String SCRIPT_SUFFIX = ".script.sh";
 
   private static void checkDeprecated(
-      String newApi, String oldApi, Location loc, SkylarkSemantics semantics) throws EvalException {
+      String newApi, String oldApi, Location loc, StarlarkSemantics semantics)
+      throws EvalException {
     if (semantics.incompatibleNewActionsApi()) {
       throw new EvalException(
           loc,

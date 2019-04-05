@@ -30,21 +30,22 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
-import com.google.devtools.build.lib.packages.NativeInfo;
+import com.google.devtools.build.lib.packages.Info;
 import com.google.devtools.build.lib.packages.NativeProvider.WithLegacySkylarkName;
-import com.google.devtools.build.lib.rules.cpp.CcLinkParamsStore;
-import com.google.devtools.build.lib.rules.cpp.CcLinkingInfo;
 import com.google.devtools.build.lib.rules.cpp.CppModuleMap;
-import com.google.devtools.build.lib.rules.cpp.LinkerInputs;
-import com.google.devtools.build.lib.rules.cpp.LinkerInputs.LibraryToLink;
+import com.google.devtools.build.lib.rules.cpp.LibraryToLink;
+import com.google.devtools.build.lib.rules.cpp.LibraryToLink.CcLinkingContext;
 import com.google.devtools.build.lib.skylarkbuildapi.apple.ObjcProviderApi;
 import com.google.devtools.build.lib.syntax.EvalUtils;
 import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
-import com.google.devtools.build.lib.syntax.SkylarkSemantics;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -52,7 +53,7 @@ import java.util.Map;
  * deps that are needed for building Objective-C rules.
  */
 @Immutable
-public final class ObjcProvider extends NativeInfo implements ObjcProviderApi<Artifact> {
+public final class ObjcProvider extends Info implements ObjcProviderApi<Artifact> {
 
   /** Skylark name for the ObjcProvider. */
   public static final String SKYLARK_NAME = "objc";
@@ -290,11 +291,9 @@ public final class ObjcProvider extends NativeInfo implements ObjcProviderApi<Ar
    */
   public static final Key<Artifact> STRINGS = new Key<>(STABLE_ORDER, "strings", Artifact.class);
 
-  /**
-   * Linking information from cc dependencies.
-   */
-  public static final Key<LinkerInputs.LibraryToLink> CC_LIBRARY =
-      new Key<>(LINK_ORDER, "cc_library", LinkerInputs.LibraryToLink.class);
+  /** Linking information from cc dependencies. */
+  public static final Key<LibraryToLink> CC_LIBRARY =
+      new Key<>(LINK_ORDER, "cc_library", LibraryToLink.class);
 
   /**
    * Linking options from dependencies.
@@ -347,7 +346,7 @@ public final class ObjcProvider extends NativeInfo implements ObjcProviderApi<Ar
     HAS_WATCH2_EXTENSION,
   }
 
-  private final SkylarkSemantics semantics;
+  private final StarlarkSemantics semantics;
   private final ImmutableMap<Key<?>, NestedSet<?>> items;
 
   // Items which should not be propagated to dependents.
@@ -398,7 +397,8 @@ public final class ObjcProvider extends NativeInfo implements ObjcProviderApi<Ar
       ImmutableList.<Key<?>>of(
           ASSET_CATALOG,
           BUNDLE_FILE,
-          MERGE_ZIP,
+          // TODO(kaipi): Add this back once we have migrated usages of merge_zip from custom rules.
+          // MERGE_ZIP,
           ROOT_MERGE_ZIP,
           STORYBOARD,
           STRINGS,
@@ -664,11 +664,11 @@ public final class ObjcProvider extends NativeInfo implements ObjcProviderApi<Ar
   public static final BuiltinProvider<ObjcProvider> SKYLARK_CONSTRUCTOR = new Constructor();
 
   private ObjcProvider(
-      SkylarkSemantics semantics,
+      StarlarkSemantics semantics,
       ImmutableMap<Key<?>, NestedSet<?>> items,
       ImmutableMap<Key<?>, NestedSet<?>> nonPropagatedItems,
       ImmutableMap<Key<?>, NestedSet<?>> strictDependencyItems) {
-    super(SKYLARK_CONSTRUCTOR);
+    super(SKYLARK_CONSTRUCTOR, Location.BUILTIN);
     this.semantics = semantics;
     this.items = Preconditions.checkNotNull(items);
     this.nonPropagatedItems = Preconditions.checkNotNull(nonPropagatedItems);
@@ -682,10 +682,6 @@ public final class ObjcProvider extends NativeInfo implements ObjcProviderApi<Ar
   public <E> NestedSet<E> get(Key<E> key) {
     Preconditions.checkNotNull(key);
     NestedSetBuilder<E> builder = new NestedSetBuilder<>(key.order);
-    if (semantics.incompatibleDisableObjcProviderResources()
-        && ObjcProvider.isDeprecatedResourceKey(key)) {
-      return builder.build();
-    }
     if (strictDependencyItems.containsKey(key)) {
       builder.addTransitive((NestedSet<E>) strictDependencyItems.get(key));
     }
@@ -751,12 +747,14 @@ public final class ObjcProvider extends NativeInfo implements ObjcProviderApi<Ar
   }
 
   /** Returns the list of .a files required for linking that arise from cc libraries. */
-  ImmutableList<Artifact> getCcLibraries() {
-    ImmutableList.Builder<Artifact> ccLibraryBuilder = ImmutableList.builder();
-    for (LinkerInputs.LibraryToLink libraryToLink : get(CC_LIBRARY)) {
-      ccLibraryBuilder.add(libraryToLink.getArtifact());
+  List<Artifact> getCcLibraries() {
+    NestedSetBuilder<LibraryToLink> libraryToLinkListBuilder = NestedSetBuilder.linkOrder();
+    for (LibraryToLink libraryToLink : get(CC_LIBRARY)) {
+      libraryToLinkListBuilder.add(libraryToLink);
     }
-    return ccLibraryBuilder.build();
+    CcLinkingContext ccLinkingContext =
+        CcLinkingContext.builder().addLibraries(libraryToLinkListBuilder.build()).build();
+    return ccLinkingContext.getStaticModeParamsForExecutableLibraries();
   }
 
   /**
@@ -773,24 +771,19 @@ public final class ObjcProvider extends NativeInfo implements ObjcProviderApi<Ar
   // TODO(b/65156211): Investigate subtraction generalized to NestedSet.
   @SuppressWarnings("unchecked") // Due to depending on Key types, when the keys map erases type.
   public ObjcProvider subtractSubtrees(
-      Iterable<ObjcProvider> avoidObjcProviders, Iterable<CcLinkingInfo> avoidCcProviders) {
+      Iterable<ObjcProvider> avoidObjcProviders, Iterable<CcLinkingContext> avoidCcProviders) {
     // LIBRARY and CC_LIBRARY need to be special cased for objc-cc interop.
     // A library which is a dependency of a cc_library may be present in all or any of
     // three possible locations (and may be duplicated!):
     // 1. ObjcProvider.LIBRARY
     // 2. ObjcProvider.CC_LIBRARY
-    // 3. CcLinkParamsStore->LibraryToLink->getArtifact()
+    // 3. CcLinkingContext->LibraryToLink->getArtifact()
     // TODO(cpeyser): Clean up objc-cc interop.
     HashSet<PathFragment> avoidLibrariesSet = new HashSet<>();
-    for (CcLinkingInfo linkProvider : avoidCcProviders) {
-      CcLinkParamsStore ccLinkParamsStore = linkProvider.getCcLinkParamsStore();
-      if (ccLinkParamsStore == null) {
-        continue;
-      }
-      NestedSet<LibraryToLink> librariesToLink =
-          ccLinkParamsStore.getCcLinkParams(true, false).getLibraries();
-      for (LibraryToLink libraryToLink : librariesToLink.toList()) {
-        avoidLibrariesSet.add(libraryToLink.getArtifact().getRunfilesPath());
+    for (CcLinkingContext ccLinkingContext : avoidCcProviders) {
+      List<Artifact> libraries = ccLinkingContext.getStaticModeParamsForExecutableLibraries();
+      for (Artifact library : libraries) {
+        avoidLibrariesSet.add(library.getRunfilesPath());
       }
     }
     for (ObjcProvider avoidProvider : avoidObjcProviders) {
@@ -841,8 +834,33 @@ public final class ObjcProvider extends NativeInfo implements ObjcProviderApi<Ar
    */
   private static Predicate<LibraryToLink> ccLibraryNotYetLinked(
       final HashSet<PathFragment> runfilesPaths) {
-    return libraryToLink -> !runfilesPaths.contains(
-        libraryToLink.getArtifact().getRunfilesPath());
+    return libraryToLink -> !checkIfLibraryIsInPaths(libraryToLink, runfilesPaths);
+  }
+
+  private static boolean checkIfLibraryIsInPaths(
+      LibraryToLink libraryToLink, HashSet<PathFragment> runfilesPaths) {
+    ImmutableList.Builder<PathFragment> libraryRunfilesPaths = ImmutableList.builder();
+    if (libraryToLink.getStaticLibrary() != null) {
+      libraryRunfilesPaths.add(libraryToLink.getStaticLibrary().getRunfilesPath());
+    }
+    if (libraryToLink.getPicStaticLibrary() != null) {
+      libraryRunfilesPaths.add(libraryToLink.getPicStaticLibrary().getRunfilesPath());
+    }
+    if (libraryToLink.getDynamicLibrary() != null) {
+      libraryRunfilesPaths.add(libraryToLink.getDynamicLibrary().getRunfilesPath());
+    }
+    if (libraryToLink.getResolvedSymlinkDynamicLibrary() != null) {
+      libraryRunfilesPaths.add(libraryToLink.getResolvedSymlinkDynamicLibrary().getRunfilesPath());
+    }
+    if (libraryToLink.getInterfaceLibrary() != null) {
+      libraryRunfilesPaths.add(libraryToLink.getInterfaceLibrary().getRunfilesPath());
+    }
+    if (libraryToLink.getResolvedSymlinkInterfaceLibrary() != null) {
+      libraryRunfilesPaths.add(
+          libraryToLink.getResolvedSymlinkInterfaceLibrary().getRunfilesPath());
+    }
+
+    return !Collections.disjoint(libraryRunfilesPaths.build(), runfilesPaths);
   }
 
   @SuppressWarnings("unchecked")
@@ -912,13 +930,13 @@ public final class ObjcProvider extends NativeInfo implements ObjcProviderApi<Ar
    * several transitive dependencies.
    */
   public static final class Builder {
-    private final SkylarkSemantics skylarkSemantics;
+    private final StarlarkSemantics starlarkSemantics;
     private final Map<Key<?>, NestedSetBuilder<?>> items = new HashMap<>();
     private final Map<Key<?>, NestedSetBuilder<?>> nonPropagatedItems = new HashMap<>();
     private final Map<Key<?>, NestedSetBuilder<?>> strictDependencyItems = new HashMap<>();
 
-    public Builder(SkylarkSemantics semantics) {
-      this.skylarkSemantics = semantics;
+    public Builder(StarlarkSemantics semantics) {
+      this.starlarkSemantics = semantics;
     }
 
     private static void maybeAddEmptyBuilder(Map<Key<?>, NestedSetBuilder<?>> set, Key<?> key) {
@@ -964,21 +982,6 @@ public final class ObjcProvider extends NativeInfo implements ObjcProviderApi<Ar
     }
 
     /**
-     * Add all keys and values from the given provider, but propagate any normally-propagated items
-     * only to direct dependers of this ObjcProvider.
-     */
-    public Builder addAsDirectDeps(ObjcProvider provider) {
-      for (Map.Entry<Key<?>, NestedSet<?>> typeEntry : provider.items.entrySet()) {
-        uncheckedAddTransitive(typeEntry.getKey(), typeEntry.getValue(),
-            this.strictDependencyItems);
-      }
-      for (Map.Entry<Key<?>, NestedSet<?>> typeEntry : provider.strictDependencyItems.entrySet()) {
-        uncheckedAddTransitive(typeEntry.getKey(), typeEntry.getValue(), this.nonPropagatedItems);
-      }
-      return this;
-    }
-
-    /**
      * Add all elements from a single key of the given provider, and propagate them to any
      * (transitive) dependers on this ObjcProvider.
      */
@@ -999,6 +1002,21 @@ public final class ObjcProvider extends NativeInfo implements ObjcProviderApi<Ar
      */
     public <E> Builder addTransitiveAndPropagate(Key<E> key, NestedSet<E> items) {
       uncheckedAddTransitive(key, items, this.items);
+      return this;
+    }
+
+    /**
+     * Add all keys and values from the given provider, but propagate any normally-propagated items
+     * only to direct dependers of this ObjcProvider.
+     */
+    public Builder addAsDirectDeps(ObjcProvider provider) {
+      for (Map.Entry<Key<?>, NestedSet<?>> typeEntry : provider.items.entrySet()) {
+        uncheckedAddTransitive(
+            typeEntry.getKey(), typeEntry.getValue(), this.strictDependencyItems);
+      }
+      for (Map.Entry<Key<?>, NestedSet<?>> typeEntry : provider.strictDependencyItems.entrySet()) {
+        uncheckedAddTransitive(typeEntry.getKey(), typeEntry.getValue(), this.nonPropagatedItems);
+      }
       return this;
     }
 
@@ -1118,8 +1136,10 @@ public final class ObjcProvider extends NativeInfo implements ObjcProviderApi<Ar
         strictDependencyBuilder.put(typeEntry.getKey(), typeEntry.getValue().build());
       }
 
-      return new ObjcProvider(skylarkSemantics,
-          propagatedBuilder.build(), nonPropagatedBuilder.build(),
+      return new ObjcProvider(
+          starlarkSemantics,
+          propagatedBuilder.build(),
+          nonPropagatedBuilder.build(),
           strictDependencyBuilder.build());
     }
   }

@@ -27,6 +27,7 @@ import com.google.devtools.build.lib.analysis.TargetCompleteEvent;
 import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
 import com.google.devtools.build.lib.analysis.TopLevelArtifactHelper;
 import com.google.devtools.build.lib.analysis.TopLevelArtifactHelper.ArtifactsToBuild;
+import com.google.devtools.build.lib.buildeventstream.BuildEventId;
 import com.google.devtools.build.lib.causes.Cause;
 import com.google.devtools.build.lib.causes.LabelCause;
 import com.google.devtools.build.lib.cmdline.Label;
@@ -54,7 +55,10 @@ public final class CompletionFunction<TValue extends SkyValue, TResult extends S
     implements SkyFunction {
 
   interface PathResolverFactory {
-    ArtifactPathResolver createPathResolverForArtifactValues(ActionInputMap actionInputMap);
+    ArtifactPathResolver createPathResolverForArtifactValues(
+        ActionInputMap actionInputMap,
+        Map<Artifact, Collection<Artifact>> expandedArtifacts,
+        Iterable<Artifact> filesets);
 
     boolean shouldCreatePathResolverForArtifactValues();
   }
@@ -270,13 +274,35 @@ public final class CompletionFunction<TValue extends SkyValue, TResult extends S
 
     @Override
     public ExtendedEventHandler.Postable createFailed(
-        AspectValue value, NestedSet<Cause> rootCauses, Environment env) {
-      return AspectCompleteEvent.createFailed(value, rootCauses);
+        AspectValue value, NestedSet<Cause> rootCauses, Environment env)
+        throws InterruptedException {
+      BuildEventId configurationEventId = getConfigurationEventIdFromAspectValue(value, env);
+      if (configurationEventId == null) {
+        return null;
+      }
+
+      return AspectCompleteEvent.createFailed(value, rootCauses, configurationEventId);
     }
 
     @Override
     public String extractTag(SkyKey skyKey) {
       return Label.print(((AspectCompletionKey) skyKey.argument()).aspectKey().getLabel());
+    }
+
+    @Nullable
+    private BuildEventId getConfigurationEventIdFromAspectValue(AspectValue value, Environment env)
+        throws InterruptedException {
+      if (value.getKey().getBaseConfiguredTargetKey().getConfigurationKey() == null) {
+        return BuildEventId.nullConfigurationId();
+      } else {
+        BuildConfigurationValue buildConfigurationValue =
+            (BuildConfigurationValue)
+                env.getValue(value.getKey().getBaseConfiguredTargetKey().getConfigurationKey());
+        if (buildConfigurationValue == null) {
+          return null;
+        }
+        return buildConfigurationValue.getConfiguration().getEventId();
+      }
     }
 
     @Override
@@ -285,10 +311,18 @@ public final class CompletionFunction<TValue extends SkyValue, TResult extends S
         AspectValue value,
         ArtifactPathResolver pathResolver,
         TopLevelArtifactContext topLevelArtifactContext,
-        Environment env) {
+        Environment env)
+        throws InterruptedException {
       ArtifactsToBuild artifacts =
           TopLevelArtifactHelper.getAllArtifactsToBuild(value, topLevelArtifactContext);
-      return AspectCompleteEvent.createSuccessful(value, pathResolver, artifacts);
+
+      BuildEventId configurationEventId = getConfigurationEventIdFromAspectValue(value, env);
+      if (configurationEventId == null) {
+        return null;
+      }
+
+      return AspectCompleteEvent.createSuccessful(
+          value, pathResolver, artifacts, configurationEventId);
     }
   }
 
@@ -352,6 +386,9 @@ public final class CompletionFunction<TValue extends SkyValue, TResult extends S
               input,
               artifactValue,
               env);
+          if (input.isFileset()) {
+            expandedFilesets.put(input, ActionInputMapHelper.getFilesets(env, input));
+          }
         }
       } catch (MissingInputFileException e) {
         missingCount++;
@@ -401,7 +438,8 @@ public final class CompletionFunction<TValue extends SkyValue, TResult extends S
 
     ArtifactPathResolver pathResolver =
         createPathResolver
-            ? pathResolverFactory.createPathResolverForArtifactValues(inputMap)
+            ? pathResolverFactory.createPathResolverForArtifactValues(
+                inputMap, expandedArtifacts, expandedFilesets.keySet())
             : ArtifactPathResolver.IDENTITY;
 
     ExtendedEventHandler.Postable postable =

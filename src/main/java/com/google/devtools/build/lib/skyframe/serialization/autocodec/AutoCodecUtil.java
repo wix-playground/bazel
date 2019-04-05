@@ -86,7 +86,7 @@ class AutoCodecUtil {
             .addParameter(TypeName.get(env.getTypeUtils().erasure(encodedType.asType())), "input")
             .addParameter(CodedOutputStream.class, "codedOut");
     if (annotation.checkClassExplicitlyAllowed()) {
-      builder.addStatement("context.checkClassExplicitlyAllowed(getEncodedClass())");
+      builder.addStatement("context.checkClassExplicitlyAllowed(getEncodedClass(), input)");
     }
     List<? extends TypeMirror> explicitlyAllowedClasses;
     try {
@@ -147,7 +147,7 @@ class AutoCodecUtil {
   }
 
   static TypeMirror getType(Class<?> clazz, ProcessingEnvironment env) {
-    return env.getElementUtils().getTypeElement((clazz.getCanonicalName())).asType();
+    return env.getElementUtils().getTypeElement(clazz.getCanonicalName()).asType();
   }
 
   static boolean isSubType(TypeMirror type, Class<?> clazz, ProcessingEnvironment env) {

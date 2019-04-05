@@ -47,6 +47,11 @@ public class TargetPatternFunction implements SkyFunction {
   @Override
   public SkyValue compute(SkyKey key, Environment env) throws TargetPatternFunctionException,
       InterruptedException {
+    BlacklistedPackagePrefixesValue blacklisted =
+        (BlacklistedPackagePrefixesValue) env.getValue(BlacklistedPackagePrefixesValue.key());
+    if (env.valuesMissing()) {
+      return null;
+    }
     TargetPatternValue.TargetPatternKey patternKey =
         ((TargetPatternValue.TargetPatternKey) key.argument());
     ResolvedTargets<Target> resolvedTargets;
@@ -71,13 +76,18 @@ public class TargetPatternFunction implements SkyFunction {
           };
       parsedPattern.eval(
           resolver,
-          /*blacklistedSubdirectories=*/ ImmutableSet.of(),
+          blacklisted.getPatterns(),
           excludedSubdirectories,
           callback,
           // The exception type here has to match the one on the BatchCallback. Since the callback
           // defined above never throws, the exact type here is not really relevant.
           RuntimeException.class);
-      resolvedTargets = ResolvedTargets.<Target>builder().addAll(results).build();
+      ResolvedTargets.Builder<Target> resolvedTargetsBuilder =
+          ResolvedTargets.<Target>builder().addAll(results);
+      if (provider.encounteredPackageErrors()) {
+        resolvedTargetsBuilder.setError();
+      }
+      resolvedTargets = resolvedTargetsBuilder.build();
     } catch (TargetParsingException e) {
       env.getListener().post(new ParsingFailedEvent(patternKey.getPattern(),  e.getMessage()));
       throw new TargetPatternFunctionException(e);
@@ -91,6 +101,9 @@ public class TargetPatternFunction implements SkyFunction {
     }
     Preconditions.checkNotNull(resolvedTargets, key);
     ResolvedTargets.Builder<Label> resolvedLabelsBuilder = ResolvedTargets.builder();
+    if (resolvedTargets.hasError()) {
+      resolvedLabelsBuilder.setError();
+    }
     for (Target target : resolvedTargets.getTargets()) {
       resolvedLabelsBuilder.add(target.getLabel());
     }

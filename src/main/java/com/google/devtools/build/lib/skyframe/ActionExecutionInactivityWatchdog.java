@@ -45,7 +45,7 @@ public final class ActionExecutionInactivityWatchdog {
      *
      * @return the number of actions completed during the wait
      */
-    int waitForNextCompletion(int timeoutMilliseconds) throws InterruptedException;
+    int waitForNextCompletion(int timeoutSeconds) throws InterruptedException;
   }
 
   /** An object that the watchdog can report inactivity to. */
@@ -106,14 +106,8 @@ public final class ActionExecutionInactivityWatchdog {
     this.reporter = Preconditions.checkNotNull(reporter);
     this.sleeper = Preconditions.checkNotNull(sleeper);
     this.waitTime = new WaitTime(progressIntervalFlagValue);
-    this.thread = new Thread(new Runnable() {
-      @Override
-      public void run() {
-        enterWatchdogLoop();
-      }
-    });
+    this.thread = new Thread(() -> enterWatchdogLoop(), "action-execution-watchdog");
     this.thread.setDaemon(true);
-    this.thread.setName("action-execution-watchdog");
   }
 
   /** Starts the watchdog thread. This method should only be called once. */
@@ -145,7 +139,7 @@ public final class ActionExecutionInactivityWatchdog {
         // Wait a while for any SkyFunction to finish. The returned number indicates how many
         // actions completed during the wait. It's possible that this is more than 1, since
         // this thread may not immediately regain control.
-        int completedActions = monitor.waitForNextCompletion(waitTime.next() * 1000);
+        int completedActions = monitor.waitForNextCompletion(waitTime.next());
         if (!isRunning.get()) {
           break;
         }

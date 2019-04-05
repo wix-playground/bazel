@@ -25,7 +25,7 @@ import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.events.EventKind;
 import com.google.devtools.build.lib.packages.ConstantRuleVisibility;
-import com.google.devtools.build.lib.packages.SkylarkSemanticsOptions;
+import com.google.devtools.build.lib.packages.StarlarkSemanticsOptions;
 import com.google.devtools.build.lib.pkgcache.PackageCacheOptions;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
@@ -411,8 +411,7 @@ public class SkyframeLabelVisitorTest extends SkyframeLabelVisitorTestCase {
                 ImmutableList.of(Root.fromPath(rootDirectory)),
                 BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY),
             packageCacheOptions,
-            Options.getDefaults(SkylarkSemanticsOptions.class),
-            loadingMock.getDefaultsPackageContent(),
+            Options.getDefaults(StarlarkSemanticsOptions.class),
             UUID.randomUUID(),
             ImmutableMap.<String, String>of(),
             new TimestampGranularityMonitor(BlazeClock.instance()));
@@ -445,6 +444,7 @@ public class SkyframeLabelVisitorTest extends SkyframeLabelVisitorTestCase {
   @Test
   public void testRootCauseOnInconsistentFilesystem() throws Exception {
     reporter.removeHandler(failFastHandler);
+    skyframeExecutor.turnOffSyscallCacheForTesting();
     scratch.file("foo/BUILD", "sh_library(name = 'foo', deps = ['//bar:baz/fizz'])");
     Path barBuildFile = scratch.file("bar/BUILD", "sh_library(name = 'bar/baz')");
     scratch.file("bar/baz/BUILD");

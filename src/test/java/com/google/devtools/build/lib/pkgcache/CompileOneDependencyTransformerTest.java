@@ -16,6 +16,8 @@ package com.google.devtools.build.lib.pkgcache;
 import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.fail;
 
+import com.google.common.base.Optional;
+import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
@@ -24,8 +26,11 @@ import com.google.devtools.build.lib.cmdline.TargetParsingException;
 import com.google.devtools.build.lib.events.Reporter;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.packages.util.PackageLoadingTestCase;
+import com.google.devtools.build.lib.rules.repository.RepositoryDelegatorFunction;
+import com.google.devtools.build.lib.skyframe.PrecomputedValue;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.vfs.RootedPath;
 import java.io.IOException;
 import java.util.Arrays;
 import java.util.HashSet;
@@ -52,13 +57,34 @@ public class CompileOneDependencyTransformerTest extends PackageLoadingTestCase 
   @Before
   public final void createTransformer() throws Exception {
     parser = skyframeExecutor.newTargetPatternEvaluator();
+    skyframeExecutor.injectExtraPrecomputedValues(
+        ImmutableList.of(
+            PrecomputedValue.injected(
+                RepositoryDelegatorFunction.RESOLVED_FILE_INSTEAD_OF_WORKSPACE,
+                Optional.<RootedPath>absent())));
     transformer = new CompileOneDependencyTransformer(getPackageManager());
   }
 
   private void writeSimpleExample() throws IOException {
-    scratch.file("foo/BUILD",
-                "cc_library(name = 'foo1', srcs = [ 'foo1.cc' ], hdrs = [ 'foo1.h' ])",
-                "exports_files(['baz/bang'])");
+    scratch.file(
+        "foo/rule.bzl",
+        "def _impl(ctx):",
+        "  ctx.actions.do_nothing(mnemonic='Mnemonic')",
+        "  return struct()",
+        "crule_without_srcs = rule(",
+        "  _impl,",
+        "  attrs = { ",
+        "    'hdrs': attr.label_list(flags = ['DIRECT_COMPILE_TIME_INPUT']),",
+        "  },",
+        "  fragments = ['cpp'],",
+        ");");
+
+    scratch.file(
+        "foo/BUILD",
+        "load(':rule.bzl', 'crule_without_srcs')",
+        "cc_library(name = 'foo1', srcs = [ 'foo1.cc' ], hdrs = [ 'foo1.h' ])",
+        "crule_without_srcs(name = 'foo2', hdrs = [ 'foo2.h' ])",
+        "exports_files(['baz/bang'])");
     scratch.file("foo/bar/BUILD",
                 "cc_library(name = 'bar1', alwayslink = 1)",
                 "cc_library(name = 'bar2')",
@@ -131,6 +157,8 @@ public class CompileOneDependencyTransformerTest extends PackageLoadingTestCase 
         .containsExactlyElementsIn(labels("@//foo:foo1"));
     assertThat(parseListCompileOneDepRelative("foo1.cc"))
         .containsExactlyElementsIn(labels("@//foo:foo1"));
+    assertThat(parseListCompileOneDep("foo/foo2.h"))
+        .containsExactlyElementsIn(labels("@//foo:foo2"));
   }
 
   /**
@@ -144,9 +172,11 @@ public class CompileOneDependencyTransformerTest extends PackageLoadingTestCase 
       parseCompileOneDep("//foo:missing.cc");
       fail();
     } catch (TargetParsingException e) {
-      assertThat(e).hasMessage(
-          "no such target '//foo:missing.cc': target 'missing.cc' not declared in package 'foo' "
-          + "defined by /workspace/foo/BUILD");
+      assertThat(e)
+          .hasMessageThat()
+          .isEqualTo(
+              "no such target '//foo:missing.cc': target 'missing.cc' not declared in package "
+                  + "'foo' defined by /workspace/foo/BUILD");
     }
 
     // Also, try a valid input file which has no dependent rules in its package.
@@ -154,7 +184,9 @@ public class CompileOneDependencyTransformerTest extends PackageLoadingTestCase 
       parseCompileOneDep("//foo:baz/bang");
       fail();
     } catch (TargetParsingException e) {
-      assertThat(e).hasMessage("Couldn't find dependency on target '//foo:baz/bang'");
+      assertThat(e)
+          .hasMessageThat()
+          .isEqualTo("Couldn't find dependency on target '//foo:baz/bang'");
     }
 
     // Try a header that is in a package but where no cc_library explicitly lists it.
@@ -162,9 +194,10 @@ public class CompileOneDependencyTransformerTest extends PackageLoadingTestCase 
       parseCompileOneDep("//foo/bar:undeclared.h");
       fail();
     } catch (TargetParsingException e) {
-      assertThat(e).hasMessage("Couldn't find dependency on target '//foo/bar:undeclared.h'");
+      assertThat(e)
+          .hasMessageThat()
+          .isEqualTo("Couldn't find dependency on target '//foo/bar:undeclared.h'");
     }
-
   }
 
   @Test
@@ -174,7 +207,9 @@ public class CompileOneDependencyTransformerTest extends PackageLoadingTestCase 
       parseCompileOneDep("//foo:foo1");
       fail();
     } catch (TargetParsingException e) {
-      assertThat(e).hasMessage("--compile_one_dependency target '//foo:foo1' must be a file");
+      assertThat(e)
+          .hasMessageThat()
+          .isEqualTo("--compile_one_dependency target '//foo:foo1' must be a file");
     }
   }
 
@@ -215,7 +250,9 @@ public class CompileOneDependencyTransformerTest extends PackageLoadingTestCase 
       parseCompileOneDep("//recursive:foo");
       fail();
     } catch (TargetParsingException e) {
-      assertThat(e).hasMessage("Couldn't find dependency on target '//recursive:foo'");
+      assertThat(e)
+          .hasMessageThat()
+          .isEqualTo("Couldn't find dependency on target '//recursive:foo'");
     }
   }
 

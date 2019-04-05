@@ -17,7 +17,7 @@ package com.google.devtools.build.lib.skyframe;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.UnixJniLoader;
-import com.google.devtools.common.options.OptionsClassProvider;
+import com.google.devtools.common.options.OptionsProvider;
 import java.io.File;
 import java.nio.file.Path;
 
@@ -72,14 +72,7 @@ public final class MacOSXFsEventsDiffAwareness extends LocalDiffAwareness {
     opened = true;
     create(new String[] {watchRootPath.toAbsolutePath().toString()}, latency);
     // Start a thread that just contains the OS X run loop.
-    new Thread(
-            new Runnable() {
-              @Override
-              public void run() {
-                MacOSXFsEventsDiffAwareness.this.run();
-              }
-            })
-        .start();
+    new Thread(() -> MacOSXFsEventsDiffAwareness.this.run(), "osx-fs-events").start();
   }
 
   /**
@@ -120,7 +113,7 @@ public final class MacOSXFsEventsDiffAwareness extends LocalDiffAwareness {
   }
 
   @Override
-  public View getCurrentView(OptionsClassProvider options)
+  public View getCurrentView(OptionsProvider options)
       throws BrokenDiffAwarenessException {
     if (!JNI_AVAILABLE) {
       return EVERYTHING_MODIFIED;

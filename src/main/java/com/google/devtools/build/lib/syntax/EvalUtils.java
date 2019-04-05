@@ -58,6 +58,10 @@ public final class EvalUtils {
   public static final Ordering<Object> SKYLARK_COMPARATOR =
       new Ordering<Object>() {
         private int compareLists(SkylarkList o1, SkylarkList o2) {
+          if (o1 instanceof RangeList || o2 instanceof RangeList) {
+            throw new ComparisonException("Cannot compare range objects");
+          }
+
           for (int i = 0; i < Math.min(o1.size(), o2.size()); i++) {
             int cmp = compare(o1.get(i), o2.get(i));
             if (cmp != 0) {
@@ -188,8 +192,10 @@ public final class EvalUtils {
     if (parent != null) {
       return parent;
     }
-    Preconditions.checkArgument(SkylarkValue.class.isAssignableFrom(c),
-        "%s is not allowed as a Skylark value (getSkylarkType() failed)", c);
+    Preconditions.checkArgument(
+        SkylarkValue.class.isAssignableFrom(c),
+        "%s is not allowed as a Starlark value (getSkylarkType() failed)",
+        c);
     return c;
   }
 
@@ -248,7 +254,7 @@ public final class EvalUtils {
       return "List"; // This case shouldn't happen in normal code, but we keep it for debugging.
     } else if (Map.class.isAssignableFrom(c)) { // This is a Java Map that isn't a SkylarkDict
       return "Map"; // This case shouldn't happen in normal code, but we keep it for debugging.
-    } else if (BaseFunction.class.isAssignableFrom(c)) {
+    } else if (StarlarkFunction.class.isAssignableFrom(c)) {
       return "function";
     } else if (c.equals(SelectorValue.class)) {
       return "select";
@@ -298,7 +304,7 @@ public final class EvalUtils {
     } else if (o instanceof SkylarkNestedSet) {
       return !((SkylarkNestedSet) o).isEmpty();
     } else if (o instanceof Iterable<?>) {
-      return !(Iterables.isEmpty((Iterable<?>) o));
+      return !Iterables.isEmpty((Iterable<?>) o);
     } else {
       return true;
     }
@@ -348,11 +354,7 @@ public final class EvalUtils {
 
   public static Iterable<?> toIterable(Object o, Location loc, @Nullable Environment env)
       throws EvalException {
-    if (o instanceof String) {
-      // This is not as efficient as special casing String in for and dict and list comprehension
-      // statements. However this is a more unified way.
-      return split((String) o, loc, env);
-    } else if (o instanceof SkylarkNestedSet) {
+    if (o instanceof SkylarkNestedSet) {
       return nestedSetToCollection((SkylarkNestedSet) o, loc, env);
     } else if (o instanceof Iterable) {
       return (Iterable<?>) o;
@@ -402,42 +404,6 @@ public final class EvalUtils {
     if (object instanceof SkylarkMutable) {
       ((SkylarkMutable) object).unlock(loc);
     }
-  }
-
-  private static ImmutableList<String> split(String value, Location loc, @Nullable Environment env)
-      throws EvalException {
-    if (env != null && env.getSemantics().incompatibleStringIsNotIterable()) {
-      throw new EvalException(
-          loc,
-          "type 'string' is not iterable. You may still use `len` and string indexing. Use "
-              + "--incompatible_string_is_not_iterable=false to temporarily disable this check.");
-    }
-
-    ImmutableList.Builder<String> builder = ImmutableList.builderWithExpectedSize(value.length());
-    for (char c : value.toCharArray()) {
-      builder.add(String.valueOf(c));
-    }
-    return builder.build();
-  }
-
-  /**
-   * @return the size of the Skylark object or -1 in case the object doesn't have a size.
-   */
-  public static int size(Object arg) {
-    if (arg instanceof String) {
-      return ((String) arg).length();
-    } else if (arg instanceof Map) {
-      return ((Map<?, ?>) arg).size();
-    } else if (arg instanceof SkylarkList) {
-      return ((SkylarkList<?>) arg).size();
-    } else if (arg instanceof SkylarkNestedSet) {
-      // TODO(bazel-team): Add a deprecation warning: don't implicitly flatten depsets.
-      return ((SkylarkNestedSet) arg).toCollection().size();
-    } else if (arg instanceof Iterable) {
-      // Iterables.size() checks if arg is a Collection so it's efficient in that sense.
-      return Iterables.size((Iterable<?>) arg);
-    }
-    return -1;
   }
 
   // The following functions for indexing and slicing match the behavior of Python.

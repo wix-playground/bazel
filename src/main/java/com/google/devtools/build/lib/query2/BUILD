@@ -13,16 +13,19 @@ java_library(
         exclude = [
             "AbstractBlazeQueryEnvironment.java",
             "FakeLoadTarget.java",
+            "AqueryUtils.java",
+            "AqueryActionFilter.java",
         ],
     ),
     deps = [
         ":abstract-blaze-query-env",
+        ":aquery-utils",
         ":aspect-resolver",
-        ":common-query-options",
         ":fake-load-target",
         ":query-engine",
         ":query-output",
         "//src/main/java/com/google/devtools/build/lib:build-base",
+        "//src/main/java/com/google/devtools/build/lib:command-utils",
         "//src/main/java/com/google/devtools/build/lib:events",
         "//src/main/java/com/google/devtools/build/lib:packages-internal",
         "//src/main/java/com/google/devtools/build/lib:util",
@@ -43,6 +46,7 @@ java_library(
         "//src/main/protobuf:build_java_proto",
         "//third_party:guava",
         "//third_party:jsr305",
+        "//third_party/protobuf:protobuf_java",
     ],
 )
 
@@ -65,7 +69,6 @@ java_library(
         ":query-engine",
         "//src/main/java/com/google/devtools/build/lib:events",
         "//src/main/java/com/google/devtools/build/lib:packages-internal",
-        "//src/main/java/com/google/devtools/build/lib:util",
         "//src/main/java/com/google/devtools/build/lib/collect",
         "//src/main/java/com/google/devtools/build/lib/collect/compacthashset",
         "//src/main/java/com/google/devtools/build/lib/graph",
@@ -85,9 +88,7 @@ java_library(
         ":query-engine",
         "//src/main/java/com/google/devtools/build/lib:events",
         "//src/main/java/com/google/devtools/build/lib:packages-internal",
-        "//src/main/java/com/google/devtools/build/lib:util",
         "//third_party:guava",
-        "//third_party:jsr305",
     ],
 )
 
@@ -99,12 +100,9 @@ java_library(
     deps = [
         ":aspect-resolver",
         ":query-engine",
-        "//src/main/java/com/google/devtools/build/lib:packages-internal",
-        "//src/main/java/com/google/devtools/build/lib:util",
         "//src/main/java/com/google/devtools/common/options",
         "//src/main/protobuf:build_java_proto",
         "//third_party:guava",
-        "//third_party:jsr305",
     ],
 )
 
@@ -119,9 +117,7 @@ java_library(
     deps = [
         "//src/main/java/com/google/devtools/build/lib:events",
         "//src/main/java/com/google/devtools/build/lib:packages-internal",
-        "//src/main/java/com/google/devtools/build/lib:util",
         "//third_party:guava",
-        "//third_party:jsr305",
     ],
 )
 
@@ -133,9 +129,7 @@ java_library(
     deps = [
         "//src/main/java/com/google/devtools/build/lib:events",
         "//src/main/java/com/google/devtools/build/lib:packages-internal",
-        "//src/main/java/com/google/devtools/build/lib:util",
         "//third_party:guava",
-        "//third_party:jsr305",
     ],
 )
 
@@ -150,5 +144,18 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/graph",
         "//third_party:guava",
         "//third_party:jsr305",
+    ],
+)
+
+java_library(
+    name = "aquery-utils",
+    srcs = [
+        "AqueryActionFilter.java",
+        "AqueryUtils.java",
+    ],
+    deps = [
+        ":query-engine",
+        "//src/main/java/com/google/devtools/build/lib/actions",
+        "//third_party:guava",
     ],
 )

@@ -247,8 +247,11 @@ public final class ResourceDependencies {
     }
     return new AndroidResourcesInfo(
         newDirectResource.getLabel(),
-        newDirectResource.getProcessedManifest(),
+        newDirectResource.getProcessedManifest().toProvider(),
         newDirectResource.getRTxt(),
+        // TODO(b/117338320): This is incorrect; direct should come before transitive, and the
+        // order should be link order instead of naive link order. However, some applications may
+        // depend on this incorrect order.
         NestedSetBuilder.<ValidatedAndroidResources>naiveLinkOrder()
             .addTransitive(transitiveResourceContainers)
             .addTransitive(directResourceContainers)
@@ -285,7 +288,7 @@ public final class ResourceDependencies {
     }
     return new AndroidResourcesInfo(
         label,
-        manifest,
+        manifest.toProvider(),
         rTxt,
         transitiveResourceContainers,
         directResourceContainers,

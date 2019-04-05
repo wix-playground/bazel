@@ -23,7 +23,6 @@ import com.google.devtools.build.lib.skylarkinterface.SkylarkModuleCategory;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkValue;
 import com.google.devtools.build.lib.syntax.Environment;
 import com.google.devtools.build.lib.syntax.EvalException;
-import com.google.devtools.build.lib.syntax.Runtime;
 import com.google.devtools.build.lib.syntax.SkylarkDict;
 import com.google.devtools.build.lib.syntax.SkylarkList;
 import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
@@ -123,41 +122,41 @@ public interface SkylarkActionFactoryApi extends SkylarkValue {
             positional = false,
             defaultValue = "[]",
             doc = "List of the input files of the action."),
-      })
-  public void doNothing(String mnemonic, Object inputs) throws EvalException;
+      },
+      useLocation = true)
+  public void doNothing(String mnemonic, Object inputs, Location location) throws EvalException;
 
   @SkylarkCallable(
-    name = "write",
-    doc =
-        "Creates a file write action. When the action is executed, it will write the given content "
-            + "to a file. This is used to generate files using information available in the "
-            + "analysis phase. If the file is large and with a lot of static content, consider "
-            + "using <a href=\"#expand_template\"><code>expand_template</code></a>.",
-    parameters = {
-      @Param(name = "output", type = FileApi.class, doc = "The output file.", named = true),
-      @Param(
-        name = "content",
-        type = Object.class,
-        allowedTypes = {
-          @ParamType(type = String.class),
-          @ParamType(type = CommandLineArgsApi.class)
-        },
-        doc =
-            "the contents of the file. "
-                + "May be a either a string or an "
-                + "<a href=\"actions.html#args\"><code>actions.args()</code></a> object.",
-        named = true
-      ),
-      @Param(
-        name = "is_executable",
-        type = Boolean.class,
-        defaultValue = "False",
-        doc = "Whether the output file should be executable.",
-        named = true
-      )
-    }
-  )
-  public void write(FileApi output, Object content, Boolean isExecutable) throws EvalException;
+      name = "write",
+      doc =
+          "Creates a file write action. When the action is executed, it will write the given "
+              + "content to a file. This is used to generate files using information available in "
+              + "the analysis phase. If the file is large and with a lot of static content, "
+              + "consider using <a href=\"#expand_template\"><code>expand_template</code></a>.",
+      parameters = {
+        @Param(name = "output", type = FileApi.class, doc = "The output file.", named = true),
+        @Param(
+            name = "content",
+            type = Object.class,
+            allowedTypes = {
+              @ParamType(type = String.class),
+              @ParamType(type = CommandLineArgsApi.class)
+            },
+            doc =
+                "the contents of the file. "
+                    + "May be a either a string or an "
+                    + "<a href=\"actions.html#args\"><code>actions.args()</code></a> object.",
+            named = true),
+        @Param(
+            name = "is_executable",
+            type = Boolean.class,
+            defaultValue = "False",
+            doc = "Whether the output file should be executable.",
+            named = true)
+      },
+      useLocation = true)
+  public void write(FileApi output, Object content, Boolean isExecutable, Location location)
+      throws EvalException;
 
   @SkylarkCallable(
       name = "run",
@@ -190,6 +189,7 @@ public interface SkylarkActionFactoryApi extends SkylarkValue {
             allowedTypes = {
               @ParamType(type = FileApi.class),
               @ParamType(type = String.class),
+              @ParamType(type = FilesToRunProviderApi.class),
             },
             named = true,
             positional = false,
@@ -200,7 +200,6 @@ public interface SkylarkActionFactoryApi extends SkylarkValue {
               @ParamType(type = SkylarkList.class),
               @ParamType(type = SkylarkNestedSet.class),
             },
-            generic1 = FileApi.class,
             defaultValue = "unbound",
             named = true,
             positional = false,
@@ -332,8 +331,8 @@ public interface SkylarkActionFactoryApi extends SkylarkValue {
             positional = false,
             doc =
                 "List or depset of any tools needed by the action. Tools are inputs with "
-                    + "additional "
-                    + "runfiles that are automatically made available to the action."),
+                    + "additional runfiles that are automatically made available to the action. "
+                    + "The list can contain Files or FilesToRunProvider instances."),
         @Param(
             name = "arguments",
             allowedTypes = {
@@ -343,12 +342,19 @@ public interface SkylarkActionFactoryApi extends SkylarkValue {
             named = true,
             positional = false,
             doc =
-                "Command line arguments of the action. "
-                    + "Must be a list of strings or "
-                    + "<a href=\"actions.html#args\"><code>actions.args()</code></a> objects.<br>"
-                    + "Blaze passes the elements in this attribute as arguments to the command."
-                    + "The command can access these arguments as <code>$1</code>, <code>$2</code>, "
-                    + "etc."),
+                "Command line arguments of the action. Must be a list of strings or "
+                    + "<a href=\"actions.html#args\"><code>actions.args()</code></a> objects."
+                    + ""
+                    + "<p>Bazel passes the elements in this attribute as arguments to the command."
+                    + "The command can access these arguments using shell variable substitutions "
+                    + "such as <code>$1</code>, <code>$2</code>, etc. Note that since Args "
+                    + "objects are flattened before indexing, if there is an Args object of "
+                    + "unknown size then all subsequent strings will be at unpredictable indices. "
+                    + "It may be useful to use <code>$@</code> (to retrieve all arguments) in "
+                    + "conjunction with Args objects of indeterminate size."
+                    + ""
+                    + "<p>In the case where <code>command</code> is a list of strings, this "
+                    + "parameter may not be used."),
         @Param(
             name = "mnemonic",
             type = String.class,
@@ -363,22 +369,32 @@ public interface SkylarkActionFactoryApi extends SkylarkValue {
             allowedTypes = {
               @ParamType(type = String.class),
               @ParamType(type = SkylarkList.class, generic1 = String.class),
-              @ParamType(type = Runtime.NoneType.class),
             },
             named = true,
             positional = false,
             doc =
-                "Shell command to execute.<br><br>"
-                    + "<b>Passing a sequence of strings to this attribute is deprecated and Blaze"
-                    + "may "
-                    + "stop accepting such values in the future.</b><br><br>"
-                    + "The command can access the elements of the <code>arguments</code> object "
-                    + "via "
-                    + "<code>$1</code>, <code>$2</code>, etc.<br>"
-                    + "When this argument is a string, it must be a valid shell command. For "
-                    + "example: "
-                    + "\"<code>echo foo > $1</code>\". Blaze uses the same shell to execute the "
-                    + "command as it does for genrules."),
+                "Shell command to execute. This may either be a string (preferred) or a sequence "
+                    + "of strings <b>(deprecated)</b>."
+                    + ""
+                    + "<p>If <code>command</code> is a string, then it is executed as if by "
+                    + "<code>sh -c &lt;command&gt; \"\" &lt;arguments&gt;</code> -- that is, the "
+                    + "elements in <code>arguments</code> are made available to the command as "
+                    + "<code>$1</code>, <code>$2</code>, etc. If <code>arguments</code> contains "
+                    + "any <a href=\"actions.html#args\"><code>actions.args()</code></a> objects, "
+                    + "their contents are appended one by one to the command line, so "
+                    + "<code>$</code><i>i</i> can refer to individual strings within an Args "
+                    + "object. Note that if an Args object of unknown size is passed as part of "
+                    + "<code>arguments</code>, then the strings will be at unknown indices; in "
+                    + "this case the <code>$@</code> shell substitution (retrieve all arguments) "
+                    + "may be useful."
+                    + ""
+                    + "<p><b>(Deprecated)</b> If <code>command</code> is a sequence of strings, "
+                    + "the first item is the executable to run and the remaining items are its "
+                    + "arguments. If this form is used, the <code>arguments</code> parameter must "
+                    + "not be supplied."
+                    + ""
+                    + "<p>Bazel uses the same shell to execute the command as it does for "
+                    + "genrules."),
         @Param(
             name = "progress_message",
             type = String.class,
@@ -484,12 +500,14 @@ public interface SkylarkActionFactoryApi extends SkylarkValue {
             named = true,
             positional = false,
             doc = "Whether the output file should be executable.")
-      })
+      },
+      useLocation = true)
   public void expandTemplate(
       FileApi template,
       FileApi output,
       SkylarkDict<?, ?> substitutionsUnchecked,
-      Boolean executable)
+      Boolean executable,
+      Location location)
       throws EvalException;
 
   @SkylarkCallable(

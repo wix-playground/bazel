@@ -14,13 +14,13 @@
 
 package com.google.devtools.build.lib.syntax;
 
+import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkCallable;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.util.Arrays;
 
 /**
@@ -47,6 +47,7 @@ public final class MethodDescriptor {
   private final boolean useAst;
   private final boolean useEnvironment;
   private final boolean useSkylarkSemantics;
+  private final boolean useContext;
 
   private MethodDescriptor(
       Method method,
@@ -63,7 +64,8 @@ public final class MethodDescriptor {
       boolean useLocation,
       boolean useAst,
       boolean useEnvironment,
-      boolean useSkylarkSemantics) {
+      boolean useSkylarkSemantics,
+      boolean useContext) {
     this.method = method;
     this.annotation = annotation;
     this.name = name;
@@ -79,6 +81,7 @@ public final class MethodDescriptor {
     this.useAst = useAst;
     this.useEnvironment = useEnvironment;
     this.useSkylarkSemantics = useSkylarkSemantics;
+    this.useContext = useContext;
   }
 
   /** Returns the SkylarkCallable annotation corresponding to this method. */
@@ -87,7 +90,8 @@ public final class MethodDescriptor {
   }
 
   /** @return Skylark method descriptor for provided Java method and signature annotation. */
-  public static MethodDescriptor of(Method method, SkylarkCallable annotation) {
+  public static MethodDescriptor of(
+      Method method, SkylarkCallable annotation, StarlarkSemantics semantics) {
     // This happens when the interface is public but the implementation classes
     // have reduced visibility.
     method.setAccessible(true);
@@ -99,16 +103,17 @@ public final class MethodDescriptor {
         annotation.documented(),
         annotation.structField(),
         Arrays.stream(annotation.parameters())
-            .map(ParamDescriptor::of)
+            .map(param -> ParamDescriptor.of(param, semantics))
             .collect(ImmutableList.toImmutableList()),
-        ParamDescriptor.of(annotation.extraPositionals()),
-        ParamDescriptor.of(annotation.extraKeywords()),
+        ParamDescriptor.of(annotation.extraPositionals(), semantics),
+        ParamDescriptor.of(annotation.extraKeywords(), semantics),
         annotation.selfCall(),
         annotation.allowReturnNones(),
         annotation.useLocation(),
         annotation.useAst(),
         annotation.useEnvironment(),
-        annotation.useSkylarkSemantics());
+        annotation.useSkylarkSemantics(),
+        annotation.useContext());
   }
 
   /** @return The result of this method invocation on the {@code obj} as a target. */
@@ -124,10 +129,8 @@ public final class MethodDescriptor {
    */
   public Object call(Object obj, Object[] args, Location loc, Environment env)
       throws EvalException, InterruptedException {
+    Preconditions.checkNotNull(obj);
     try {
-      if (obj == null && !Modifier.isStatic(method.getModifiers())) {
-        throw new EvalException(loc, "method '" + getName() + "' is not static");
-      }
       Object result = method.invoke(obj, args);
       if (method.getReturnType().equals(Void.TYPE)) {
         return Runtime.NONE;
@@ -187,6 +190,11 @@ public final class MethodDescriptor {
   /** @see SkylarkCallable#useSkylarkSemantics() */
   boolean isUseSkylarkSemantics() {
     return useSkylarkSemantics;
+  }
+
+  /** See {@link SkylarkCallable#useContext()}. */
+  boolean isUseContext() {
+    return useContext;
   }
 
   /** @see SkylarkCallable#useLocation() */

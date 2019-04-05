@@ -14,6 +14,16 @@ filegroup(
     ],
 )
 
+filegroup(
+    name = "test-deps-minimal-bazel",
+    testonly = 1,
+    srcs = [
+        "//src:bazel-bin_jdk_minimal",
+        "//src/test/shell:bin/bazel_jdk_minimal",
+        "//src/test/shell/bazel:test-deps-wo-bazel",
+    ],
+)
+
 sh_test(
     name = "progress_reporting_test",
     size = "large",
@@ -26,14 +36,45 @@ sh_test(
 )
 
 sh_test(
+    name = "implicit_dependency_reporting_test",
+    size = "medium",
+    srcs = ["implicit_dependency_reporting_test.sh"],
+    data = [
+        ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+)
+
+sh_test(
+    name = "execution_strategies_test",
+    size = "medium",
+    srcs = ["execution_strategies_test.sh"],
+    data = [
+        ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+)
+
+sh_test(
     name = "runfiles_test",
     size = "medium",
     srcs = ["runfiles_test.sh"],
-    data = [":test-deps"],
+    data = [
+        ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
     tags = [
         "local",
-        # no_windows: this test exercises the symlink-based runfiles tree.
-        "no_windows",
+    ],
+)
+
+sh_test(
+    name = "python_stub_test",
+    size = "medium",
+    srcs = ["python_stub_test.sh"],
+    data = [
+        ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
     ],
 )
 
@@ -41,6 +82,16 @@ sh_test(
     name = "python_test",
     size = "medium",
     srcs = ["python_test.sh"],
+    data = [
+        ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+)
+
+sh_test(
+    name = "aspect_test",
+    size = "medium",
+    srcs = ["aspect_test.sh"],
     data = [
         ":test-deps",
         "@bazel_tools//tools/bash/runfiles",
@@ -82,6 +133,19 @@ sh_test(
 )
 
 sh_test(
+    name = "minimal_jdk_test",
+    size = "large",
+    srcs = ["minimal_jdk_test.sh"],
+    data = [
+        ":test-deps-minimal-bazel",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+    tags = [
+        "no_windows",
+    ],
+)
+
+sh_test(
     name = "experimental_ui_test",
     size = "large",
     srcs = ["experimental_ui_test.sh"],
@@ -89,7 +153,7 @@ sh_test(
         ":test-deps",
         "@bazel_tools//tools/bash/runfiles",
     ],
-    shard_count = 4,
+    shard_count = 9,
 )
 
 sh_test(
@@ -167,7 +231,11 @@ sh_test(
     name = "bazel_query_test",
     size = "large",
     srcs = ["bazel_query_test.sh"],
-    data = [":test-deps"],
+    data = [
+        ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+    shard_count = 5,
     tags = ["no_windows"],
 )
 
@@ -175,6 +243,16 @@ sh_test(
     name = "configured_query_test",
     size = "large",
     srcs = ["configured_query_test.sh"],
+    data = [
+        ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+)
+
+sh_test(
+    name = "analysis_test_test",
+    size = "medium",
+    srcs = ["analysis_test_test.sh"],
     data = [
         ":test-deps",
         "@bazel_tools//tools/bash/runfiles",
@@ -204,8 +282,10 @@ sh_test(
     name = "bazel_javabase_test",
     size = "medium",
     srcs = ["bazel_javabase_test.sh"],
-    data = [":test-deps"],
-    tags = ["no_windows"],
+    data = [
+        ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
 )
 
 sh_test(
@@ -218,6 +298,16 @@ sh_test(
     tags = [
         "local",
         "no_windows",
+    ],
+)
+
+sh_test(
+    name = "modify_execution_info_test",
+    srcs = ["modify_execution_info_test.sh"],
+    data = [
+        ":test-deps",
+        "//third_party/protobuf/3.6.1:srcs",
+        "@bazel_tools//tools/bash/runfiles",
     ],
 )
 
@@ -377,8 +467,10 @@ sh_test(
     name = "server_logging_test",
     size = "medium",
     srcs = ["server_logging_test.sh"],
-    data = [":test-deps"],
-    tags = ["no_windows"],
+    data = [
+        ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
 )
 
 sh_test(
@@ -392,16 +484,29 @@ sh_test(
 sh_test(
     name = "test_test",
     srcs = ["test_test.sh"],
-    data = [":test-deps"],
-    tags = ["no_windows"],
+    data = [
+        ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
 )
 
 sh_test(
     name = "outputs_test",
     size = "medium",
     srcs = ["outputs_test.sh"],
-    data = [":test-deps"],
-    tags = ["no_windows"],
+    data = [
+        ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+)
+
+# Copy protoc into a known location, since //third_party/protobuf:protoc
+# might be an alias.  This is referenced from testenv.sh.
+genrule(
+    name = "copy_protoc",
+    srcs = ["//third_party/protobuf:protoc"],
+    outs = ["protoc"],
+    cmd = "cp $< $@",
 )
 
 sh_test(
@@ -410,10 +515,10 @@ sh_test(
     srcs = ["process-wrapper_test.sh"],
     data = [
         ":execution_statistics_utils.sh",
+        ":protoc",
         ":spend_cpu_time",
         ":test-deps",
         "//src/main/protobuf:execution_statistics.proto",
-        "//third_party/protobuf:protoc",
     ],
     tags = ["no_windows"],
 )
@@ -424,11 +529,11 @@ sh_test(
     srcs = ["linux-sandbox_test.sh"],
     data = [
         ":execution_statistics_utils.sh",
+        ":protoc",
         ":spend_cpu_time",
         ":test-deps",
         "//src/main/protobuf:execution_statistics.proto",
         "//src/test/shell:sandboxing_test_utils.sh",
-        "//third_party/protobuf:protoc",
     ],
     tags = ["no_windows"],
 )
@@ -486,6 +591,13 @@ sh_test(
     srcs = ["bazel_java_test.sh"],
     data = [":test-deps"],
     tags = ["no_windows"],
+)
+
+sh_test(
+    name = "jvm_flags_escaping_test",
+    srcs = ["jvm_flags_escaping_test.sh"],
+    data = [":test-deps"],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
 )
 
 ########################################################################

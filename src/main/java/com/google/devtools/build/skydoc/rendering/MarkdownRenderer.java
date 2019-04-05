@@ -14,11 +14,8 @@
 
 package com.google.devtools.build.skydoc.rendering;
 
-import com.google.common.base.Joiner;
 import java.io.IOException;
 import java.io.StringWriter;
-import java.util.List;
-import java.util.stream.Collectors;
 import org.apache.velocity.VelocityContext;
 import org.apache.velocity.app.VelocityEngine;
 import org.apache.velocity.exception.MethodInvocationException;
@@ -32,8 +29,14 @@ import org.apache.velocity.runtime.resource.loader.JarResourceLoader;
  */
 public class MarkdownRenderer {
 
-  private static final String TEMPLATE_FILENAME =
+  private static final String HEADER_TEMPLATE_FILENAME =
+      "com/google/devtools/build/skydoc/rendering/templates/header.vm";
+  private static final String RULE_TEMPLATE_FILENAME =
       "com/google/devtools/build/skydoc/rendering/templates/rule.vm";
+  private static final String PROVIDER_TEMPLATE_FILENAME =
+      "com/google/devtools/build/skydoc/rendering/templates/provider.vm";
+  private static final String FUNCTION_TEMPLATE_FILENAME =
+      "com/google/devtools/build/skydoc/rendering/templates/func.vm";
 
   private final VelocityEngine velocityEngine;
 
@@ -49,29 +52,73 @@ public class MarkdownRenderer {
   }
 
   /**
-   * Returns a markdown rendering of rule documentation for the given rule information object with
-   * the given rule name.
+   * Returns a markdown header string that should appear at the top of all markdown files generated
+   * by Stardoc.
    */
-  public String render(String ruleName, RuleInfo ruleInfo) throws IOException {
-    VelocityContext context = new VelocityContext();
-    // TODO(cparsons): Attributes in summary form should have links.
-    context.put("summaryform", getSummaryForm(ruleName, ruleInfo));
-    context.put("ruleName", ruleName);
-    context.put("ruleInfo", ruleInfo);
-
+  public String renderMarkdownHeader() throws IOException {
     StringWriter stringWriter = new StringWriter();
     try {
-      velocityEngine.mergeTemplate(TEMPLATE_FILENAME, "UTF-8", context, stringWriter);
+      velocityEngine.mergeTemplate(
+          HEADER_TEMPLATE_FILENAME, "UTF-8", new VelocityContext(), stringWriter);
     } catch (ResourceNotFoundException | ParseErrorException | MethodInvocationException e) {
       throw new IOException(e);
     }
     return stringWriter.toString();
   }
 
-  private static String getSummaryForm(String ruleName, RuleInfo ruleInfo) {
-    List<String> attributeNames = ruleInfo.getAttributes().stream()
-        .map(attr -> attr.getName())
-        .collect(Collectors.toList());
-    return String.format("%s(%s)", ruleName, Joiner.on(", ").join(attributeNames));
+  /**
+   * Returns a markdown rendering of rule documentation for the given rule information object with
+   * the given rule name.
+   */
+  public String render(String ruleName, RuleInfo ruleInfo) throws IOException {
+    VelocityContext context = new VelocityContext();
+    context.put("util", new MarkdownUtil());
+    context.put("ruleName", ruleName);
+    context.put("ruleInfo", ruleInfo);
+
+    StringWriter stringWriter = new StringWriter();
+    try {
+      velocityEngine.mergeTemplate(RULE_TEMPLATE_FILENAME, "UTF-8", context, stringWriter);
+    } catch (ResourceNotFoundException | ParseErrorException | MethodInvocationException e) {
+      throw new IOException(e);
+    }
+    return stringWriter.toString();
+  }
+
+  /**
+   * Returns a markdown rendering of provider documentation for the given provider information
+   * object with the given name.
+   */
+  public String render(String providerName, ProviderInfo providerInfo) throws IOException {
+    VelocityContext context = new VelocityContext();
+    context.put("util", new MarkdownUtil());
+    context.put("providerName", providerName);
+    context.put("providerInfo", providerInfo);
+
+    StringWriter stringWriter = new StringWriter();
+    try {
+      velocityEngine.mergeTemplate(PROVIDER_TEMPLATE_FILENAME, "UTF-8", context, stringWriter);
+    } catch (ResourceNotFoundException | ParseErrorException | MethodInvocationException e) {
+      throw new IOException(e);
+    }
+    return stringWriter.toString();
+  }
+
+  /**
+   * Returns a markdown rendering of a user-defined function's documentation for the function info
+   * object.
+   */
+  public String render(UserDefinedFunctionInfo functionInfo) throws IOException {
+    VelocityContext context = new VelocityContext();
+    context.put("util", new MarkdownUtil());
+    context.put("funcInfo", functionInfo);
+
+    StringWriter stringWriter = new StringWriter();
+    try {
+      velocityEngine.mergeTemplate(FUNCTION_TEMPLATE_FILENAME, "UTF-8", context, stringWriter);
+    } catch (ResourceNotFoundException | ParseErrorException | MethodInvocationException e) {
+      throw new IOException(e);
+    }
+    return stringWriter.toString();
   }
 }

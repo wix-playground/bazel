@@ -61,13 +61,7 @@ public final class PythonUtils {
    */
   public static Set<PathFragment> getInitPyFiles(Set<PathFragment> manifestFiles) {
     Set<PathFragment> result = new HashSet<>();
-    Set<PathFragment> packagesWithInit = new HashSet<>();
 
-    for (PathFragment source : manifestFiles) {
-      if (source.getBaseName().startsWith("__init__.")) {
-        packagesWithInit.add(source.getParentDirectory());
-      }
-    }
     for (PathFragment source : manifestFiles) {
       // If we have a python or .so file at this level...
       if (REQUIRES_INIT_PY.matches(source)) {
@@ -75,7 +69,7 @@ public final class PythonUtils {
         while (source.segmentCount() > 1) {
           source = source.getParentDirectory();
           // ...unless it's a Python .pyc cache or we already have __init__ there.
-          if (!source.endsWith(PYCACHE) && !packagesWithInit.contains(source)) {
+          if (!source.endsWith(PYCACHE)) {
             PathFragment initpy = source.getRelative(INIT_PY);
             PathFragment initpyc = source.getRelative(INIT_PYC);
 

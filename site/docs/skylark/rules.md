@@ -37,8 +37,12 @@ execution phase to build the rule's outputs, if they are needed. Rules also
 produce and pass along information that may be useful to other rules, in the
 form of [providers](#providers).
 
+## Contents
+{:.no_toc}
 
-<!-- [TOC] -->
+* ToC
+{:toc}
+
 
 ## Rule creation
 
@@ -121,7 +125,9 @@ The following attributes are automatically added to every rule: `deprecation`,
 following attributes: `args`, `flaky`, `local`, `shard_count`, `size`,
 `timeout`.
 
-### <a name="private-attributes"></a> Private Attributes and Implicit Dependencies
+<a name="private-attributes"></a>
+
+### Private Attributes and Implicit Dependencies
 
 A dependency attribute with a default value is called an *implicit dependency*.
 The name comes from the fact that it is a part of the target graph that the user
@@ -385,7 +391,9 @@ Otherwise, executables that are used at runtime (e.g. as part of a test) should
 be built for the target configuration. In this case, specify `cfg="target"` in
 the attribute.
 
-## <a name="fragments"></a> Configuration Fragments
+<a name="fragments"></a>
+
+## Configuration Fragments
 
 Rules may access [configuration fragments](lib/skylark-configuration-fragment.html)
 such as `cpp`, `java` and `jvm`. However, all required fragments must be
@@ -456,7 +464,7 @@ def dependent_rule_implementation(ctx):
   ...
 ```
 
-All targets have a [`DefaultInfo`](lib/globals.html#DefaultInfo) provider that can be used to access
+All targets have a [`DefaultInfo`](lib/DefaultInfo.html) provider that can be used to access
 some information relevant to all targets.
 
 Providers are only available during the analysis phase. Examples of usage:
@@ -504,16 +512,38 @@ provider).
 
 * The fields `files`, `runfiles`, `data_runfiles`, `default_runfiles`, and
   `executable` correspond to the same-named fields of
-  [`DefaultInfo`](lib/globals.html#DefaultInfo). It is not allowed to specify
+  [`DefaultInfo`](lib/DefaultInfo.html). It is not allowed to specify
   any of these fields while also returning a `DefaultInfo` modern provider.
 
 * The field `output_groups` takes a struct value and corresponds to an
-  [`OutputGroupInfo`](lib/globals.html#OutputGroupInfo).
+  [`OutputGroupInfo`](lib/OutputGroupInfo.html).
 
 * The field `instrumented_files` is for
   [code coverage instrumentation](#code-coverage-instrumentation). It does not
   yet have a modern provider equivalent. If you need it, you cannot yet migrate
   away from legacy providers.
+
+In [`provides`](lib/globals.html#rule.provides) declarations of rules, and in
+[`providers`](lib/attr.html#label_list.providers) declarations of dependency
+attributes, legacy providers are passed in as strings and modern providers are
+passed in by their `*Info` symbol. Be sure to change from strings to symbols
+when migrating. For complex or large rule sets where it is difficult to update
+all rules atomically, you may have an easier time if you follow this sequence of
+steps:
+
+1. Modify the rules that produce the legacy provider to produce both the legacy
+   and modern providers, using the above syntax. For rules that declare they
+   return the legacy provider, update that declaration to include both the
+   legacy and modern providers.
+
+2. Modify the rules that consume the legacy provider to instead consume the
+   modern provider. If any attribute declarations require the legacy provider,
+   also update them to instead require the modern provider. Optionally, you can
+   interleave this work with step 1 by having consumers accept/require either
+   provider: Test for the presence of the legacy provider using
+   `hasattr(target, 'foo')`, or the new provider using `FooInfo in target`.
+
+3. Fully remove the legacy provider from all rules.
 
 ## Runfiles
 
@@ -614,7 +644,7 @@ of output files that may be requested together. For example, if a target
 `//pkg:mytarget` is of a rule type that has a `debug_files` output group, these
 files can be built by running
 `bazel build //pkg:mytarget --output_groups=debug_files`. See the [command line
-reference](https://docs.bazel.build/versions/master/command-line-reference.html#flag--output_groups)
+reference](../command-line-reference.html#flag--output_groups)
 for details on the `--output_groups` argument. Since non-predeclared outputs
 don't have labels, they can only be requested by appearing in the default
 outputs or an output group.
@@ -710,7 +740,8 @@ Test rules (but not necessarily their targets) must have names that end in
 Both kinds of rules must produce an executable output file (which may or may not
 be predeclared) that will be invoked by the `run` or `test` commands. To tell
 Bazel which of a rule's outputs to use as this executable, pass it as the
-`executable` argument of a returned `DefaultInfo` provider.
+`executable` argument of a returned [`DefaultInfo`](lib/DefaultInfo.html)
+provider.
 
 The action that generates this file must set the executable bit on the file. For
 a `ctx.actions.run()` or `ctx.actions.run_shell()` action this should be done by

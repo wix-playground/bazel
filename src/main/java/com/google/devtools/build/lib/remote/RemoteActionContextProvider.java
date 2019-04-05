@@ -24,6 +24,7 @@ import com.google.devtools.build.lib.exec.AbstractSpawnStrategy;
 import com.google.devtools.build.lib.exec.ActionContextProvider;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
 import com.google.devtools.build.lib.exec.SpawnRunner;
+import com.google.devtools.build.lib.remote.options.RemoteOptions;
 import com.google.devtools.build.lib.remote.util.DigestUtil;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
 import com.google.devtools.build.lib.util.ExitCode;
@@ -40,26 +41,45 @@ import javax.annotation.Nullable;
  */
 final class RemoteActionContextProvider extends ActionContextProvider {
   private final CommandEnvironment env;
-  @Nullable private final AbstractRemoteActionCache cache;
+  private final AbstractRemoteActionCache cache;
   @Nullable private final GrpcRemoteExecutor executor;
   private final RemoteRetrier retrier;
   private final DigestUtil digestUtil;
-  private final Path logDir;
+  @Nullable private final Path logDir;
   private final AtomicReference<SpawnRunner> fallbackRunner = new AtomicReference<>();
 
-  RemoteActionContextProvider(
+  private RemoteActionContextProvider(
       CommandEnvironment env,
-      @Nullable AbstractRemoteActionCache cache,
+      AbstractRemoteActionCache cache,
       @Nullable GrpcRemoteExecutor executor,
       RemoteRetrier retrier,
       DigestUtil digestUtil,
-      Path logDir) {
-    this.env = env;
+      @Nullable Path logDir) {
+    this.env = Preconditions.checkNotNull(env, "env");
+    this.cache = Preconditions.checkNotNull(cache, "cache");
     this.executor = executor;
-    this.cache = cache;
     this.retrier = retrier;
     this.digestUtil = digestUtil;
     this.logDir = logDir;
+  }
+
+  public static RemoteActionContextProvider createForRemoteCaching(
+      CommandEnvironment env,
+      AbstractRemoteActionCache cache,
+      RemoteRetrier retrier,
+      DigestUtil digestUtil) {
+    return new RemoteActionContextProvider(
+        env, cache, /*executor=*/ null, retrier, digestUtil, /*logDir=*/ null);
+  }
+
+  public static RemoteActionContextProvider createForRemoteExecution(
+      CommandEnvironment env,
+      GrpcRemoteCache cache,
+      GrpcRemoteExecutor executor,
+      RemoteRetrier retrier,
+      DigestUtil digestUtil,
+      Path logDir) {
+    return new RemoteActionContextProvider(env, cache, executor, retrier, digestUtil, logDir);
   }
 
   @Override
@@ -70,7 +90,7 @@ final class RemoteActionContextProvider extends ActionContextProvider {
     String buildRequestId = env.getBuildRequestId();
     String commandId = env.getCommandId().toString();
 
-    if (executor == null && cache != null) {
+    if (executor == null) {
       RemoteSpawnCache spawnCache =
           new RemoteSpawnCache(
               env.getExecRoot(),
@@ -92,7 +112,7 @@ final class RemoteActionContextProvider extends ActionContextProvider {
               env.getReporter(),
               buildRequestId,
               commandId,
-              cache,
+              (GrpcRemoteCache) cache,
               executor,
               retrier,
               digestUtil,
@@ -110,6 +130,12 @@ final class RemoteActionContextProvider extends ActionContextProvider {
     String strategyName = remoteOptions.remoteLocalFallbackStrategy;
 
     for (ActionContext context : usedContexts) {
+      if (context instanceof RemoteSpawnStrategy && cache == null) {
+        throw new ExecutorInitException(
+            "--remote_cache or --remote_executor should be initialized when using "
+                + "--spawn_strategy=remote",
+            ExitCode.COMMAND_LINE_ERROR);
+      }
       if (context instanceof AbstractSpawnStrategy) {
         ExecutionStrategy annotation = context.getClass().getAnnotation(ExecutionStrategy.class);
         if (annotation != null) {
@@ -132,6 +158,12 @@ final class RemoteActionContextProvider extends ActionContextProvider {
               strategyName, validStrategies),
           ExitCode.COMMAND_LINE_ERROR);
     }
+  }
+
+  /** Returns the remote cache object if any. */
+  @Nullable
+  AbstractRemoteActionCache getRemoteCache() {
+    return cache;
   }
 
   @Override

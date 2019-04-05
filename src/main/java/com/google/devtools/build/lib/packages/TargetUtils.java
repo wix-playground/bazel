@@ -19,6 +19,7 @@ import static com.google.devtools.build.lib.syntax.Type.BOOLEAN;
 
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicate;
+import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Maps;
 import com.google.devtools.build.lib.cmdline.Label;
@@ -80,8 +81,7 @@ public final class TargetUtils {
    * Returns true iff {@code target} is a {@code test_suite} rule.
    */
   public static boolean isTestSuiteRule(Target target) {
-    return target instanceof Rule &&
-        isTestSuiteRuleName(((Rule) target).getRuleClass());
+    return target instanceof Rule && isTestSuiteRuleName(((Rule) target).getRuleClass());
   }
 
   /**
@@ -129,8 +129,7 @@ public final class TargetUtils {
    * Wraps the above calls into one generic check safely applicable to any rule.
    */
   public static boolean isTestRuleAndRunsLocally(Rule rule) {
-    return isTestOrTestSuiteRule(rule) &&
-        (isLocalTestRule(rule) || isExclusiveTestRule(rule));
+    return isTestOrTestSuiteRule(rule) && (isLocalTestRule(rule) || isExclusiveTestRule(rule));
   }
 
   /**
@@ -270,7 +269,7 @@ public final class TargetUtils {
     return index != -1 ? ruleClass.substring(0, index) : ruleClass;
   }
 
-  private static boolean isExplicitDependency(Rule rule, Label label) throws InterruptedException {
+  private static boolean isExplicitDependency(Rule rule, Label label) {
     if (rule.getVisibility().getDependencyLabels().contains(label)) {
       return true;
     }
@@ -322,19 +321,27 @@ public final class TargetUtils {
    * Target} target did not exist, due to {@link NoSuchThingException} e.
    */
   public static String formatMissingEdge(
-      @Nullable Target target, Label label, NoSuchThingException e) throws InterruptedException {
+      @Nullable Target target, Label label, NoSuchThingException e, @Nullable Attribute attr) {
     // instanceof returns false if target is null (which is exploited here)
     if (target instanceof Rule) {
       Rule rule = (Rule) target;
       if (isExplicitDependency(rule, label)) {
         return String.format("%s and referenced by '%s'", e.getMessage(), target.getLabel());
       } else {
+        String additionalInfo = "";
+        if (attr != null && !Strings.isNullOrEmpty(attr.getDoc())) {
+          additionalInfo =
+              String.format(
+                  "\nDocumentation for implicit attribute %s of rules of type %s:\n%s",
+                  attr.getPublicName(), rule.getRuleClass(), attr.getDoc());
+        }
         // N.B. If you see this error message in one of our integration tests during development of
         // a change that adds a new implicit dependency when running Blaze, maybe you forgot to add
         // a new mock target to the integration test's setup.
-        return String.format("every rule of type %s implicitly depends upon the target '%s', but "
-            + "this target could not be found because of: %s", rule.getRuleClass(), label,
-            e.getMessage());
+        return String.format(
+            "every rule of type %s implicitly depends upon the target '%s', but "
+                + "this target could not be found because of: %s%s",
+            rule.getRuleClass(), label, e.getMessage(), additionalInfo);
       }
     } else if (target instanceof InputFile) {
       return e.getMessage() + " (this is usually caused by a missing package group in the"
@@ -346,5 +353,10 @@ public final class TargetUtils {
       }
       return e.getMessage();
     }
+  }
+
+  public static String formatMissingEdge(
+      @Nullable Target target, Label label, NoSuchThingException e) {
+    return formatMissingEdge(target, label, e, null);
   }
 }

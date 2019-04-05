@@ -15,14 +15,13 @@
 package com.google.devtools.build.lib.unix;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.flogger.GoogleLogger;
 import com.google.common.hash.HashCode;
 import com.google.devtools.build.lib.UnixJniLoader;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
-import java.util.logging.Level;
 import java.util.logging.LogManager;
-import java.util.logging.Logger;
 
 /**
  * Utility methods for access to UNIX filesystem calls not exposed by the Java
@@ -125,11 +124,14 @@ public final class NativePosixFiles {
         @Override
         public void run() {
           // wait (if necessary) until the logging system is initialized
-          synchronized (LogManager.getLogManager()) {}
-          Logger.getLogger("com.google.devtools.build.lib.unix.FilesystemUtils").log(Level.FINE,
-              "WARNING: Default character set is not latin1; java.io.File and "
-              + "com.google.devtools.build.lib.unix.FilesystemUtils will represent some filenames "
-              + "differently.");
+          synchronized (LogManager.getLogManager()) {
+          }
+          GoogleLogger.forEnclosingClass()
+              .atFine()
+              .log(
+                  "WARNING: Default character set is not latin1; java.io.File and "
+                      + "com.google.devtools.build.lib.unix.FilesystemUtils will represent some "
+                      + "filenames differently.");
         }
       }.start();
     }
@@ -451,18 +453,32 @@ public final class NativePosixFiles {
   }
 
   /**
-   * Removes entire directory tree. Doesn't follow symlinks.
+   * Deletes all directory trees recursively beneath the given path, which is expected to be a
+   * directory. Does not remove the top directory.
    *
-   * @param path the file or directory to remove.
-   * @throws IOException if the remove failed.
+   * @param dir the directory hierarchy to remove
+   * @throws IOException if the hierarchy cannot be removed successfully or if the given path is not
+   *     a directory
    */
-  public static void rmTree(String path) throws IOException {
-    if (isDirectory(path)) {
-      String[] contents = readdir(path);
-      for (String entry : contents) {
-        rmTree(path + "/" + entry);
-      }
-    }
-    remove(path.toString());
-  }
+  public static native void deleteTreesBelow(String dir) throws IOException;
+
+  /**
+   * Open a file descriptor for writing.
+   *
+   * <p>This is a low level API. The caller is responsible for calling {@link close} on the returned
+   * file descriptor.
+   *
+   * @param path file to open
+   * @param append whether to open is append mode
+   */
+  public static native int openWrite(String path, boolean append) throws FileNotFoundException;
+
+  /** Write a segment of data to a file descriptor. */
+  public static native int write(int fd, byte[] data, int off, int len) throws IOException;
+
+  /**
+   * Close a file descriptor. Additionally, accept and ignore an object; this can be used to keep a
+   * reference alive.
+   */
+  public static native int close(int fd, Object ignored) throws IOException;
 }

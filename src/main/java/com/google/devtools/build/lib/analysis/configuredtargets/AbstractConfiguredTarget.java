@@ -30,11 +30,12 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.packages.Info;
+import com.google.devtools.build.lib.packages.InfoInterface;
 import com.google.devtools.build.lib.packages.PackageSpecification.PackageGroupContents;
 import com.google.devtools.build.lib.packages.Provider;
 import com.google.devtools.build.lib.skyframe.BuildConfigurationValue;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkPrinter;
+import com.google.devtools.build.lib.skylarkinterface.StarlarkContext;
 import com.google.devtools.build.lib.syntax.ClassObject;
 import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.syntax.EvalUtils;
@@ -115,7 +116,8 @@ public abstract class AbstractConfiguredTarget
   }
 
   @Override
-  public final Object getIndex(Object key, Location loc) throws EvalException {
+  public final Object getIndex(Object key, Location loc, StarlarkContext context)
+      throws EvalException {
     if (!(key instanceof Provider)) {
       throw new EvalException(loc, String.format(
           "Type Target only supports indexing by object constructors, got %s instead",
@@ -136,7 +138,8 @@ public abstract class AbstractConfiguredTarget
   }
 
   @Override
-  public boolean containsKey(Object key, Location loc) throws EvalException {
+  public boolean containsKey(Object key, Location loc, StarlarkContext context)
+      throws EvalException {
     if (!(key instanceof Provider)) {
       throw new EvalException(loc, String.format(
           "Type Target only supports querying by object constructors, got %s instead",
@@ -184,7 +187,7 @@ public abstract class AbstractConfiguredTarget
   /** Returns a declared provider provided by this target. Only meant to use from Skylark. */
   @Nullable
   @Override
-  public final Info get(Provider.Key providerKey) {
+  public final InfoInterface get(Provider.Key providerKey) {
     if (providerKey.equals(DefaultInfo.PROVIDER.getKey())) {
       return getDefaultProvider();
     }
@@ -193,7 +196,7 @@ public abstract class AbstractConfiguredTarget
 
   /** Implement in subclasses to get a skylark provider for a given {@code providerKey}. */
   @Nullable
-  protected abstract Info rawGetSkylarkProvider(Provider.Key providerKey);
+  protected abstract InfoInterface rawGetSkylarkProvider(Provider.Key providerKey);
 
   public String getRuleClassString() {
     return "";

@@ -33,13 +33,14 @@ import com.google.devtools.build.lib.actions.Actions;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.FailAction;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
-import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.analysis.config.transitions.NoTransition;
+import com.google.devtools.build.lib.analysis.config.transitions.NullTransition;
 import com.google.devtools.build.lib.analysis.configuredtargets.InputFileConfiguredTarget;
 import com.google.devtools.build.lib.analysis.configuredtargets.OutputFileConfiguredTarget;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestBase;
 import com.google.devtools.build.lib.analysis.util.ExpectedTrimmedConfigurationErrors;
 import com.google.devtools.build.lib.analysis.util.MockRule;
+import com.google.devtools.build.lib.buildeventstream.NullConfiguration;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.events.OutputFilter.RegexOutputFilter;
 import com.google.devtools.build.lib.packages.BuildType;
@@ -225,6 +226,22 @@ public class BuildViewTest extends BuildViewTestBase {
   }
 
   @Test
+  public void testAnalysisReportsDependencyCycle() throws Exception {
+    scratch.file("foo/BUILD", "sh_library(name='foo',deps=['//bar'])");
+    scratch.file("bar/BUILD", "sh_library(name='bar',deps=[':bar'])");
+
+    reporter.removeHandler(failFastHandler);
+    EventBus eventBus = new EventBus();
+    AnalysisFailureRecorder recorder = new AnalysisFailureRecorder();
+    eventBus.register(recorder);
+    AnalysisResult result = update(eventBus, defaultFlags().with(Flag.KEEP_GOING), "//foo");
+    assertThat(result.hasError()).isTrue();
+    assertThat(recorder.events).hasSize(1);
+    AnalysisFailureEvent event = recorder.events.get(0);
+    assertThat(event.getConfigurationId()).isNotEqualTo(NullConfiguration.INSTANCE.getEventId());
+  }
+
+  @Test
   public void testReportsLoadingRootCauses() throws Exception {
     // This test checks that two simultaneous errors are both reported:
     // - missing outs attribute,
@@ -256,43 +273,6 @@ public class BuildViewTest extends BuildViewTestBase {
             new LoadingFailureEvent(
                 Label.parseAbsolute("//pkg:foo", ImmutableMap.of()),
                 Label.parseAbsolute("//pkg:foo", ImmutableMap.of())));
-  }
-
-  @Test
-  public void testConvolutedLoadRootCauseAnalysis() throws Exception {
-    // You need license declarations in third_party. We use this constraint to
-    // create targets that are loadable, but are in error.
-    scratch.file("third_party/first/BUILD",
-        "sh_library(name='first', deps=['//third_party/second'], licenses=['notice'])");
-    scratch.file("third_party/second/BUILD",
-        "sh_library(name='second', deps=['//third_party/third'], licenses=['notice'])");
-    scratch.file("third_party/third/BUILD",
-        "sh_library(name='third', deps=['//third_party/fourth'], licenses=['notice'])");
-    scratch.file("third_party/fourth/BUILD",
-        "sh_library(name='fourth', deps=['//third_party/fifth'])");
-    scratch.file("third_party/fifth/BUILD",
-        "sh_library(name='fifth', licenses=['notice'])");
-    reporter.removeHandler(failFastHandler);
-    EventBus eventBus = new EventBus();
-    LoadingFailureRecorder recorder = new LoadingFailureRecorder();
-    eventBus.register(recorder);
-    // Note: no need to run analysis for a loading failure.
-    AnalysisResult result = update(eventBus, defaultFlags().with(Flag.KEEP_GOING),
-        "//third_party/first", "//third_party/third");
-    assertThat(result.hasError()).isTrue();
-    assertThat(recorder.events).hasSize(2);
-    assertWithMessage(recorder.events.toString())
-        .that(
-            recorder.events.contains(
-                new LoadingFailureEvent(
-                    Label.parseAbsolute("//third_party/first", ImmutableMap.of()),
-                    Label.parseAbsolute("//third_party/fourth", ImmutableMap.of()))))
-        .isTrue();
-    assertThat(recorder.events)
-        .contains(
-            new LoadingFailureEvent(
-                Label.parseAbsolute("//third_party/third", ImmutableMap.of()),
-                Label.parseAbsolute("//third_party/fourth", ImmutableMap.of())));
   }
 
   @Test
@@ -394,7 +374,10 @@ public class BuildViewTest extends BuildViewTestBase {
             NoTransition.INSTANCE,
             AspectCollection.EMPTY);
     Dependency fileDependency =
-        Dependency.withNullConfiguration(Label.parseAbsolute("//package:file", ImmutableMap.of()));
+        Dependency.withTransitionAndAspects(
+            Label.parseAbsolute("//package:file", ImmutableMap.of()),
+            NullTransition.INSTANCE,
+            AspectCollection.EMPTY);
 
     assertThat(targets).containsExactly(innerDependency, fileDependency);
   }
@@ -417,7 +400,7 @@ public class BuildViewTest extends BuildViewTestBase {
       useConfiguration("--output directory name=foo");
       fail();
     } catch (OptionsParsingException e) {
-      assertThat(e).hasMessage("Unrecognized option: --output directory name=foo");
+      assertThat(e).hasMessageThat().isEqualTo("Unrecognized option: --output directory name=foo");
     }
   }
 
@@ -435,6 +418,10 @@ public class BuildViewTest extends BuildViewTestBase {
   // Regression test: "output_filter broken (but in a different way)"
   @Test
   public void testOutputFilterSeeWarning() throws Exception {
+    if (defaultFlags().contains(Flag.TRIMMED_CONFIGURATIONS)) {
+      // TODO(b/129599328): fix or justify disabling
+      return;
+    }
     runAnalysisWithOutputFilter(Pattern.compile(".*"));
     assertContainsEvent("please do not import '//java/a:A.java'");
   }
@@ -446,12 +433,20 @@ public class BuildViewTest extends BuildViewTestBase {
       // TODO(b/67651960): fix or justify disabling.
       return;
     }
+    if (defaultFlags().contains(Flag.TRIMMED_CONFIGURATIONS)) {
+      // TODO(b/129599328): fix or justify disabling
+      return;
+    }
     runAnalysisWithOutputFilter(Pattern.compile("^//java/c"));
     assertNoEvents();
   }
 
   @Test
   public void testOutputFilterWithDebug() throws Exception {
+    if (defaultFlags().contains(Flag.TRIMMED_CONFIGURATIONS)) {
+      // TODO(b/129599328): fix or justify disabling
+      return;
+    }
     scratch.file(
         "java/a/BUILD",
         "java_library(name = 'a',",
@@ -639,6 +634,10 @@ public class BuildViewTest extends BuildViewTestBase {
    */
   @Test
   public void testMultiBuildInvalidationRevalidation() throws Exception {
+    if (defaultFlags().contains(Flag.TRIMMED_CONFIGURATIONS)) {
+      // TODO(b/129599328): fix or justify disabling
+      return;
+    }
     scratch.file("java/a/A.java", "bla1");
     scratch.file("java/a/C.java", "bla2");
     scratch.file("java/a/BUILD",
@@ -918,14 +917,12 @@ public class BuildViewTest extends BuildViewTestBase {
         "conflict/BUILD",
         "config_setting(name = 'a', values = {'test_arg': 'a'})",
         "cc_library(name='x', srcs=select({':a': ['a.cc'], '//conditions:default': ['foo.cc']}))",
-        "cc_binary(name='_objs/x/foo.pic.o', srcs=['bar.cc'])");
+        "cc_binary(name='_objs/x/foo.o', srcs=['bar.cc'])");
     AnalysisResult result =
-        update(
-            defaultFlags().with(Flag.KEEP_GOING), "//conflict:_objs/x/foo.pic.o", "//conflict:x");
+        update(defaultFlags().with(Flag.KEEP_GOING), "//conflict:_objs/x/foo.o", "//conflict:x");
     assertThat(result.hasError()).isTrue();
     // Expect to reach this line without a Precondition-triggered NullPointerException.
-    assertContainsEvent(
-        "file 'conflict/_objs/x/foo.pic.o' is generated by these conflicting actions");
+    assertContainsEvent("file 'conflict/_objs/x/foo.o' is generated by these conflicting actions");
   }
 
   @Test
@@ -1045,33 +1042,6 @@ public class BuildViewTest extends BuildViewTestBase {
   }
 
   @Test
-  public void testCircularDependencyWithLateBoundLabel() throws Exception {
-    if (getInternalTestExecutionMode() != TestConstants.InternalTestExecutionMode.NORMAL) {
-      // TODO(b/67412276): handle cycles properly.
-      return;
-    }
-    scratch.file("cycle/BUILD",
-        "cc_library(name = 'foo', deps = [':bar'])",
-        "cc_library(name = 'bar')");
-    useConfiguration("--experimental_stl=//cycle:foo");
-    reporter.removeHandler(failFastHandler);
-    EventBus eventBus = new EventBus();
-    LoadingFailureRecorder loadingFailureRecorder = new LoadingFailureRecorder();
-    AnalysisFailureRecorder analysisFailureRecorder = new AnalysisFailureRecorder();
-    eventBus.register(loadingFailureRecorder);
-    eventBus.register(analysisFailureRecorder);
-    AnalysisResult result = update(eventBus, defaultFlags().with(Flag.KEEP_GOING), "//cycle:foo");
-    assertThat(result.hasError()).isTrue();
-    assertContainsEvent("in cc_library rule //cycle:foo: cycle in dependency graph:");
-    // This needs to be reported as an anlysis-phase cycle; the cycle only occurs due to the stl
-    // command-line option, which is part of the configuration, and which is used due to the
-    // late-bound label.
-    assertThat(Iterables.transform(analysisFailureRecorder.events, ANALYSIS_EVENT_TO_STRING_PAIR))
-        .containsExactly(Pair.of("//cycle:foo", "//cycle:foo"));
-    assertThat(loadingFailureRecorder.events).isEmpty();
-  }
-
-  @Test
   public void testLoadingErrorReportedCorrectly() throws Exception {
     scratch.file("a/BUILD", "cc_library(name='a')");
     scratch.file("b/BUILD", "cc_library(name='b', deps = ['//missing:lib'])");
@@ -1081,18 +1051,6 @@ public class BuildViewTest extends BuildViewTestBase {
     assertThat(result.hasError()).isTrue();
     assertThat(result.getError())
         .contains("command succeeded, but there were loading phase errors");
-  }
-
-  @Test
-  public void testBadLabelInConfiguration() throws Exception {
-    useConfiguration("--crosstool_top=//third_party/crosstool/v2");
-    reporter.removeHandler(failFastHandler);
-    try {
-      update(defaultFlags().with(Flag.KEEP_GOING));
-      fail();
-    } catch (InvalidConfigurationException e) {
-      assertThat(e).hasMessageThat().contains("third_party/crosstool/v2");
-    }
   }
 
   @Test
@@ -1444,5 +1402,9 @@ public class BuildViewTest extends BuildViewTestBase {
     @Test
     public void testErrorBelowCycle() {
     }
+
+    @Override
+    @Test
+    public void testAnalysisReportsDependencyCycle() {}
   }
 }

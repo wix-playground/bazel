@@ -21,7 +21,9 @@ import com.google.devtools.build.lib.actions.ActionInput;
 import com.google.devtools.build.lib.actions.ActionInputHelper;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.EmptyRunfilesSupplier;
+import com.google.devtools.build.lib.actions.FilesetOutputSymlink;
 import com.google.devtools.build.lib.actions.ResourceSet;
+import com.google.devtools.build.lib.actions.RunfilesSupplier;
 import com.google.devtools.build.lib.actions.SimpleSpawn;
 import com.google.devtools.build.lib.actions.Spawn;
 import java.util.ArrayList;
@@ -42,6 +44,10 @@ public final class SpawnBuilder {
   private final Map<String, String> executionInfo = new HashMap<>();
   private final List<ActionInput> inputs = new ArrayList<>();
   private final List<ActionInput> outputs = new ArrayList<>();
+  private final Map<Artifact, ImmutableList<FilesetOutputSymlink>> filesetMappings =
+      new HashMap<>();
+
+  private RunfilesSupplier runfilesSupplier = EmptyRunfilesSupplier.INSTANCE;
 
   public SpawnBuilder(String... args) {
     this.args = ImmutableList.copyOf(args);
@@ -54,8 +60,8 @@ public final class SpawnBuilder {
         ImmutableList.copyOf(args),
         ImmutableMap.copyOf(environment),
         ImmutableMap.copyOf(executionInfo),
-        /*runfilesSupplier=*/ EmptyRunfilesSupplier.INSTANCE,
-        ImmutableMap.of(),
+        runfilesSupplier,
+        ImmutableMap.copyOf(filesetMappings),
         ImmutableList.copyOf(inputs),
         /*tools=*/ ImmutableList.<Artifact>of(),
         ImmutableList.copyOf(outputs),
@@ -113,6 +119,18 @@ public final class SpawnBuilder {
     for (String name : names) {
       this.outputs.add(ActionInputHelper.fromPath(name));
     }
+    return this;
+  }
+
+  public SpawnBuilder withFilesetMapping(
+      Artifact fileset, ImmutableList<FilesetOutputSymlink> mappings) {
+    Preconditions.checkArgument(fileset.isFileset(), "Artifact %s is not fileset", fileset);
+    filesetMappings.put(fileset, mappings);
+    return this;
+  }
+
+  public SpawnBuilder withRunfilesSupplier(RunfilesSupplier runfilesSupplier) {
+    this.runfilesSupplier = runfilesSupplier;
     return this;
   }
 }

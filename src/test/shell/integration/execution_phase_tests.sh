@@ -59,12 +59,18 @@ fi
 
 #### HELPER FUNCTIONS ##################################################
 
+if ! type try_with_timeout >&/dev/null; then
+  # Bazel's testenv.sh defines try_with_timeout but the Google-internal version
+  # uses a different testenv.sh.
+  function try_with_timeout() { $* ; }
+fi
+
 function set_up() {
     cd ${WORKSPACE_DIR}
 }
 
 function tear_down() {
-    bazel shutdown
+  try_with_timeout bazel shutdown
 }
 
 # Looks for the last occurrence of a log message in a log file.
@@ -93,13 +99,11 @@ function assert_cache_stats() {
   local metric="${1}"; shift
   local exp_value="${1}"; shift
 
-  local java_log="$(bazel info output_base 2>/dev/null)/java.log"
-  local last="$(grep "CacheFileDigestsModule" "${java_log}")"
-  [ -n "${last}" ] || fail "Could not find cache stats in log"
-  if ! echo "${last}" | grep -q "${metric}=${exp_value}"; then
-    echo "Last cache stats: ${last}" >>"${TEST_log}"
-    fail "${metric} was not ${exp_value}"
-  fi
+  local java_log
+  java_log="$(bazel info server_log 2>/dev/null)" || fail "bazel info failed"
+  grep "CacheFileDigestsModule" "${java_log}" >"${TEST_log}"
+  [ -s "${TEST_log}" ] || fail "Could not find cache stats in log"
+  expect_log "${metric}=${exp_value}"
 }
 
 #### TESTS #############################################################
@@ -165,7 +169,8 @@ EOF
   assert_cache_stats "miss count" 1  # volatile-status.txt
 }
 
-function IGNORED_test_cache_computed_file_digests_uncaught_changes() {
+function DISABLED_test_cache_computed_file_digests_uncaught_changes() {
+  # Does not work on Windows, https://github.com/bazelbuild/bazel/issues/6098
   local timestamp=201703151112.13  # Fixed timestamp to mark our file with.
 
   mkdir -p package || fail "mkdir failed"
@@ -232,7 +237,8 @@ function test_cache_computed_file_digests_ui() {
   echo "cc_library(name = 'foo', srcs = ['foo.cc'])" >$pkg/package/BUILD
   echo "int foo(void) { return 0; }" >$pkg/package/foo.cc
 
-  local java_log="$(bazel info output_base 2>/dev/null)/java.log"
+  local java_log
+  java_log="$(bazel info server_log 2>/dev/null)" || fail "bazel info failed"
 
   bazel build $pkg/package:foo >>"${TEST_log}" 2>&1 || fail "Should build"
   assert_last_log "CacheFileDigestsModule" "Cache stats" "${java_log}" \
@@ -246,26 +252,6 @@ function test_cache_computed_file_digests_ui() {
   bazel build $pkg/package:foo >>"${TEST_log}" 2>&1 || fail "Should build"
   assert_last_log "CacheFileDigestsModule" "Cache stats" "${java_log}" \
       "Digests cache not reenabled"
-}
-
-function test_jobs_default_auto() {
-  local -r pkg="${FUNCNAME}"
-  mkdir -p "$pkg" || fail "could not create \"$pkg\""
-
-  # The default flag value is only read if --jobs is not set explicitly.
-  # Do not use a bazelrc here, this would break the test.
-  mkdir -p $pkg/package || fail "mkdir failed"
-  echo "cc_library(name = 'foo', srcs = ['foo.cc'])" >$pkg/package/BUILD
-  echo "int foo(void) { return 0; }" >$pkg/package/foo.cc
-
-  local output_base="$(bazel --nomaster_bazelrc --bazelrc=/dev/null info \
-      output_base 2>/dev/null)" || fail "bazel info should work"
-  local java_log="${output_base}/java.log"
-  bazel --nomaster_bazelrc --bazelrc=/dev/null build $pkg/package:foo \
-      >>"${TEST_log}" 2>&1 || fail "Should build"
-
-  assert_last_log "BuildRequest" 'Flag "jobs" was set to "auto"' "${java_log}" \
-      "--jobs was not set to auto by default"
 }
 
 function test_analysis_warning_cached() {
@@ -291,5 +277,35 @@ EOF
   expect_log "WARNING: .*: foo warning"
 }
 
+function test_max_open_file_descriptors() {
+  echo "nfiles: hard $(ulimit -H -n), soft $(ulimit -S -n)"
+
+  local exp_nfiles="$(ulimit -H -n)"
+  if [[ "$(uname -s)" == Darwin && "${exp_nfiles}" == unlimited ]]; then
+    exp_nfiles="$(/usr/sbin/sysctl -n kern.maxfilesperproc)"
+  elif "${is_windows}"; then
+    # We do not implement the resources unlimiting feature on Windows at
+    # the moment... so just expect the soft limit to remain unchanged.
+    exp_nfiles="$(ulimit -S -n)"
+  fi
+  echo "Will expect soft nfiles to be ${exp_nfiles}"
+
+  mkdir -p "pkg" || fail "Could not create directory"
+  cat > pkg/BUILD <<'EOF' || fail "Could not create test file"
+genrule(
+    name = "nfiles",
+    outs = ["nfiles-soft"],
+    cmd = "mkdir -p pkg && ulimit -S -n >$(location nfiles-soft)",
+)
+EOF
+  bazel build //pkg:nfiles >& "${TEST_log}" || fail "Expected success"
+  local soft="$(cat bazel-genfiles/pkg/nfiles-soft)"
+
+  # Make sure that the soft limit was raised to the expected hard value.
+  # Our code doesn't touch the hard limit (even in the case "unlimited" case
+  # handled above) and that's OK: if we were able to set the soft limit to a
+  # high value, the hard limit must already be the same or higher.
+  assert_equals "${exp_nfiles}" "${soft}"
+}
 
 run_suite "Integration tests of ${PRODUCT_NAME} using the execution phase."

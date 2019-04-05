@@ -5,7 +5,7 @@ java_binary(
     name = "Skylint",
     srcs = [],
     main_class = "com.google.devtools.skylark.skylint.Skylint",
-    visibility = ["//src/test/skylark/skylint:__pkg__"],
+    visibility = ["//src/test/starlark/skylint:__pkg__"],
     runtime_deps = [
         ":skylint_lib",
     ],
@@ -14,12 +14,17 @@ java_binary(
 java_library(
     name = "skylint_lib",
     srcs = glob(["**/*.java"]),
-    visibility = ["//src/tools/skylark/javatests/com/google/devtools/skylark/skylint:__pkg__"],
+    visibility = [
+        # For docstring parsing libraries.
+        "//src/main/java/com/google/devtools/build/skydoc:__subpackages__",
+        "//src/tools/skylark/javatests/com/google/devtools/skylark/skylint:__pkg__",
+    ],
     deps = [
         # TODO(bazel-team): Once BazelLibrary has a Build API interface, depend
         # on lib:skylarkbuildapi instead of on lib:packages.
         "//src/main/java/com/google/devtools/build/lib:packages",
         "//src/main/java/com/google/devtools/build/lib:skylarkinterface",
+        "//src/tools/skylark/java/com/google/devtools/skylark/common",
         "//third_party:guava",
     ],
 )

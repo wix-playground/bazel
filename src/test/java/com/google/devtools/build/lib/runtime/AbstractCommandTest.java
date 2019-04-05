@@ -17,14 +17,14 @@ import static com.google.common.truth.Truth.assertThat;
 
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
-import com.google.devtools.build.lib.packages.SkylarkSemanticsOptions;
+import com.google.devtools.build.lib.packages.StarlarkSemanticsOptions;
 import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
 import com.google.devtools.common.options.OptionsBase;
 import com.google.devtools.common.options.OptionsParser;
-import com.google.devtools.common.options.OptionsProvider;
+import com.google.devtools.common.options.OptionsParsingResult;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -69,7 +69,7 @@ public class AbstractCommandTest {
 
   private static class ConcreteCommand implements BlazeCommand {
     @Override
-    public BlazeCommandResult exec(CommandEnvironment env, OptionsProvider options) {
+    public BlazeCommandResult exec(CommandEnvironment env, OptionsParsingResult options) {
       throw new UnsupportedOperationException();
     }
 
@@ -135,7 +135,7 @@ public class AbstractCommandTest {
     result.add(BlazeCommandEventHandler.Options.class);
     result.add(CommonCommandOptions.class);
     result.add(ClientOptions.class);
-    result.add(SkylarkSemanticsOptions.class);
+    result.add(StarlarkSemanticsOptions.class);
     return result;
   }
 }

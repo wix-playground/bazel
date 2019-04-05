@@ -1,15 +1,20 @@
 package(default_visibility = ["//visibility:public"])
 
+load("//tools/build_defs/pkg:pkg.bzl", "pkg_tar")
+
 filegroup(
     name = "srcs",
     srcs = glob(["**"]) + [
         "//third_party/allocation_instrumenter:srcs",
+        "//third_party/aws-sdk-auth-lite:srcs",
+        "//third_party/aws-sig-v4-test-suite:srcs",
         "//third_party/css/bootstrap:srcs",
         "//third_party/css/font_awesome:srcs",
         "//third_party/ijar:srcs",
         "//third_party/iossim:srcs",
         "//third_party/grpc:srcs",
         "//third_party/jarjar:srcs",
+        "//third_party/jaxb:srcs",
         "//third_party/java/android_databinding:srcs",
         "//third_party/java/aosp_gradle_core:srcs",
         "//third_party/java/apkbuilder:srcs",
@@ -32,10 +37,10 @@ filegroup(
         "//third_party/py/six:srcs",
         "//third_party/zlib:srcs",
         "//third_party/nanopb:srcs",
-        "//third_party/googleapis:srcs",
         "//third_party/def_parser:srcs",
         "//third_party/pprof:srcs",
-        "//third_party/remoteapis:srcs",
+        "@googleapis//:srcs",
+        "@remoteapis//:srcs",
     ],
 )
 
@@ -64,6 +69,9 @@ java_import(
         "aether/aether-transport-file-1.0.0.v20140518.jar",
         "aether/aether-util-1.0.0.v20140518.jar",
     ],
+    deps = [
+        ":apache_httpclient",
+    ],
 )
 
 java_import(
@@ -73,7 +81,7 @@ java_import(
         "android_common/com.android.tools.build_builder_2.0.0.jar",
         "android_common/com.android.tools.build_builder-model_2.0.0.jar",
         "android_common/com.android.tools.build_builder-test-api_2.0.0.jar",
-        "android_common/com.android.tools.build_manifest-merger_25.0.0.jar",
+        "android_common/com.android.tools.build_manifest-merger_25.0.0-patched.jar",
         "android_common/com.android.tools.external.lombok_lombok-ast_0.2.3.jar",
         # layoutlib has been upgraded to 26.1.2 *just* for font resource support.
         # We are unable to upgrade the other libraries yet due to internal
@@ -95,6 +103,9 @@ java_import(
         ":asm",
         ":asm-analysis",
         ":asm-tree",
+    ],
+    deps = [
+        "//third_party/jaxb",
     ],
 )
 
@@ -131,7 +142,11 @@ java_import(
 java_import(
     name = "apache_httpclient",
     jars = ["apache_httpclient/httpclient-4.5.3.jar"],
-    deps = [":apache_commons_logging"],
+    deps = [
+        ":apache_commons_codec",
+        ":apache_commons_logging",
+        ":apache_httpcore",
+    ],
 )
 
 java_import(
@@ -163,35 +178,35 @@ java_import(
 
 java_import(
     name = "asm",
-    jars = ["asm/asm-6.2.1.jar"],
-    srcjar = "asm/asm-6.2.1-sources.jar",
+    jars = ["asm/asm-7.0.jar"],
+    srcjar = "asm/asm-7.0-sources.jar",
 )
 
 java_import(
     name = "asm-analysis",
-    jars = ["asm/asm-analysis-6.2.1.jar"],
-    srcjar = "asm/asm-analysis-6.2.1-sources.jar",
+    jars = ["asm/asm-analysis-7.0.jar"],
+    srcjar = "asm/asm-analysis-7.0-sources.jar",
     runtime_deps = [":asm-tree"],
 )
 
 java_import(
     name = "asm-commons",
-    jars = ["asm/asm-commons-6.2.1.jar"],
-    srcjar = "asm/asm-commons-6.2.1-sources.jar",
+    jars = ["asm/asm-commons-7.0.jar"],
+    srcjar = "asm/asm-commons-7.0-sources.jar",
     runtime_deps = [":asm-tree"],
 )
 
 java_import(
     name = "asm-tree",
-    jars = ["asm/asm-tree-6.2.1.jar"],
-    srcjar = "asm/asm-tree-6.2.1-sources.jar",
+    jars = ["asm/asm-tree-7.0.jar"],
+    srcjar = "asm/asm-tree-7.0-sources.jar",
     runtime_deps = [":asm"],
 )
 
 java_import(
     name = "asm-util",
-    jars = ["asm/asm-util-6.2.1.jar"],
-    srcjar = "asm/asm-util-6.2.1-sources.jar",
+    jars = ["asm/asm-util-7.0.jar"],
+    srcjar = "asm/asm-util-7.0-sources.jar",
     runtime_deps = [":asm-tree"],
 )
 
@@ -204,6 +219,7 @@ java_import(
     runtime_deps = [
         ":api_client",
         ":guava",
+        "//third_party/aws-sdk-auth-lite",
     ],
 )
 
@@ -225,7 +241,7 @@ java_plugin(
 
 java_import(
     name = "auto_common",
-    jars = ["auto/auto-common-0.3.jar"],
+    jars = ["auto/auto-common-0.10.jar"],
 )
 
 java_library(
@@ -250,7 +266,7 @@ java_plugin(
 
 java_import(
     name = "auto_service_lib",
-    jars = ["auto/auto-service-1.0-rc2.jar"],
+    jars = ["auto/auto-service-1.0-rc4.jar"],
 )
 
 java_plugin(
@@ -282,13 +298,27 @@ java_library(
 
 java_import(
     name = "auto_value_value",
-    jars = ["auto/auto-value-1.5.4.jar"],
+    jars = [
+        "auto/auto-value-1.6.3rc1.jar",
+        "auto/auto-value-annotations-1.6.3rc1.jar",
+    ],
 )
 
 # For bootstrapping JavaBuilder
 filegroup(
     name = "auto_value-jars",
-    srcs = ["auto/auto-value-1.5.4.jar"],
+    srcs = [
+        "auto/auto-value-1.6.3rc1.jar",
+        "auto/auto-value-annotations-1.6.3rc1.jar",
+    ],
+)
+
+java_import(
+    name = "byte_buddy",
+    jars = [
+        "bytebuddy/byte-buddy-1.9.7.jar",
+        "bytebuddy/byte-buddy-agent-1.9.7.jar",
+    ],
 )
 
 java_import(
@@ -380,6 +410,24 @@ java_import(
 )
 
 java_import(
+    name = "flogger",
+    jars = [
+        "flogger/flogger-0.3.1.jar",
+        "flogger/flogger-system-backend-0.3.1.jar",
+        "flogger/google-extensions-0.3.1.jar",
+    ],
+)
+
+filegroup(
+    name = "flogger-jars",
+    srcs = [
+        "flogger/flogger-0.3.1.jar",
+        "flogger/flogger-system-backend-0.3.1.jar",
+        "flogger/google-extensions-0.3.1.jar",
+    ],
+)
+
+java_import(
     name = "instrumentation",
     jars = [
         "instrumentation/instrumentation-api-0.4.3.jar",
@@ -407,11 +455,6 @@ java_import(
     jars = ["javax_annotations/javax.annotation-api-1.3.2.jar"],
     neverlink = 1,  # @Generated is source-retention
     srcjar = "javax_annotations/javax.annotation-api-1.3.2-sources.jar",
-)
-
-java_import(
-    name = "jgit",
-    jars = ["jgit/org.eclipse.jgit-4.10.0.201712302008-r.jar"],
 )
 
 java_import(
@@ -521,8 +564,18 @@ java_import(
 
 java_import(
     name = "mockito",
-    jars = ["mockito/mockito-all-1.10.19.jar"],
+    jars = ["mockito/mockito-core-2.25.1.jar"],
     deps = [
+        ":byte_buddy",
+        ":objenesis",
+    ],
+)
+
+java_import(
+    name = "mockito2",
+    jars = ["mockito/mockito-core-2.25.1.jar"],
+    deps = [
+        ":byte_buddy",
         ":objenesis",
     ],
 )
@@ -532,9 +585,14 @@ java_import(
     jars = ["objenesis/objenesis-1_3.jar"],
 )
 
+filegroup(
+    name = "turbine_direct",
+    srcs = ["turbine/turbine_direct.jar"],
+)
+
 java_import(
     name = "turbine",
-    jars = ["turbine/turbine.jar"],
+    jars = ["turbine/turbine_direct.jar"],
 )
 
 java_import(

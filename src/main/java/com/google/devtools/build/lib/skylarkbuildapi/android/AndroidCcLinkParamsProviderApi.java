@@ -16,7 +16,7 @@ package com.google.devtools.build.lib.skylarkbuildapi.android;
 
 import com.google.devtools.build.lib.skylarkbuildapi.ProviderApi;
 import com.google.devtools.build.lib.skylarkbuildapi.StructApi;
-import com.google.devtools.build.lib.skylarkbuildapi.cpp.CcLinkingInfoApi;
+import com.google.devtools.build.lib.skylarkbuildapi.cpp.CcInfoApi;
 import com.google.devtools.build.lib.skylarkinterface.Param;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkCallable;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkConstructor;
@@ -27,30 +27,40 @@ import com.google.devtools.build.lib.syntax.EvalException;
 /** A target that provides C++ libraries to be linked into Android targets. */
 @SkylarkModule(
     name = "AndroidCcLinkParamsInfo",
-    doc = "Information about the c++ libraries to be linked into Android targets.",
+    doc =
+        "Do not use this module. It is intended for migration purposes only. If you depend on it, "
+            + "you will be broken when it is removed."
+            + "Information about the c++ libraries to be linked into Android targets.",
+    documented = false,
     category = SkylarkModuleCategory.PROVIDER)
-public interface AndroidCcLinkParamsProviderApi<T extends CcLinkingInfoApi> extends StructApi {
+public interface AndroidCcLinkParamsProviderApi<T extends CcInfoApi> extends StructApi {
   /** Name of this info object. */
-  public static String NAME = "AndroidCcLinkParamsInfo";
+  String NAME = "AndroidCcLinkParamsInfo";
 
   /** Returns the cc link params. */
   @SkylarkCallable(name = "link_params", structField = true, doc = "", documented = false)
   T getLinkParams();
 
   /** The provider implementing this can construct the AndroidCcLinkParamsInfo provider. */
-  @SkylarkModule(name = "Provider", doc = "", documented = false)
-  public interface Provider<T extends CcLinkingInfoApi> extends ProviderApi {
+  @SkylarkModule(
+      name = "Provider",
+      doc =
+          "Do not use this module. It is intended for migration purposes only. If you depend on "
+              + "it, you will be broken when it is removed.",
+      documented = false)
+  public interface Provider<T extends CcInfoApi> extends ProviderApi {
 
     @SkylarkCallable(
         name = NAME,
         doc = "The <code>AndroidCcLinkParamsInfo</code> constructor.",
+        documented = false,
         parameters = {
           @Param(
               name = "store",
-              doc = "The CcLinkingInfo provider.",
+              doc = "The CcInfo provider.",
               positional = true,
               named = false,
-              type = CcLinkingInfoApi.class),
+              type = CcInfoApi.class),
         },
         selfCall = true)
     @SkylarkConstructor(

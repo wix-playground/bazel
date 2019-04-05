@@ -13,9 +13,11 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.util.GroupedList;
 import com.google.devtools.build.lib.util.GroupedList.GroupedListHelper;
-import java.util.Collection;
+import java.math.BigInteger;
+import java.util.List;
 import java.util.Set;
 import javax.annotation.Nullable;
 
@@ -54,8 +56,10 @@ public abstract class DelegatingNodeEntry implements NodeEntry {
   }
 
   @Override
-  public Set<SkyKey> setValue(SkyValue value, Version version) throws InterruptedException {
-    return getDelegate().setValue(value, version);
+  public Set<SkyKey> setValue(
+      SkyValue value, Version version, DepFingerprintList depFingerprintList)
+      throws InterruptedException {
+    return getDelegate().setValue(value, version, depFingerprintList);
   }
 
   @Override
@@ -71,13 +75,8 @@ public abstract class DelegatingNodeEntry implements NodeEntry {
   }
 
   @Override
-  public boolean signalDep() {
-    return getDelegate().signalDep();
-  }
-
-  @Override
-  public boolean signalDep(Version childVersion) {
-    return getDelegate().signalDep(childVersion);
+  public boolean signalDep(Version childVersion, @Nullable SkyKey childForDebugging) {
+    return getDelegate().signalDep(childVersion, childForDebugging);
   }
 
   @Override
@@ -101,7 +100,7 @@ public abstract class DelegatingNodeEntry implements NodeEntry {
   }
 
   @Override
-  public Collection<SkyKey> getNextDirtyDirectDeps() throws InterruptedException {
+  public List<SkyKey> getNextDirtyDirectDeps() throws InterruptedException {
     return getDelegate().getNextDirtyDirectDeps();
   }
 
@@ -111,8 +110,26 @@ public abstract class DelegatingNodeEntry implements NodeEntry {
   }
 
   @Override
-  public Set<SkyKey> getAllRemainingDirtyDirectDeps() throws InterruptedException {
+  public ImmutableSet<SkyKey> getAllRemainingDirtyDirectDeps() throws InterruptedException {
     return getDelegate().getAllRemainingDirtyDirectDeps();
+  }
+
+  @Override
+  public boolean canPruneDepsByFingerprint() {
+    return getDelegate().canPruneDepsByFingerprint();
+  }
+
+  @Nullable
+  @Override
+  public Iterable<SkyKey> getLastDirectDepsGroupWhenPruningDepsByFingerprint()
+      throws InterruptedException {
+    return getDelegate().getLastDirectDepsGroupWhenPruningDepsByFingerprint();
+  }
+
+  @Override
+  public boolean unmarkNeedsRebuildingIfGroupUnchangedUsingFingerprint(
+      BigInteger groupFingerprint) {
+    return getDelegate().unmarkNeedsRebuildingIfGroupUnchangedUsingFingerprint(groupFingerprint);
   }
 
   @Override
@@ -192,12 +209,17 @@ public abstract class DelegatingNodeEntry implements NodeEntry {
 
   @Override
   @Nullable
-  public MarkedDirtyResult markDirty(boolean isChanged) throws InterruptedException {
-    return getThinDelegate().markDirty(isChanged);
+  public MarkedDirtyResult markDirty(DirtyType dirtyType) throws InterruptedException {
+    return getThinDelegate().markDirty(dirtyType);
   }
 
   @Override
-  public void addTemporaryDirectDepsGroupToDirtyEntry(Collection<SkyKey> group) {
+  public void addTemporaryDirectDepsGroupToDirtyEntry(List<SkyKey> group) {
     getDelegate().addTemporaryDirectDepsGroupToDirtyEntry(group);
+  }
+
+  @Override
+  public void addExternalDep() {
+    getDelegate().addExternalDep();
   }
 }

@@ -18,7 +18,6 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
-import com.google.devtools.build.lib.analysis.config.ConfigurationEnvironment;
 import com.google.devtools.build.lib.analysis.config.ConfigurationFragmentFactory;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
@@ -31,24 +30,19 @@ public class PlatformConfigurationLoader implements ConfigurationFragmentFactory
   }
 
   @Override
-  public PlatformConfiguration create(ConfigurationEnvironment env, BuildOptions buildOptions)
-      throws InvalidConfigurationException, InterruptedException {
+  public PlatformConfiguration create(BuildOptions buildOptions)
+      throws InvalidConfigurationException {
     PlatformOptions platformOptions = buildOptions.get(PlatformOptions.class);
-    return create(platformOptions);
+    return new PlatformConfiguration(
+        platformOptions.computeHostPlatform(),
+        ImmutableList.copyOf(platformOptions.extraExecutionPlatforms),
+        platformOptions.computeTargetPlatform(),
+        ImmutableList.copyOf(platformOptions.extraToolchains),
+        ImmutableList.copyOf(platformOptions.enabledToolchainTypes));
   }
 
   @Override
   public Class<? extends BuildConfiguration.Fragment> creates() {
     return PlatformConfiguration.class;
-  }
-
-  private PlatformConfiguration create(PlatformOptions options)
-      throws InvalidConfigurationException {
-    return new PlatformConfiguration(
-        options.hostPlatform,
-        ImmutableList.copyOf(options.extraExecutionPlatforms),
-        ImmutableList.copyOf(options.platforms),
-        ImmutableList.copyOf(options.extraToolchains),
-        ImmutableList.copyOf(options.enabledToolchainTypes));
   }
 }

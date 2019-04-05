@@ -20,7 +20,6 @@ import static java.util.logging.Level.WARNING;
 
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
-import com.google.common.io.ByteStreams;
 import com.google.devtools.build.lib.actions.ActionExecutionMetadata;
 import com.google.devtools.build.lib.actions.ActionInput;
 import com.google.devtools.build.lib.actions.CommandLines.ParamFileActionInput;
@@ -32,22 +31,28 @@ import com.google.devtools.build.lib.actions.SpawnResult.Status;
 import com.google.devtools.build.lib.actions.Spawns;
 import com.google.devtools.build.lib.actions.cache.VirtualActionInput;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
+import com.google.devtools.build.lib.exec.BinTools;
 import com.google.devtools.build.lib.exec.SpawnRunner;
+import com.google.devtools.build.lib.profiler.Profiler;
+import com.google.devtools.build.lib.profiler.ProfilerTask;
+import com.google.devtools.build.lib.profiler.SilentCloseable;
 import com.google.devtools.build.lib.runtime.ProcessWrapperUtil;
-import com.google.devtools.build.lib.shell.AbnormalTerminationException;
-import com.google.devtools.build.lib.shell.Command;
-import com.google.devtools.build.lib.shell.CommandException;
-import com.google.devtools.build.lib.shell.CommandResult;
 import com.google.devtools.build.lib.shell.ExecutionStatistics;
+import com.google.devtools.build.lib.shell.Subprocess;
+import com.google.devtools.build.lib.shell.SubprocessBuilder;
+import com.google.devtools.build.lib.shell.TerminationStatus;
 import com.google.devtools.build.lib.util.NetUtil;
 import com.google.devtools.build.lib.util.OS;
 import com.google.devtools.build.lib.util.OsUtils;
 import com.google.devtools.build.lib.util.io.FileOutErr;
-import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
+import com.google.errorprone.annotations.FormatMethod;
+import com.google.errorprone.annotations.FormatString;
+import java.io.File;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
@@ -76,13 +81,22 @@ public class LocalSpawnRunner implements SpawnRunner {
   private final LocalExecutionOptions localExecutionOptions;
 
   private final boolean useProcessWrapper;
-  private final String processWrapper;
+  private final Path processWrapper;
 
   private final LocalEnvProvider localEnvProvider;
+  private final BinTools binTools;
 
   // TODO(b/62588075): Move this logic to ProcessWrapperUtil?
-  protected static Path getProcessWrapper(Path execRoot, OS localOs) {
-    return execRoot.getRelative("_bin/process-wrapper" + OsUtils.executableExtension(localOs));
+  private static Path getProcessWrapper(BinTools binTools, OS localOs) {
+    // We expect binTools to be null only under testing.
+    return binTools == null
+        ? null
+        : binTools.getEmbeddedPath("process-wrapper" + OsUtils.executableExtension(localOs));
+  }
+
+  private static boolean processWrapperExists(BinTools binTools) {
+    Path wrapper = getProcessWrapper(binTools, OS.getCurrent());
+    return wrapper != null && wrapper.exists();
   }
 
   public LocalSpawnRunner(
@@ -91,28 +105,32 @@ public class LocalSpawnRunner implements SpawnRunner {
       ResourceManager resourceManager,
       boolean useProcessWrapper,
       OS localOs,
-      LocalEnvProvider localEnvProvider) {
+      LocalEnvProvider localEnvProvider,
+      BinTools binTools) {
     this.execRoot = execRoot;
-    this.processWrapper = getProcessWrapper(execRoot, localOs).getPathString();
+    this.processWrapper = getProcessWrapper(binTools, localOs);
     this.localExecutionOptions = Preconditions.checkNotNull(localExecutionOptions);
     this.hostName = NetUtil.getCachedShortHostName();
     this.resourceManager = resourceManager;
     this.useProcessWrapper = useProcessWrapper;
     this.localEnvProvider = localEnvProvider;
+    this.binTools = binTools;
   }
 
   public LocalSpawnRunner(
       Path execRoot,
       LocalExecutionOptions localExecutionOptions,
       ResourceManager resourceManager,
-      LocalEnvProvider localEnvProvider) {
+      LocalEnvProvider localEnvProvider,
+      BinTools binTools) {
     this(
         execRoot,
         localExecutionOptions,
         resourceManager,
-        OS.getCurrent() != OS.WINDOWS && getProcessWrapper(execRoot, OS.getCurrent()).exists(),
+        OS.getCurrent() != OS.WINDOWS && processWrapperExists(binTools),
         OS.getCurrent(),
-        localEnvProvider);
+        localEnvProvider,
+        binTools);
   }
 
   @Override
@@ -123,14 +141,23 @@ public class LocalSpawnRunner implements SpawnRunner {
   @Override
   public SpawnResult exec(Spawn spawn, SpawnExecutionContext context)
       throws IOException, InterruptedException {
-    ActionExecutionMetadata owner = spawn.getResourceOwner();
-    context.report(ProgressStatus.SCHEDULING, getName());
-    try (ResourceHandle handle =
-        resourceManager.acquireResources(owner, spawn.getLocalResources())) {
-      context.report(ProgressStatus.EXECUTING, getName());
-      context.lockOutputFiles();
-      return new SubprocessHandler(spawn, context).run();
+    try (SilentCloseable c =
+        Profiler.instance().profile(
+            ProfilerTask.LOCAL_EXECUTION, spawn.getResourceOwner().getMnemonic())) {
+      ActionExecutionMetadata owner = spawn.getResourceOwner();
+      context.report(ProgressStatus.SCHEDULING, getName());
+      try (ResourceHandle handle =
+          resourceManager.acquireResources(owner, spawn.getLocalResources())) {
+        context.report(ProgressStatus.EXECUTING, getName());
+        context.lockOutputFiles();
+        return new SubprocessHandler(spawn, context).run();
+      }
     }
+  }
+
+  @Override
+  public boolean canExec(Spawn spawn) {
+    return true;
   }
 
   protected Path createActionTemp(Path execRoot) throws IOException {
@@ -164,23 +191,25 @@ public class LocalSpawnRunner implements SpawnRunner {
       try {
         return start();
       } catch (Error e) {
-        stepLog(SEVERE, UNHANDLED_EXCEPTION_MSG, e);
+        stepLog(SEVERE, e, UNHANDLED_EXCEPTION_MSG);
         throw e;
       } catch (IOException e) {
-        stepLog(SEVERE, "Local I/O error", e);
+        stepLog(SEVERE, e, "Local I/O error");
         throw e;
       } catch (RuntimeException e) {
-        stepLog(SEVERE, UNHANDLED_EXCEPTION_MSG, e);
+        stepLog(SEVERE, e, UNHANDLED_EXCEPTION_MSG);
         throw new RuntimeException(UNHANDLED_EXCEPTION_MSG, e);
       }
     }
 
-    private void stepLog(Level level, String fmt, Object... args) {
-      stepLog(level, fmt, /*cause=*/ null, args);
+    @FormatMethod
+    private void stepLog(Level level, @FormatString String fmt, Object... args) {
+      stepLog(level, /*cause=*/ null, fmt, args);
     }
 
-    @SuppressWarnings("unused")
-    private void stepLog(Level level, String fmt, @Nullable Throwable cause, Object... args) {
+    @FormatMethod
+    private void stepLog(
+        Level level, @Nullable Throwable cause, @FormatString String fmt, Object... args) {
       String msg = String.format(fmt, args);
       String toLog = String.format("%s (#%d %s)", msg, id, desc());
       logger.log(level, toLog, cause);
@@ -225,11 +254,21 @@ public class LocalSpawnRunner implements SpawnRunner {
       FileOutErr outErr = context.getFileOutErr();
       String actionType = spawn.getResourceOwner().getMnemonic();
       if (localExecutionOptions.allowedLocalAction != null
-          && !localExecutionOptions.allowedLocalAction.matcher(actionType).matches()) {
+          && !localExecutionOptions
+              .allowedLocalAction
+              .regexPattern()
+              .matcher(actionType)
+              .matches()) {
         setState(State.PERMANENT_ERROR);
-        outErr.getErrorStream().write(
-            ("Action type " + actionType + " is not allowed to run locally due to regex filter: "
-                + localExecutionOptions.allowedLocalAction + "\n").getBytes(UTF_8));
+        outErr
+            .getErrorStream()
+            .write(
+                ("Action type "
+                        + actionType
+                        + " is not allowed to run locally due to regex filter: "
+                        + localExecutionOptions.allowedLocalAction.regexPattern()
+                        + "\n")
+                    .getBytes(UTF_8));
         return new SpawnResult.Builder()
             .setRunnerName(getName())
             .setStatus(Status.EXECUTION_DENIED)
@@ -264,69 +303,67 @@ public class LocalSpawnRunner implements SpawnRunner {
       Path tmpDir = createActionTemp(execRoot);
       Path statisticsPath = null;
       try {
-        Command cmd;
-        OutputStream stdOut;
-        OutputStream stdErr;
         Path commandTmpDir = tmpDir.getRelative("work");
         commandTmpDir.createDirectory();
         Map<String, String> environment =
             localEnvProvider.rewriteLocalEnv(
-                spawn.getEnvironment(), execRoot, commandTmpDir.getPathString());
+                spawn.getEnvironment(), binTools, commandTmpDir.getPathString());
+
+        SubprocessBuilder subprocessBuilder = new SubprocessBuilder();
+        subprocessBuilder.setWorkingDirectory(execRoot.getPathFile());
+        subprocessBuilder.setStdout(outErr.getOutputPath().getPathFile());
+        subprocessBuilder.setStderr(outErr.getErrorPath().getPathFile());
+        subprocessBuilder.setEnv(environment);
+        List<String> args;
         if (useProcessWrapper) {
           // If the process wrapper is enabled, we use its timeout feature, which first interrupts
           // the subprocess and only kills it after a grace period so that the subprocess can output
-          // a stack trace, test log or similar, which is incredibly helpful for debugging. The
-          // process wrapper also supports output file redirection, so we don't need to stream the
-          // output through this process.
-          stdOut = ByteStreams.nullOutputStream();
-          stdErr = ByteStreams.nullOutputStream();
+          // a stack trace, test log or similar, which is incredibly helpful for debugging.
           ProcessWrapperUtil.CommandLineBuilder commandLineBuilder =
-              ProcessWrapperUtil.commandLineBuilder(processWrapper, spawn.getArguments())
-                  .setStdoutPath(getPathOrDevNull(outErr.getOutputPath()))
-                  .setStderrPath(getPathOrDevNull(outErr.getErrorPath()))
+              ProcessWrapperUtil.commandLineBuilder(
+                      processWrapper.getPathString(), spawn.getArguments())
                   .setTimeout(context.getTimeout())
                   .setKillDelay(Duration.ofSeconds(localExecutionOptions.localSigkillGraceSeconds));
           if (localExecutionOptions.collectLocalExecutionStatistics) {
             statisticsPath = tmpDir.getRelative("stats.out");
             commandLineBuilder.setStatisticsPath(statisticsPath);
           }
-          List<String> cmdLine = commandLineBuilder.build();
-          cmd =
-              new Command(
-                  cmdLine.toArray(new String[0]),
-                  environment,
-                  execRoot.getPathFile());
+          args = commandLineBuilder.build();
         } else {
-          stdOut = outErr.getOutputStream();
-          stdErr = outErr.getErrorStream();
-          cmd =
-              new Command(
-                  spawn.getArguments().toArray(new String[0]),
-                  environment,
-                  execRoot.getPathFile(),
-                  context.getTimeout());
+          subprocessBuilder.setTimeoutMillis(context.getTimeout().toMillis());
+          args = spawn.getArguments();
         }
+        // SubprocessBuilder does not accept relative paths for the first argument, even though
+        // Command does. We sometimes get relative paths here, so we need to handle it.
+        File argv0 = new File(args.get(0));
+        if (!argv0.isAbsolute() && argv0.getParent() != null) {
+          args = new ArrayList<>(args);
+          args.set(0, new File(execRoot.getPathFile(), args.get(0)).getAbsolutePath());
+        }
+        subprocessBuilder.setArgv(args);
 
         long startTime = System.currentTimeMillis();
-        CommandResult commandResult = null;
-        try {
-          commandResult = cmd.execute(stdOut, stdErr);
-          if (Thread.currentThread().isInterrupted()) {
-            throw new InterruptedException();
+        TerminationStatus terminationStatus;
+        try (SilentCloseable c =
+            Profiler.instance().profile(
+                ProfilerTask.PROCESS_TIME, spawn.getResourceOwner().getMnemonic())) {
+          Subprocess subprocess = subprocessBuilder.start();
+          subprocess.getOutputStream().close();
+          try {
+            subprocess.waitFor();
+            terminationStatus =
+                new TerminationStatus(subprocess.exitValue(), subprocess.timedout());
+          } catch (InterruptedException e) {
+            subprocess.destroy();
+            throw e;
           }
-        } catch (AbnormalTerminationException e) {
-          if (Thread.currentThread().isInterrupted()) {
-            throw new InterruptedException();
-          }
-          commandResult = e.getResult();
-        } catch (CommandException e) {
-          // At the time this comment was written, this must be a ExecFailedException encapsulating
-          // an IOException from the underlying Subprocess.Factory.
+        } catch (IOException e) {
           String msg = e.getMessage() == null ? e.getClass().getName() : e.getMessage();
           setState(State.PERMANENT_ERROR);
           outErr
               .getErrorStream()
-              .write(("Action failed to execute: " + msg + "\n").getBytes(UTF_8));
+              .write(
+                  ("Action failed to execute: java.io.IOException: " + msg + "\n").getBytes(UTF_8));
           outErr.getErrorStream().flush();
           return new SpawnResult.Builder()
               .setRunnerName(getName())
@@ -339,12 +376,9 @@ public class LocalSpawnRunner implements SpawnRunner {
         // TODO(b/62588075): Calculate wall time inside commands instead?
         Duration wallTime = Duration.ofMillis(System.currentTimeMillis() - startTime);
         boolean wasTimeout =
-            commandResult.getTerminationStatus().timedOut()
+            terminationStatus.timedOut()
                 || (useProcessWrapper && wasTimeout(context.getTimeout(), wallTime));
-        int exitCode =
-            wasTimeout
-                ? POSIX_TIMEOUT_EXIT_CODE
-                : commandResult.getTerminationStatus().getRawExitCode();
+        int exitCode = wasTimeout ? POSIX_TIMEOUT_EXIT_CODE : terminationStatus.getRawExitCode();
         Status status =
             wasTimeout
                 ? Status.TIMEOUT
@@ -377,22 +411,17 @@ public class LocalSpawnRunner implements SpawnRunner {
         // File deletion tends to be slow on Windows, so deleting this tree may take several
         // seconds. Delete it after having measured the wallTime.
         try {
-          FileSystemUtils.deleteTree(tmpDir);
+          tmpDir.deleteTree();
         } catch (IOException ignored) {
           // We can't handle this exception in any meaningful way, nor should we, but let's log it.
           stepLog(
               WARNING,
-              String.format(
-                  "failed to delete temp directory '%s'; this might indicate that the action "
-                      + "created subprocesses that didn't terminate and hold files open in that "
-                      + "directory",
-                  tmpDir));
+              "failed to delete temp directory '%s'; this might indicate that the action "
+                  + "created subprocesses that didn't terminate and hold files open in that "
+                  + "directory",
+              tmpDir);
         }
       }
-    }
-
-    private Path getPathOrDevNull(Path path) {
-      return path == null ? execRoot.getRelative("/dev/null") : path;
     }
 
     private boolean wasTimeout(Duration timeout, Duration wallTime) {

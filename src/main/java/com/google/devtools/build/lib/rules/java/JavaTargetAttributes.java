@@ -20,7 +20,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.BuildConfiguration.StrictDepsMode;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
@@ -36,21 +36,18 @@ import java.util.Set;
 import javax.annotation.Nullable;
 
 /**
- * An object that captures the temporary state we need to pass around while
- * the initialization hook for a java rule is running.
+ * An object that captures the temporary state we need to pass around while the initialization hook
+ * for a java rule is running.
  */
 public class JavaTargetAttributes {
 
   private static void checkJar(Artifact classPathEntry) {
     if (!JavaSemantics.JAR.matches(classPathEntry.getFilename())) {
-      throw new IllegalArgumentException(
-          "not a jar file: " + classPathEntry.prettyPrint());
+      throw new IllegalArgumentException("not a jar file: " + classPathEntry.prettyPrint());
     }
   }
 
-  /**
-   * A builder class for JavaTargetAttributes.
-   */
+  /** A builder class for JavaTargetAttributes. */
   public static class Builder {
 
     // The order of source files is important, and there must not be duplicates.
@@ -60,8 +57,7 @@ public class JavaTargetAttributes {
     // stuck with Set.
     private final Set<Artifact> sourceFiles = new LinkedHashSet<>();
 
-    private final NestedSetBuilder<Artifact> runtimeClassPath =
-        NestedSetBuilder.naiveLinkOrder();
+    private final NestedSetBuilder<Artifact> runtimeClassPath = NestedSetBuilder.naiveLinkOrder();
 
     private final NestedSetBuilder<Artifact> compileTimeClassPath =
         NestedSetBuilder.naiveLinkOrder();
@@ -82,16 +78,16 @@ public class JavaTargetAttributes {
 
     private final Set<Artifact> additionalOutputs = new LinkedHashSet<>();
 
-    private BuildConfiguration.StrictDepsMode strictJavaDeps =
-        BuildConfiguration.StrictDepsMode.OFF;
+    /** @see {@link #setStrictJavaDeps}. */
+    private StrictDepsMode strictJavaDeps = StrictDepsMode.ERROR;
+
     private final NestedSetBuilder<Artifact> directJars = NestedSetBuilder.naiveLinkOrder();
     private final NestedSetBuilder<Artifact> compileTimeDependencyArtifacts =
         NestedSetBuilder.stableOrder();
     private Label targetLabel;
     @Nullable private String injectingRuleKind;
 
-    private final NestedSetBuilder<Artifact> excludedArtifacts =
-        NestedSetBuilder.naiveLinkOrder();
+    private final NestedSetBuilder<Artifact> excludedArtifacts = NestedSetBuilder.naiveLinkOrder();
 
     private boolean built = false;
 
@@ -196,9 +192,7 @@ public class JavaTargetAttributes {
       return this;
     }
 
-    /**
-     * Sets the sourcepath to be passed to the Java compiler.
-     */
+    /** Sets the sourcepath to be passed to the Java compiler. */
     public Builder setSourcePath(List<Artifact> artifacts) {
       Preconditions.checkArgument(!built);
       Preconditions.checkArgument(sourcePath.isEmpty());
@@ -213,12 +207,14 @@ public class JavaTargetAttributes {
     }
 
     /**
-     * Controls how strict the javac compiler will be in checking correct use of
-     * direct dependencies.
+     * Controls how strict the javac compiler will be in checking correct use of direct
+     * dependencies.
+     *
+     * <p>Defaults to {@link StrictDepsMode#ERROR}.
      *
      * @param strictDeps one of WARN, ERROR or OFF
      */
-    public Builder setStrictJavaDeps(BuildConfiguration.StrictDepsMode strictDeps) {
+    public Builder setStrictJavaDeps(StrictDepsMode strictDeps) {
       Preconditions.checkArgument(!built);
       strictJavaDeps = strictDeps;
       return this;
@@ -315,9 +311,7 @@ public class JavaTargetAttributes {
       return this;
     }
 
-    /**
-     * Adds additional outputs to this target's compile action.
-     */
+    /** Adds additional outputs to this target's compile action. */
     public Builder addAdditionalOutputs(Iterable<Artifact> outputs) {
       Preconditions.checkArgument(!built);
       Iterables.addAll(additionalOutputs, outputs);
@@ -419,10 +413,10 @@ public class JavaTargetAttributes {
   private final NestedSet<Artifact> directJars;
   private final NestedSet<Artifact> compileTimeDependencyArtifacts;
   private final Label targetLabel;
-  @Nullable private String injectingRuleKind;
+  @Nullable private final String injectingRuleKind;
 
   private final NestedSet<Artifact> excludedArtifacts;
-  private final BuildConfiguration.StrictDepsMode strictJavaDeps;
+  private final StrictDepsMode strictJavaDeps;
 
   /** Constructor of JavaTargetAttributes. */
   private JavaTargetAttributes(
@@ -444,7 +438,7 @@ public class JavaTargetAttributes {
       Label targetLabel,
       @Nullable String injectingRuleKind,
       NestedSetBuilder<Artifact> excludedArtifacts,
-      BuildConfiguration.StrictDepsMode strictJavaDeps) {
+      StrictDepsMode strictJavaDeps) {
     this.sourceFiles = ImmutableSet.copyOf(sourceFiles);
     this.runtimeClassPath = runtimeClassPath.build();
     this.directJars = directJars;
@@ -478,7 +472,7 @@ public class JavaTargetAttributes {
     return compileTimeDependencyArtifacts;
   }
 
-  public List<Artifact> getSourceJars() {
+  public ImmutableList<Artifact> getSourceJars() {
     return sourceJars;
   }
 
@@ -509,7 +503,7 @@ public class JavaTargetAttributes {
   /**
    * Returns the artifacts needed on the runtime classpath of this target.
    *
-   * See also {@link #getRuntimeClassPathForArchive()}.
+   * <p>See also {@link #getRuntimeClassPathForArchive()}.
    */
   public NestedSet<Artifact> getRuntimeClassPath() {
     return runtimeClassPath;
@@ -526,25 +520,8 @@ public class JavaTargetAttributes {
     if (getExcludedArtifacts().isEmpty()) {
       return runtimeClasspath;
     } else {
-      return Iterables.filter(runtimeClasspath,
-          Predicates.not(Predicates.in(getExcludedArtifacts().toSet())));
-    }
-  }
-
-  /**
-   * Adds the classpath artifacts needed in a deploy jar for this target to the passed nested set.
-   *
-   * <p>This excludes the artifacts made available by jars in the deployment environment.
-   */
-  public void addRuntimeClassPathForArchiveToNestedSet(NestedSetBuilder<Artifact> builder) {
-    NestedSet<Artifact> runtimeClasspath = getRuntimeClassPath();
-
-    if (getExcludedArtifacts().isEmpty()) {
-      builder.addTransitive(runtimeClasspath);
-    } else {
-      builder.addAll(
-          Iterables.filter(
-              runtimeClasspath, Predicates.not(Predicates.in(getExcludedArtifacts().toSet()))));
+      return Iterables.filter(
+          runtimeClasspath, Predicates.not(Predicates.in(getExcludedArtifacts().toSet())));
     }
   }
 
@@ -596,7 +573,7 @@ public class JavaTargetAttributes {
     return injectingRuleKind;
   }
 
-  public BuildConfiguration.StrictDepsMode getStrictJavaDeps() {
+  public StrictDepsMode getStrictJavaDeps() {
     return strictJavaDeps;
   }
 }

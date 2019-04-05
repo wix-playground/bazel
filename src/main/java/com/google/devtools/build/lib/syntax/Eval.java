@@ -17,7 +17,6 @@ package com.google.devtools.build.lib.syntax;
 import com.google.common.collect.ImmutableList;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.function.Function;
 
 /**
@@ -121,7 +120,7 @@ public class Eval {
       throw new EvalException(node.getLocation(), "Keyword-only argument is forbidden.");
     }
 
-    env.update(
+    env.updateAndExport(
         node.getIdentifier().getName(),
         new UserDefinedFunction(
             node.getIdentifier().getName(),
@@ -145,12 +144,12 @@ public class Eval {
   }
 
   void execLoad(LoadStatement node) throws EvalException, InterruptedException {
-    for (Map.Entry<Identifier, String> entry : node.getSymbolMap().entrySet()) {
+    for (LoadStatement.Binding binding : node.getBindings()) {
       try {
-        Identifier name = entry.getKey();
-        Identifier declared = Identifier.of(entry.getValue());
+        Identifier name = binding.getLocalName();
+        Identifier declared = binding.getOriginalName();
 
-        if (declared.isPrivate()) {
+        if (declared.isPrivate() && !node.mayLoadInternalSymbols()) {
           throw new EvalException(
               node.getLocation(),
               "symbol '" + declared.getName() + "' is private and cannot be imported.");

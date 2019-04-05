@@ -51,7 +51,8 @@ import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslProvider;
 import io.netty.handler.stream.ChunkedWriteHandler;
-import io.netty.handler.timeout.ReadTimeoutHandler;
+import io.netty.handler.timeout.ReadTimeoutException;
+import io.netty.handler.timeout.WriteTimeoutException;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.Promise;
 import io.netty.util.internal.PlatformDependent;
@@ -65,6 +66,7 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.net.URI;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -99,14 +101,14 @@ import javax.net.ssl.SSLEngine;
  * <p>The implementation currently does not support transfer encoding chunked.
  */
 public final class HttpBlobStore implements SimpleBlobStore {
-
   private static final Pattern INVALID_TOKEN_ERROR =
       Pattern.compile("\\s*error\\s*=\\s*\"?invalid_token\"?");
 
   private final EventLoopGroup eventLoop;
   private final ChannelPool channelPool;
   private final URI uri;
-  private final int timeoutMillis;
+  private final int timeoutSeconds;
+  private final boolean useTls;
 
   private final Object closeLock = new Object();
 
@@ -121,45 +123,60 @@ public final class HttpBlobStore implements SimpleBlobStore {
   @GuardedBy("credentialsLock")
   private long lastRefreshTime;
 
-  public static HttpBlobStore create(URI uri, int timeoutMillis,
-      int remoteMaxConnections, @Nullable final Credentials creds)
+  public static HttpBlobStore create(
+      URI uri, int timeoutSeconds, int remoteMaxConnections, @Nullable final Credentials creds)
       throws Exception {
     return new HttpBlobStore(
         NioEventLoopGroup::new,
         NioSocketChannel.class,
-        uri, timeoutMillis, remoteMaxConnections, creds,
+        uri,
+        timeoutSeconds,
+        remoteMaxConnections,
+        creds,
         null);
   }
 
   public static HttpBlobStore create(
       DomainSocketAddress domainSocketAddress,
-      URI uri, int timeoutMillis, int remoteMaxConnections, @Nullable final Credentials creds)
+      URI uri,
+      int timeoutSeconds,
+      int remoteMaxConnections,
+      @Nullable final Credentials creds)
       throws Exception {
 
-      if (KQueue.isAvailable()) {
-        return new HttpBlobStore(
-            KQueueEventLoopGroup::new,
-            KQueueDomainSocketChannel.class,
-            uri, timeoutMillis, remoteMaxConnections, creds,
-            domainSocketAddress);
-      } else if (Epoll.isAvailable()) {
-        return new HttpBlobStore(
-            EpollEventLoopGroup::new,
-            EpollDomainSocketChannel.class,
-            uri, timeoutMillis, remoteMaxConnections, creds,
-            domainSocketAddress);
-      } else {
-        throw new Exception("Unix domain sockets are unsupported on this platform");
-      }
+    if (KQueue.isAvailable()) {
+      return new HttpBlobStore(
+          KQueueEventLoopGroup::new,
+          KQueueDomainSocketChannel.class,
+          uri,
+          timeoutSeconds,
+          remoteMaxConnections,
+          creds,
+          domainSocketAddress);
+    } else if (Epoll.isAvailable()) {
+      return new HttpBlobStore(
+          EpollEventLoopGroup::new,
+          EpollDomainSocketChannel.class,
+          uri,
+          timeoutSeconds,
+          remoteMaxConnections,
+          creds,
+          domainSocketAddress);
+    } else {
+      throw new Exception("Unix domain sockets are unsupported on this platform");
+    }
   }
 
   private HttpBlobStore(
       Function<Integer, EventLoopGroup> newEventLoopGroup,
       Class<? extends Channel> channelClass,
-      URI uri, int timeoutMillis, int remoteMaxConnections, @Nullable final Credentials creds,
+      URI uri,
+      int timeoutSeconds,
+      int remoteMaxConnections,
+      @Nullable final Credentials creds,
       @Nullable SocketAddress socketAddress)
       throws Exception {
-    boolean useTls = uri.getScheme().equals("https");
+    useTls = uri.getScheme().equals("https");
     if (uri.getPort() == -1) {
       int port = useTls ? 443 : 80;
       uri =
@@ -186,12 +203,13 @@ public final class HttpBlobStore implements SimpleBlobStore {
     } else {
       sslCtx = null;
     }
-
+    final int port = uri.getPort();
+    final String hostname = uri.getHost();
     this.eventLoop = newEventLoopGroup.apply(2);
     Bootstrap clientBootstrap =
         new Bootstrap()
             .channel(channelClass)
-            .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, timeoutMillis)
+            .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 1000 * timeoutSeconds)
             .group(eventLoop)
             .remoteAddress(socketAddress);
 
@@ -207,7 +225,7 @@ public final class HttpBlobStore implements SimpleBlobStore {
           public void channelCreated(Channel ch) {
             ChannelPipeline p = ch.pipeline();
             if (sslCtx != null) {
-              SSLEngine engine = sslCtx.newEngine(ch.alloc());
+              SSLEngine engine = sslCtx.newEngine(ch.alloc(), hostname, port);
               engine.setUseClientMode(true);
               p.addFirst("ssl-handler", new SslHandler(engine));
             }
@@ -219,7 +237,7 @@ public final class HttpBlobStore implements SimpleBlobStore {
       channelPool = new SimpleChannelPool(clientBootstrap, channelPoolHandler);
     }
     this.creds = creds;
-    this.timeoutMillis = timeoutMillis;
+    this.timeoutSeconds = timeoutSeconds;
   }
 
   @SuppressWarnings("FutureReturnValueIgnored")
@@ -237,6 +255,16 @@ public final class HttpBlobStore implements SimpleBlobStore {
               try {
                 Channel ch = channelAcquired.getNow();
                 ChannelPipeline p = ch.pipeline();
+
+                if (!isChannelPipelineEmpty(p)) {
+                  channelReady.setFailure(
+                      new IllegalStateException("Channel pipeline is not empty."));
+                  return;
+                }
+
+                p.addFirst(
+                    "timeout-handler",
+                    new IdleTimeoutHandler(timeoutSeconds, WriteTimeoutException.INSTANCE));
                 p.addLast(new HttpResponseDecoder());
                 // The 10KiB limit was chosen at random. We only expect HTTP servers to respond with
                 // an error message in the body and that should always be less than 10KiB.
@@ -247,7 +275,16 @@ public final class HttpBlobStore implements SimpleBlobStore {
                   p.addLast(new HttpUploadHandler(creds));
                 }
 
-                channelReady.setSuccess(ch);
+                if (!ch.eventLoop().inEventLoop()) {
+                  // If addLast is called outside an event loop, then it doesn't complete until the
+                  // event loop is run again. In that case, a message sent to the last handler gets
+                  // delivered to the last non-pending handler, which will most likely end up
+                  // throwing UnsupportedMessageTypeException. Therefore, we only complete the
+                  // promise in the event loop.
+                  ch.eventLoop().execute(() -> channelReady.setSuccess(ch));
+                } else {
+                  channelReady.setSuccess(ch);
+                }
               } catch (Throwable t) {
                 channelReady.setFailure(t);
               }
@@ -264,11 +301,19 @@ public final class HttpBlobStore implements SimpleBlobStore {
   @SuppressWarnings("FutureReturnValueIgnored")
   private void releaseUploadChannel(Channel ch) {
     if (ch.isOpen()) {
-      ch.pipeline().remove(HttpResponseDecoder.class);
-      ch.pipeline().remove(HttpObjectAggregator.class);
-      ch.pipeline().remove(HttpRequestEncoder.class);
-      ch.pipeline().remove(ChunkedWriteHandler.class);
-      ch.pipeline().remove(HttpUploadHandler.class);
+      try {
+        ch.pipeline().remove(IdleTimeoutHandler.class);
+        ch.pipeline().remove(HttpResponseDecoder.class);
+        ch.pipeline().remove(HttpObjectAggregator.class);
+        ch.pipeline().remove(HttpRequestEncoder.class);
+        ch.pipeline().remove(ChunkedWriteHandler.class);
+        ch.pipeline().remove(HttpUploadHandler.class);
+      } catch (NoSuchElementException e) {
+        // If the channel is in the process of closing but not yet closed, some handlers could have
+        // been removed and would cause NoSuchElement exceptions to be thrown. Because handlers are
+        // removed in reverse-order, if we get a NoSuchElement exception, the following handlers
+        // should have been removed.
+      }
     }
     channelPool.release(ch);
   }
@@ -288,14 +333,30 @@ public final class HttpBlobStore implements SimpleBlobStore {
               try {
                 Channel ch = channelAcquired.getNow();
                 ChannelPipeline p = ch.pipeline();
-                ch.pipeline()
-                    .addFirst("read-timeout-handler", new ReadTimeoutHandler(timeoutMillis));
+
+                if (!isChannelPipelineEmpty(p)) {
+                  channelReady.setFailure(
+                      new IllegalStateException("Channel pipeline is not empty."));
+                  return;
+                }
+                p.addFirst(
+                    "timeout-handler",
+                    new IdleTimeoutHandler(timeoutSeconds, ReadTimeoutException.INSTANCE));
                 p.addLast(new HttpClientCodec());
                 synchronized (credentialsLock) {
                   p.addLast(new HttpDownloadHandler(creds));
                 }
 
-                channelReady.setSuccess(ch);
+                if (!ch.eventLoop().inEventLoop()) {
+                  // If addLast is called outside an event loop, then it doesn't complete until the
+                  // event loop is run again. In that case, a message sent to the last handler gets
+                  // delivered to the last non-pending handler, which will most likely end up
+                  // throwing UnsupportedMessageTypeException. Therefore, we only complete the
+                  // promise in the event loop.
+                  ch.eventLoop().execute(() -> channelReady.setSuccess(ch));
+                } else {
+                  channelReady.setSuccess(ch);
+                }
               } catch (Throwable t) {
                 channelReady.setFailure(t);
               }
@@ -309,11 +370,25 @@ public final class HttpBlobStore implements SimpleBlobStore {
     if (ch.isOpen()) {
       // The channel might have been closed due to an error, in which case its pipeline
       // has already been cleared. Closed channels can't be reused.
-      ch.pipeline().remove(ReadTimeoutHandler.class);
-      ch.pipeline().remove(HttpClientCodec.class);
-      ch.pipeline().remove(HttpDownloadHandler.class);
+      try {
+        ch.pipeline().remove(IdleTimeoutHandler.class);
+        ch.pipeline().remove(HttpClientCodec.class);
+        ch.pipeline().remove(HttpDownloadHandler.class);
+      } catch (NoSuchElementException e) {
+        // If the channel is in the process of closing but not yet closed, some handlers could have
+        // been removed and would cause NoSuchElement exceptions to be thrown. Because handlers are
+        // removed in reverse-order, if we get a NoSuchElement exception, the following handlers
+        // should have been removed.
+      }
     }
     channelPool.release(ch);
+  }
+
+  private boolean isChannelPipelineEmpty(ChannelPipeline pipeline) {
+    return (pipeline.first() == null)
+        || (useTls
+            && "ssl-handler".equals(pipeline.firstContext().name())
+            && pipeline.first() == pipeline.last());
   }
 
   @Override

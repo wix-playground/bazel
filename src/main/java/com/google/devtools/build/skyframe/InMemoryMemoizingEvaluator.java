@@ -21,8 +21,8 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+import com.google.devtools.build.lib.concurrent.AbstractQueueVisitor;
 import com.google.devtools.build.lib.events.Event;
-import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.SilentCloseable;
 import com.google.devtools.build.skyframe.Differencer.Diff;
@@ -151,11 +151,7 @@ public final class InMemoryMemoizingEvaluator implements MemoizingEvaluator {
 
   @Override
   public <T extends SkyValue> EvaluationResult<T> evaluate(
-      Iterable<? extends SkyKey> roots,
-      Version version,
-      boolean keepGoing,
-      int numThreads,
-      ExtendedEventHandler eventHandler)
+      Iterable<? extends SkyKey> roots, Version version, EvaluationContext evaluationContext)
       throws InterruptedException {
     // NOTE: Performance critical code. See bug "Null build performance parity".
     IntVersion intVersion = (IntVersion) version;
@@ -184,21 +180,28 @@ public final class InMemoryMemoizingEvaluator implements MemoizingEvaluator {
         injectValues(intVersion);
       }
 
-      ParallelEvaluator evaluator =
-          new ParallelEvaluator(
-              graph,
-              intVersion,
-              skyFunctions,
-              eventHandler,
-              emittedEventState,
-              eventFilter,
-              ErrorInfoManager.UseChildErrorInfoIfNecessary.INSTANCE,
-              keepGoing,
-              numThreads,
-              progressReceiver,
-              graphInconsistencyReceiver);
       EvaluationResult<T> result;
       try (SilentCloseable c = Profiler.instance().profile("ParallelEvaluator.eval")) {
+        ParallelEvaluator evaluator =
+            new ParallelEvaluator(
+                graph,
+                version,
+                skyFunctions,
+                evaluationContext.getEventHandler(),
+                emittedEventState,
+                eventFilter,
+                ErrorInfoManager.UseChildErrorInfoIfNecessary.INSTANCE,
+                evaluationContext.getKeepGoing(),
+                progressReceiver,
+                graphInconsistencyReceiver,
+                evaluationContext
+                    .getExecutorServiceSupplier()
+                    .orElse(
+                        () ->
+                            AbstractQueueVisitor.createExecutorService(
+                                evaluationContext.getParallelism(), "skyframe-evaluator")),
+                new SimpleCycleDetector(),
+                EvaluationVersionBehavior.GRAPH_VERSION);
         result = evaluator.eval(roots);
       }
       return EvaluationResult.<T>builder()
@@ -223,26 +226,32 @@ public final class InMemoryMemoizingEvaluator implements MemoizingEvaluator {
       SkyValue newValue = entry.getValue();
       NodeEntry prevEntry = graph.get(null, Reason.OTHER, key);
       if (prevEntry != null && prevEntry.isDone()) {
-        try {
-          Iterable<SkyKey> directDeps = prevEntry.getDirectDeps();
-          if (Iterables.isEmpty(directDeps)) {
-            if (newValue.equals(prevEntry.getValue())
-                && !valuesToDirty.contains(key)
-                && !valuesToDelete.contains(key)) {
+        if (keepEdges) {
+          try {
+            Iterable<SkyKey> directDeps = prevEntry.getDirectDeps();
+            if (Iterables.isEmpty(directDeps)) {
+              if (newValue.equals(prevEntry.getValue())
+                  && !valuesToDirty.contains(key)
+                  && !valuesToDelete.contains(key)) {
+                it.remove();
+              }
+            } else {
+              // Rare situation of an injected dep that depends on another node. Usually the dep is
+              // the error transience node. When working with external repositories, it can also be
+              // an external workspace file. Don't bother injecting it, just invalidate it.
+              // We'll wastefully evaluate the node freshly during evaluation, but this happens very
+              // rarely.
+              valuesToDirty.add(key);
               it.remove();
             }
-          } else {
-            // Rare situation of an injected dep that depends on another node. Usually the dep is
-            // the error transience node. When working with external repositories, it can also be an
-            // external workspace file. Don't bother injecting it, just invalidate it.
-            // We'll wastefully evaluate the node freshly during evaluation, but this happens very
-            // rarely.
-            valuesToDirty.add(key);
-            it.remove();
+          } catch (InterruptedException e) {
+            throw new IllegalStateException(
+                "InMemoryGraph does not throw: " + entry + ", " + prevEntry, e);
           }
-        } catch (InterruptedException e) {
-          throw new IllegalStateException(
-              "InMemoryGraph does not throw: " + entry + ", " + prevEntry, e);
+        } else {
+          // No incrementality. Just delete the old value from the graph. The new value is about to
+          // be injected.
+          graph.remove(key);
         }
       }
     }
@@ -287,8 +296,8 @@ public final class InMemoryMemoizingEvaluator implements MemoizingEvaluator {
   }
 
   @Override
-  public Map<SkyKey, ? extends NodeEntry> getGraphMap() {
-    return graph.getAllValuesMutable();
+  public Iterable<? extends Map.Entry<SkyKey, ? extends NodeEntry>> getGraphEntries() {
+    return graph.getAllValuesMutable().entrySet();
   }
 
   @Override

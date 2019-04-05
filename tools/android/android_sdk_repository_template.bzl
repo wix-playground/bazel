@@ -101,6 +101,7 @@ def create_android_sdk_rules(
                     "platforms/android-%d/optional/android.test.mock.jar" % api_level,
                     "platforms/android-%d/optional/android.test.runner.jar" % api_level,
                 ],
+                neverlink = 1,
             )
 
         native.android_sdk(
@@ -291,7 +292,7 @@ def create_system_images_filegroups(system_image_dirs):
     system_images = [
         (tag, str(api), arch)
         for tag in ["android", "google"]
-        for api in [10] + range(15, 20) + range(21, 29)
+        for api in [10] + list(range(15, 20)) + list(range(21, 29))
         for arch in ("x86", "arm")
     ]
     tv_images = [

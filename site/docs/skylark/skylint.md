@@ -5,9 +5,10 @@ title: Skylint
 
 # Skylint
 
-[Style guide](https://docs.bazel.build/versions/master/skylark/bzl-style.html)
+This document explains how to use Skylint, a Starlark linter.
 
-This document explains how to use Skylint, the Skylark linter.
+Skylint is no longer maintained. It will be replaced soon with [Buildifier](
+https://github.com/bazelbuild/buildtools/blob/master/buildifier/README.md#linter).
 
 <!-- [TOC] -->
 
@@ -100,7 +101,7 @@ See [documentation on depsets](depsets.md) for background and examples of use.
 <a name="bad-docstring-format"></a>
 Categories: [missing-module-docstring] [missing-function-docstring] [bad-docstring-format]
 
-The Skylark conventions for docstrings are similar to the [the Python
+The Starlark conventions for docstrings are similar to the [the Python
 conventions](https://google.github.io/styleguide/pyguide.html?showone=Comments#Comments).
 Docstrings are triple-quoted string literals and the closing quotes have to
 appear on their own line unless the docstring is only one line long.
@@ -176,7 +177,7 @@ order):
 <a name="confusing-name"></a>
 Categories: [name-with-wrong-case] [provider-name-suffix] [confusing-name]
 
-**TL;DR**: Most Skylark identifiers should be `snake_case`, not `camelCase`.
+**TL;DR**: Most Starlark identifiers should be `snake_case`, not `camelCase`.
 
 In detail, the rules are the following:
 
@@ -188,9 +189,8 @@ In detail, the rules are the following:
     *   **Constants** that are **immutable**. The variable must not be rebound
         and also its deep contents must not be changed.
 *   Use **`UpperCamelCase`** for:
-    *   **Providers**. Currently, the analyzer only allows assignments of the
-        form `FooBarInfo = provider(...)`. In addition provider names have to
-        end in the **suffix `Info`**.
+    *   **Providers**. In addition, provider names have to end in the
+        **suffix `Info`**.
 *   **Never** use:
     *   **Builtin names** like `print`, `True`. Rebinding these is too
         confusing.
@@ -365,8 +365,7 @@ This way, the name is still re-exported but doesn't generate a warning.
 
 ### Deprecated API
 
-See [documentation](https://docs.bazel.build/versions/master/skylark/lib/ctx.html)
-for more information.
+See [documentation](../skylark/lib/ctx.html) for more information.
 
 ### Miscellaneous lints
 

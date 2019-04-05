@@ -20,6 +20,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Sets;
+import com.google.common.graph.ImmutableGraph;
 import com.google.common.util.concurrent.Callables;
 import com.google.devtools.build.lib.actions.AbstractAction;
 import com.google.devtools.build.lib.actions.Action;
@@ -256,6 +257,11 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
       env.getValue(actionDepKey);
       return null;
     }
+
+    @Override
+    public ImmutableGraph<SkyKey> getSkyframeDependenciesForRewinding(SkyKey self) {
+      throw new UnsupportedOperationException();
+    }
   }
 
   private interface ExecutionCountingActionFactory {
@@ -413,7 +419,7 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
         executor,
         null,
         null,
-        false,
+        options,
         null,
         null);
 
@@ -442,7 +448,7 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
         executor,
         null,
         null,
-        false,
+        options,
         null,
         null);
 
@@ -541,7 +547,17 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
             : ExpectActionIs.DIRTIED_BUT_VERIFIED_CLEAN);
   }
 
-  public void testActionWithNonChangingInput(final boolean unconditionalExecution)
+  @Test
+  public void testCacheCheckingActionWithNonChangingInput() throws Exception {
+    assertActionWithNonChangingInput(/* unconditionalExecution */ false);
+  }
+
+  @Test
+  public void testCacheBypassingActionWithNonChangingInput() throws Exception {
+    assertActionWithNonChangingInput(/* unconditionalExecution */ true);
+  }
+
+  private void assertActionWithNonChangingInput(final boolean unconditionalExecution)
       throws Exception {
     // Assert that a simple, non-skyframe-aware action is executed only once
     // if its input does not change at all between builds.
@@ -804,6 +820,11 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
           }
 
           @Override
+          public ImmutableGraph<SkyKey> getSkyframeDependenciesForRewinding(SkyKey self) {
+            throw new UnsupportedOperationException();
+          }
+
+          @Override
           public ActionResult execute(ActionExecutionContext actionExecutionContext)
               throws ActionExecutionException, InterruptedException {
             writeOutput(readInput(), "gen2");
@@ -822,7 +843,7 @@ public class SkyframeAwareActionTest extends TimestampBuilderTestCase {
         executor,
         null,
         null,
-        false,
+        options,
         null,
         null);
   }

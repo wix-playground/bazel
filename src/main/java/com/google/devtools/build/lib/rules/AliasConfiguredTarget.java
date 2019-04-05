@@ -21,15 +21,17 @@ import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.FileProvider;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
+import com.google.devtools.build.lib.analysis.config.ConfigMatchingProvider;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.packages.Info;
+import com.google.devtools.build.lib.packages.InfoInterface;
 import com.google.devtools.build.lib.packages.Provider;
 import com.google.devtools.build.lib.skyframe.BuildConfigurationValue;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkPrinter;
+import com.google.devtools.build.lib.skylarkinterface.StarlarkContext;
 import com.google.devtools.build.lib.syntax.ClassObject;
 import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
@@ -49,6 +51,7 @@ public final class AliasConfiguredTarget implements ConfiguredTarget, ClassObjec
   private final ConfiguredTarget actual;
   private final ImmutableMap<Class<? extends TransitiveInfoProvider>, TransitiveInfoProvider>
       overrides;
+  private final ImmutableMap<Label, ConfigMatchingProvider> configConditions;
 
   public AliasConfiguredTarget(
       RuleContext ruleContext,
@@ -58,7 +61,8 @@ public final class AliasConfiguredTarget implements ConfiguredTarget, ClassObjec
         ruleContext.getLabel(),
         Preconditions.checkNotNull(ruleContext.getConfigurationKey()),
         Preconditions.checkNotNull(actual),
-        Preconditions.checkNotNull(overrides));
+        Preconditions.checkNotNull(overrides),
+        ruleContext.getConfigConditions());
   }
 
   @AutoCodec.Instantiator
@@ -67,11 +71,17 @@ public final class AliasConfiguredTarget implements ConfiguredTarget, ClassObjec
       Label label,
       BuildConfigurationValue.Key configurationKey,
       ConfiguredTarget actual,
-      ImmutableMap<Class<? extends TransitiveInfoProvider>, TransitiveInfoProvider> overrides) {
+      ImmutableMap<Class<? extends TransitiveInfoProvider>, TransitiveInfoProvider> overrides,
+      ImmutableMap<Label, ConfigMatchingProvider> configConditions) {
     this.label = label;
     this.configurationKey = configurationKey;
     this.actual = actual;
     this.overrides = overrides;
+    this.configConditions = configConditions;
+  }
+
+  public ImmutableMap<Label, ConfigMatchingProvider> getConfigConditions() {
+    return configConditions;
   }
 
   @Override
@@ -95,18 +105,19 @@ public final class AliasConfiguredTarget implements ConfiguredTarget, ClassObjec
 
   @Nullable
   @Override
-  public Info get(Provider.Key providerKey) {
+  public InfoInterface get(Provider.Key providerKey) {
     return actual.get(providerKey);
   }
 
   @Override
-  public Object getIndex(Object key, Location loc) throws EvalException {
-    return actual.getIndex(key, loc);
+  public Object getIndex(Object key, Location loc, StarlarkContext context) throws EvalException {
+    return actual.getIndex(key, loc, context);
   }
 
   @Override
-  public boolean containsKey(Object key, Location loc) throws EvalException {
-    return actual.containsKey(key, loc);
+  public boolean containsKey(Object key, Location loc, StarlarkContext context)
+      throws EvalException {
+    return actual.containsKey(key, loc, context);
   }
 
   @Override

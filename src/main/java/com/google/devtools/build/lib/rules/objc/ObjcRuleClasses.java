@@ -53,6 +53,7 @@ import com.google.devtools.build.lib.rules.apple.AppleToolchain;
 import com.google.devtools.build.lib.rules.apple.AppleToolchain.RequiresXcodeConfigRule;
 import com.google.devtools.build.lib.rules.apple.XcodeConfigProvider;
 import com.google.devtools.build.lib.rules.cpp.CcToolchain;
+import com.google.devtools.build.lib.rules.cpp.CcToolchainProvider;
 import com.google.devtools.build.lib.rules.cpp.CppModuleMap.UmbrellaHeaderStrategy;
 import com.google.devtools.build.lib.rules.cpp.CppRuleClasses;
 import com.google.devtools.build.lib.rules.proto.ProtoSourceFileBlacklist;
@@ -106,10 +107,8 @@ public class ObjcRuleClasses {
     return new IntermediateArtifacts(ruleContext, /*archiveFileNameSuffix=*/ "");
   }
 
-  /**
-   * Attribute name for a dummy target in a child configuration.
-   */
-  static final String CHILD_CONFIG_ATTR = ":child_configuration_dummy";
+  /** Attribute name for a dummy target in a child configuration. */
+  static final String CHILD_CONFIG_ATTR = "$child_configuration_dummy";
 
   /**
    * Returns a {@link IntermediateArtifacts} to be used to compile and link the ObjC source files
@@ -453,7 +452,11 @@ public class ObjcRuleClasses {
           .add(
               attr("bundles", LABEL_LIST)
                   .direct_compile_time_input()
-                  .allowedRuleClasses("objc_bundle", "objc_bundle_library")
+                  // TODO(b/33618143): The native resource attributes are deprecated and will be
+                  // removed in the near future. By adding the new rule names here, the migration
+                  // path towards the end state is easier, as it will allow breaking the migration
+                  // into smaller chunks.
+                  .allowedRuleClasses("apple_bundle_import", "apple_resource_bundle")
                   .allowedFileTypes())
           .build();
     }
@@ -475,12 +478,21 @@ public class ObjcRuleClasses {
     @Override
     public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
       return builder
-          .add(attr("$plmerge", LABEL).cfg(HostTransition.INSTANCE).exec()
-              .value(env.getToolsLabel("//tools/objc:plmerge")))
-          .add(attr("$actoolwrapper", LABEL).cfg(HostTransition.INSTANCE).exec()
-              .value(env.getToolsLabel("//tools/objc:actoolwrapper")))
-          .add(attr("$ibtoolwrapper", LABEL).cfg(HostTransition.INSTANCE).exec()
-              .value(env.getToolsLabel("//tools/objc:ibtoolwrapper")))
+          .add(
+              attr("$plmerge", LABEL)
+                  .cfg(HostTransition.createFactory())
+                  .exec()
+                  .value(env.getToolsLabel("//tools/objc:plmerge")))
+          .add(
+              attr("$actoolwrapper", LABEL)
+                  .cfg(HostTransition.createFactory())
+                  .exec()
+                  .value(env.getToolsLabel("//tools/objc:actoolwrapper")))
+          .add(
+              attr("$ibtoolwrapper", LABEL)
+                  .cfg(HostTransition.createFactory())
+                  .exec()
+                  .value(env.getToolsLabel("//tools/objc:ibtoolwrapper")))
           .build();
     }
     @Override
@@ -501,6 +513,7 @@ public class ObjcRuleClasses {
       return builder
           .add(
               attr(CcToolchain.CC_TOOLCHAIN_DEFAULT_ATTRIBUTE_NAME, LABEL)
+                  .mandatoryProviders(CcToolchainProvider.PROVIDER.id())
                   .value(CppRuleClasses.ccToolchainAttribute(env)))
           .add(
               attr(CcToolchain.CC_TOOLCHAIN_TYPE_ATTRIBUTE_NAME, NODEP_LABEL)
@@ -659,7 +672,7 @@ public class ObjcRuleClasses {
           .add(
               attr("runtime_deps", LABEL_LIST)
                   .direct_compile_time_input()
-                  .allowedRuleClasses("objc_framework")
+                  .mandatoryProviders(AppleDynamicFrameworkInfo.SKYLARK_CONSTRUCTOR.id())
                   .allowedFileTypes())
           /* <!-- #BLAZE_RULE($objc_compiling_rule).ATTRIBUTE(defines) -->
           Extra <code>-D</code> flags to pass to the compiler. They should be in
@@ -684,6 +697,11 @@ public class ObjcRuleClasses {
           provided module map to the compiler.
           <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
           .add(attr("module_map", LABEL).allowedFileTypes(FileType.of(".modulemap")))
+          /* <!-- #BLAZE_RULE($objc_compiling_rule).ATTRIBUTE(module_name) -->
+          Sets the module name for this target. By default the module name is the target path with
+          all special symbols replaced by _, e.g. //foo/baz:bar can be imported as foo_baz_bar.
+          <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
+          .add(attr("module_name", STRING))
           /* Provides the label for header_scanner tool that is used to scan inclusions for ObjC
           sources and provide a list of required headers via a .header_list file.
 
@@ -693,7 +711,7 @@ public class ObjcRuleClasses {
           least one artifact this attribute cannot be #exec(). */
           .add(
               attr(HEADER_SCANNER_ATTRIBUTE, LABEL)
-                  .cfg(HostTransition.INSTANCE)
+                  .cfg(HostTransition.createFactory())
                   .value(
                       LabelLateBoundDefault.fromTargetConfiguration(
                           ObjcConfiguration.class,
@@ -728,8 +746,11 @@ public class ObjcRuleClasses {
     @Override
     public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
       return builder
-          .add(attr(LIBTOOL_ATTRIBUTE, LABEL).cfg(HostTransition.INSTANCE).exec()
-              .value(env.getToolsLabel("//tools/objc:libtool")))
+          .add(
+              attr(LIBTOOL_ATTRIBUTE, LABEL)
+                  .cfg(HostTransition.createFactory())
+                  .exec()
+                  .value(env.getToolsLabel("//tools/objc:libtool")))
           .build();
     }
     @Override
@@ -802,7 +823,7 @@ public class ObjcRuleClasses {
           .add(
               attr("$j2objc_dead_code_pruner", LABEL)
                   .allowedFileTypes(FileType.of(".py"))
-                  .cfg(HostTransition.INSTANCE)
+                  .cfg(HostTransition.createFactory())
                   .exec()
                   .singleArtifact()
                   .value(env.getToolsLabel("//tools/objc:j2objc_dead_code_pruner")))
@@ -810,13 +831,13 @@ public class ObjcRuleClasses {
           .add(
               attr(PROTO_COMPILER_ATTR, LABEL)
                   .allowedFileTypes(FileType.of(".sh"))
-                  .cfg(HostTransition.INSTANCE)
+                  .cfg(HostTransition.createFactory())
                   .singleArtifact()
                   .value(env.getToolsLabel("//tools/objc:protobuf_compiler_wrapper")))
           .add(
               attr(PROTO_COMPILER_SUPPORT_ATTR, LABEL)
                   .legacyAllowAnyFileType()
-                  .cfg(HostTransition.INSTANCE)
+                  .cfg(HostTransition.createFactory())
                   .value(env.getToolsLabel("//tools/objc:protobuf_compiler_support")))
           .add(
               ProtoSourceFileBlacklist.blacklistFilegroupAttribute(
@@ -934,7 +955,7 @@ public class ObjcRuleClasses {
           .add(
               attr(CHILD_CONFIG_ATTR, LABEL)
                   .cfg(splitTransitionProvider)
-                  .value(CppRuleClasses.ccToolchainAttribute(env)))
+                  .value(env.getToolsLabel("//tools/cpp:current_cc_toolchain")))
           /* <!-- #BLAZE_RULE($apple_multiarch_rule).ATTRIBUTE(deps) -->
           The list of targets that are linked together to form the final binary.
           <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
@@ -953,7 +974,7 @@ public class ObjcRuleClasses {
           .add(
               attr("$j2objc_dead_code_pruner", LABEL)
                   .allowedFileTypes(FileType.of(".py"))
-                  .cfg(HostTransition.INSTANCE)
+                  .cfg(HostTransition.createFactory())
                   .exec()
                   .singleArtifact()
                   .value(env.getToolsLabel("//tools/objc:j2objc_dead_code_pruner")))
@@ -961,13 +982,13 @@ public class ObjcRuleClasses {
           .add(
               attr(PROTO_COMPILER_ATTR, LABEL)
                   .allowedFileTypes(FileType.of(".sh"))
-                  .cfg(HostTransition.INSTANCE)
+                  .cfg(HostTransition.createFactory())
                   .singleArtifact()
                   .value(env.getToolsLabel("//tools/objc:protobuf_compiler_wrapper")))
           .add(
               attr(PROTO_COMPILER_SUPPORT_ATTR, LABEL)
                   .legacyAllowAnyFileType()
-                  .cfg(HostTransition.INSTANCE)
+                  .cfg(HostTransition.createFactory())
                   .value(env.getToolsLabel("//tools/objc:protobuf_compiler_support")))
           .add(
               ProtoSourceFileBlacklist.blacklistFilegroupAttribute(
@@ -1102,7 +1123,7 @@ public class ObjcRuleClasses {
                   .value(ImmutableList.of(TargetDeviceFamily.IPHONE.getNameInRule())))
           .add(
               attr("$momcwrapper", LABEL)
-                  .cfg(HostTransition.INSTANCE)
+                  .cfg(HostTransition.createFactory())
                   .exec()
                   .value(env.getToolsLabel("//tools/objc:momcwrapper")))
           .build();
@@ -1129,8 +1150,11 @@ public class ObjcRuleClasses {
     @Override
     public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
       return builder
-          .add(attr("$xcrunwrapper", LABEL).cfg(HostTransition.INSTANCE).exec()
-              .value(env.getToolsLabel("//tools/objc:xcrunwrapper")))
+          .add(
+              attr("$xcrunwrapper", LABEL)
+                  .cfg(HostTransition.createFactory())
+                  .exec()
+                  .value(env.getToolsLabel("//tools/objc:xcrunwrapper")))
           .build();
     }
     @Override

@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.remote;
 
+import build.bazel.remote.execution.v2.Digest;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableSet;
@@ -25,7 +26,6 @@ import com.google.devtools.build.lib.buildeventstream.BuildEventArtifactUploader
 import com.google.devtools.build.lib.buildeventstream.PathConverter;
 import com.google.devtools.build.lib.remote.util.DigestUtil;
 import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.remoteexecution.v1test.Digest;
 import io.grpc.Context;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -41,8 +41,7 @@ import javax.annotation.Nullable;
  */
 class ByteStreamBuildEventArtifactUploader implements BuildEventArtifactUploader {
 
-  private final ListeningExecutorService uploadExecutor =
-      MoreExecutors.listeningDecorator(Executors.newCachedThreadPool());
+  private final ListeningExecutorService uploadExecutor;
   private final Context ctx;
   private final ByteStreamUploader uploader;
   private final String remoteServerInstanceName;
@@ -50,8 +49,11 @@ class ByteStreamBuildEventArtifactUploader implements BuildEventArtifactUploader
   private final AtomicBoolean shutdown = new AtomicBoolean();
 
   ByteStreamBuildEventArtifactUploader(
-      ByteStreamUploader uploader, String remoteServerName, Context ctx,
-      @Nullable String remoteInstanceName) {
+      ByteStreamUploader uploader,
+      String remoteServerName,
+      Context ctx,
+      @Nullable String remoteInstanceName,
+      int maxUploadThreads) {
     this.uploader = Preconditions.checkNotNull(uploader);
     String remoteServerInstanceName = Preconditions.checkNotNull(remoteServerName);
     if (!Strings.isNullOrEmpty(remoteInstanceName)) {
@@ -59,6 +61,10 @@ class ByteStreamBuildEventArtifactUploader implements BuildEventArtifactUploader
     }
     this.ctx = ctx;
     this.remoteServerInstanceName = remoteServerInstanceName;
+    // Limit the maximum threads number to 1000 (chosen arbitrarily)
+    this.uploadExecutor =
+        MoreExecutors.listeningDecorator(
+            Executors.newFixedThreadPool(Math.min(maxUploadThreads, 1000)));
   }
 
   @Override

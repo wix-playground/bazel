@@ -35,7 +35,7 @@ public final class CppFileTypes {
       FileTypeSet.of(CppFileTypes.CPP_SOURCE, CppFileTypes.C_SOURCE);
 
   public static final FileType CPP_HEADER =
-      FileType.of(".h", ".hh", ".hpp", ".ipp", ".hxx", ".inc");
+      FileType.of(".h", ".hh", ".hpp", ".ipp", ".hxx", ".inc", ".inl", ".H");
   public static final FileType PCH = FileType.of(".pch");
   public static final FileTypeSet OBJC_HEADER = FileTypeSet.of(CPP_HEADER, PCH);
   
@@ -180,18 +180,14 @@ public final class CppFileTypes {
       };
 
   public static final FileType COVERAGE_NOTES = FileType.of(".gcno");
-  public static final FileType COVERAGE_DATA = FileType.of(".gcda");
-  public static final FileType COVERAGE_DATA_IMPORTS = FileType.of(".gcda.imports");
   public static final FileType GCC_AUTO_PROFILE = FileType.of(".afdo");
   public static final FileType XBINARY_PROFILE = FileType.of(".xfdo");
   public static final FileType LLVM_PROFILE = FileType.of(".profdata");
   public static final FileType LLVM_PROFILE_RAW = FileType.of(".profraw");
+  public static final FileType LLVM_PROFILE_ZIP = FileType.of(".zip");
 
   public static final FileType CPP_MODULE_MAP = FileType.of(".cppmap");
   public static final FileType CPP_MODULE = FileType.of(".pcm");
-
-  // Output of the dwp tool
-  public static final FileType DEBUG_INFO_PACKAGE = FileType.of(".dwp");
 
   public static final FileType CLIF_INPUT_PROTO = FileType.of(".ipb");
   public static final FileType CLIF_OUTPUT_PROTO = FileType.of(".opb");
@@ -213,11 +209,6 @@ public final class CppFileTypes {
       };
 
   public static final boolean headerDiscoveryRequired(Artifact source) {
-    // Sources from TreeArtifacts and TreeFileArtifacts will not generate dotd file.
-    if (source.isTreeArtifact() || source.hasParent()) {
-      return false;
-    }
-
     String fileName = source.getFilename();
     return !ASSEMBLER.matches(fileName)
         && !PIC_ASSEMBLER.matches(fileName)

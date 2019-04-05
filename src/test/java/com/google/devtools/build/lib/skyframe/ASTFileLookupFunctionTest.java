@@ -45,12 +45,12 @@ public class ASTFileLookupFunctionTest extends BuildViewTestCase {
     boolean statThrowsIoException;
 
     @Override
-    public FileStatus stat(Path path, boolean followSymlinks) throws IOException {
+    public FileStatus statIfFound(Path path, boolean followSymlinks) throws IOException {
       if (statThrowsIoException
           && path.asFragment().getPathString().equals("/workspace/" + preludeLabelRelativePath)) {
         throw new IOException("bork");
       }
-      return super.stat(path, followSymlinks);
+      return super.statIfFound(path, followSymlinks);
     }
   }
 
@@ -164,6 +164,6 @@ public class ASTFileLookupFunctionTest extends BuildViewTestCase {
     assertThat(result.get(skyKey).getErrorMsg())
     .contains("Unable to load package for '@a_remote_repo//remote_pkg:BUILD'");
     assertThat(result.get(skyKey).getErrorMsg())
-        .contains("The repository could not be resolved");
+        .contains("The repository '@a_remote_repo' could not be resolved");
   }
 }

@@ -16,11 +16,14 @@ package com.google.devtools.build.lib.analysis.test;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.google.devtools.build.lib.actions.AbstractAction;
+import com.google.devtools.build.lib.actions.ActionContinuationOrResult;
 import com.google.devtools.build.lib.actions.ActionExecutionContext;
 import com.google.devtools.build.lib.actions.ActionExecutionException;
 import com.google.devtools.build.lib.actions.ActionInput;
@@ -31,14 +34,23 @@ import com.google.devtools.build.lib.actions.ActionResult;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactPathResolver;
 import com.google.devtools.build.lib.actions.CommandLineExpansionException;
+import com.google.devtools.build.lib.actions.EnvironmentalExecException;
 import com.google.devtools.build.lib.actions.ExecException;
+import com.google.devtools.build.lib.actions.ExecutionInfoSpecifier;
 import com.google.devtools.build.lib.actions.NotifyOnActionCacheHit;
+import com.google.devtools.build.lib.actions.SpawnResult;
+import com.google.devtools.build.lib.actions.TestExecException;
 import com.google.devtools.build.lib.analysis.RunfilesSupplierImpl;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.RunUnder;
+import com.google.devtools.build.lib.analysis.test.TestActionContext.FailedAttemptResult;
+import com.google.devtools.build.lib.analysis.test.TestActionContext.TestAttemptContinuation;
+import com.google.devtools.build.lib.analysis.test.TestActionContext.TestAttemptResult;
+import com.google.devtools.build.lib.analysis.test.TestActionContext.TestRunnerSpawn;
 import com.google.devtools.build.lib.buildeventstream.TestFileNameConstants;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.ImmutableIterable;
+import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.util.LoggingUtil;
 import com.google.devtools.build.lib.util.Pair;
@@ -64,13 +76,15 @@ import javax.annotation.Nullable;
  * and test status artifacts.
  */
 // Not final so that we can mock it in tests.
-public class TestRunnerAction extends AbstractAction implements NotifyOnActionCacheHit {
+public class TestRunnerAction extends AbstractAction
+    implements NotifyOnActionCacheHit, ExecutionInfoSpecifier {
   public static final PathFragment COVERAGE_TMP_ROOT = PathFragment.create("_coverage");
 
   // Used for selecting subset of testcase / testmethods.
   private static final String TEST_BRIDGE_TEST_FILTER_ENV = "TESTBRIDGE_TEST_ONLY";
 
   private static final String GUID = "cc41f9d0-47a6-11e7-8726-eb6ce83a8cc8";
+  public static final String MNEMONIC = "TestRunner";
 
   private final Artifact testSetupScript;
   private final Artifact testXmlGeneratorScript;
@@ -101,6 +115,9 @@ public class TestRunnerAction extends AbstractAction implements NotifyOnActionCa
   private final int shardNum;
   private final int runNumber;
   private final String workspaceName;
+
+  // Takes the value of the `--windows_native_test_wrapper` flag.
+  private final boolean useTestWrapperInsteadOfTestSetupSh;
 
   // Mutable state related to test caching. Lazily initialized: null indicates unknown.
   private Boolean unconditionalExecution;
@@ -136,6 +153,7 @@ public class TestRunnerAction extends AbstractAction implements NotifyOnActionCa
       ActionOwner owner,
       Iterable<Artifact> inputs,
       Artifact testSetupScript, // Must be in inputs
+      boolean useTestWrapperInsteadOfTestSetupSh,
       Artifact testXmlGeneratorScript, // Must be in inputs
       @Nullable Artifact collectCoverageScript, // Must be in inputs, if not null
       Artifact testLog,
@@ -159,6 +177,7 @@ public class TestRunnerAction extends AbstractAction implements NotifyOnActionCa
         configuration.getActionEnvironment());
     Preconditions.checkState((collectCoverageScript == null) == (coverageArtifact == null));
     this.testSetupScript = testSetupScript;
+    this.useTestWrapperInsteadOfTestSetupSh = useTestWrapperInsteadOfTestSetupSh;
     this.testXmlGeneratorScript = testXmlGeneratorScript;
     this.collectCoverageScript = collectCoverageScript;
     this.configuration = Preconditions.checkNotNull(configuration);
@@ -255,6 +274,9 @@ public class TestRunnerAction extends AbstractAction implements NotifyOnActionCa
     }
     if (execRoot != null) {
       ResolvedPaths resolvedPaths = resolve(execRoot);
+      if (resolvedPaths.getTestStderr().exists()) {
+        builder.add(Pair.of(TestFileNameConstants.TEST_STDERR, resolvedPaths.getTestStderr()));
+      }
       if (resolvedPaths.getXmlOutputPath().exists()) {
         builder.add(Pair.of(TestFileNameConstants.TEST_XML, resolvedPaths.getXmlOutputPath()));
       }
@@ -404,7 +426,7 @@ public class TestRunnerAction extends AbstractAction implements NotifyOnActionCa
     unconditionalExecution = null;
     try {
       executor
-          .getEventBus()
+          .getEventHandler()
           .post(
               executor
                   .getContext(TestActionContext.class)
@@ -439,9 +461,9 @@ public class TestRunnerAction extends AbstractAction implements NotifyOnActionCa
     execRoot.getRelative(unusedRunfilesLogPath).delete();
     // Note that splitLogsPath points to a file inside the splitLogsDir so
     // it's not necessary to delete it explicitly.
-    FileSystemUtils.deleteTree(execRoot.getRelative(splitLogsDir));
-    FileSystemUtils.deleteTree(execRoot.getRelative(undeclaredOutputsDir));
-    FileSystemUtils.deleteTree(execRoot.getRelative(undeclaredOutputsAnnotationsDir));
+    execRoot.getRelative(splitLogsDir).deleteTree();
+    execRoot.getRelative(undeclaredOutputsDir).deleteTree();
+    execRoot.getRelative(undeclaredOutputsAnnotationsDir).deleteTree();
     execRoot.getRelative(testStderr).delete();
     execRoot.getRelative(testExitSafe).delete();
     if (testShard != null) {
@@ -468,7 +490,7 @@ public class TestRunnerAction extends AbstractAction implements NotifyOnActionCa
       // entries, which prevent removing the directory.  As a workaround, code below will throw
       // IOException if it will fail to remove something inside testAttemptsDir, but will
       // silently suppress any exceptions when deleting testAttemptsDir itself.
-      FileSystemUtils.deleteTreesBelow(testAttemptsDir);
+      testAttemptsDir.deleteTreesBelow();
       try {
         testAttemptsDir.delete();
       } catch (IOException e) {
@@ -523,6 +545,11 @@ public class TestRunnerAction extends AbstractAction implements NotifyOnActionCa
     }
     env.put("XML_OUTPUT_FILE", getXmlOutputPath().getPathString());
 
+    if (!isEnableRunfiles()) {
+      // If runfiles are disabled, tell remote-runtest.sh/local-runtest.sh about that.
+      env.put("RUNFILES_MANIFEST_ONLY", "1");
+    }
+
     if (isCoverageMode()) {
       // Instruct remote-runtest.sh/local-runtest.sh not to cd into the runfiles directory.
       // TODO(ulfjack): Find a way to avoid setting this variable.
@@ -531,19 +558,9 @@ public class TestRunnerAction extends AbstractAction implements NotifyOnActionCa
       env.put("COVERAGE_MANIFEST", getCoverageManifest().getExecPathString());
       env.put("COVERAGE_DIR", getCoverageDirectory().getPathString());
       env.put("COVERAGE_OUTPUT_FILE", getCoverageData().getExecPathString());
-      // TODO(elenairina): Remove this after it reaches a blaze release.
-      if (configuration.isExperimentalJavaCoverage()) {
-        // This value ("released") tells lcov_merger whether it should use the old or the new
-        // java  coverage implementation. The meaning of "released" is that lcov_merger will receive
-        // this value only after blaze containing this change will be released.
-        env.put("NEW_JAVA_COVERAGE_IMPL", "released");
-      } else {
-        // This value ("True") should have told lcov_merger whether it should use the old or the new
-        // java  coverage implementation. Due to several failed attempts at submitting the new
-        // implementation, this value will be treated still as the old implementation. This
-        // environment variable must be set to a value recognized by lcov_merger.
-        env.put("NEW_JAVA_COVERAGE_IMPL", "True");
-      }
+      // TODO(elenairina): Remove this and its usage in lcov_merger. Note it requires syncing
+      // between the blaze release and the lcov_merger release.
+      env.put("NEW_JAVA_COVERAGE_IMPL", "released");
     }
   }
 
@@ -686,6 +703,11 @@ public class TestRunnerAction extends AbstractAction implements NotifyOnActionCa
     return testProperties;
   }
 
+  @Override
+  public Map<String, String> getExecutionInfo() {
+    return testProperties.getExecutionInfo();
+  }
+
   public TestTargetExecutionSettings getExecutionSettings() {
     return executionSettings;
   }
@@ -718,13 +740,61 @@ public class TestRunnerAction extends AbstractAction implements NotifyOnActionCa
   }
 
   @Override
+  public ActionContinuationOrResult beginExecution(ActionExecutionContext actionExecutionContext)
+      throws InterruptedException, ActionExecutionException {
+    TestActionContext testActionContext =
+        actionExecutionContext.getContext(TestActionContext.class);
+    return beginExecution(actionExecutionContext, testActionContext);
+  }
+
+  @VisibleForTesting
+  public ActionContinuationOrResult beginExecution(
+      ActionExecutionContext actionExecutionContext, TestActionContext testActionContext)
+      throws InterruptedException, ActionExecutionException {
+    try {
+      TestRunnerSpawn testRunnerSpawn =
+          testActionContext.createTestRunnerSpawn(this, actionExecutionContext);
+      TestAttemptContinuation beginContinuation =
+          new TestAttemptContinuation() {
+            @Nullable
+            @Override
+            public ListenableFuture<?> getFuture() {
+              return null;
+            }
+
+            @Override
+            public TestAttemptContinuation execute()
+                throws InterruptedException, IOException, ExecException {
+              return testRunnerSpawn.beginExecution();
+            }
+          };
+      RunAttemptsContinuation continuation =
+          new RunAttemptsContinuation(
+              testRunnerSpawn, beginContinuation, testActionContext.isTestKeepGoing());
+      return continuation.execute();
+    } catch (ExecException e) {
+      throw e.toActionExecutionException(this);
+    }
+  }
+
+  @Override
   public ActionResult execute(ActionExecutionContext actionExecutionContext)
       throws ActionExecutionException, InterruptedException {
     TestActionContext context = actionExecutionContext.getContext(TestActionContext.class);
+    return execute(actionExecutionContext, context);
+  }
+
+  @VisibleForTesting
+  public ActionResult execute(
+      ActionExecutionContext actionExecutionContext, TestActionContext testActionContext)
+      throws ActionExecutionException, InterruptedException {
     try {
-      return ActionResult.create(context.exec(this, actionExecutionContext));
-    } catch (ExecException e) {
-      throw e.toActionExecutionException(this);
+      ActionContinuationOrResult continuation =
+          beginExecution(actionExecutionContext, testActionContext);
+      while (!continuation.isDone()) {
+        continuation = continuation.execute();
+      }
+      return continuation.get();
     } finally {
       unconditionalExecution = null;
     }
@@ -732,7 +802,7 @@ public class TestRunnerAction extends AbstractAction implements NotifyOnActionCa
 
   @Override
   public String getMnemonic() {
-    return "TestRunner";
+    return MNEMONIC;
   }
 
   @Override
@@ -742,6 +812,10 @@ public class TestRunnerAction extends AbstractAction implements NotifyOnActionCa
 
   public Artifact getTestSetupScript() {
     return testSetupScript;
+  }
+
+  public boolean isUsingTestWrapperInsteadOfTestSetupScript() {
+    return useTestWrapperInsteadOfTestSetupSh;
   }
 
   public Artifact getTestXmlGeneratorScript() {
@@ -847,6 +921,142 @@ public class TestRunnerAction extends AbstractAction implements NotifyOnActionCa
     /** @return path to the optionally created XML output file created by the test. */
     public Path getXmlOutputPath() {
       return getPath(xmlOutputPath);
+    }
+
+    public Path getCoverageDataPath() {
+      return getPath(getCoverageData().getExecPath());
+    }
+  }
+
+  /** Implements test retries. */
+  private final class RunAttemptsContinuation extends ActionContinuationOrResult {
+    private final TestRunnerSpawn testRunnerSpawn;
+    private final TestAttemptContinuation testContinuation;
+    private final boolean keepGoing;
+    // Careful: We can only determine this value _after_ the first attempt is done, so we initially
+    // set it to 0, but then we need to make sure not to use this value.
+    private final int maxAttempts;
+    private final List<SpawnResult> spawnResults;
+    private final List<FailedAttemptResult> failedAttempts;
+
+    private RunAttemptsContinuation(
+        TestRunnerSpawn testRunnerSpawn,
+        TestAttemptContinuation testContinuation,
+        boolean keepGoing,
+        int maxAttempts,
+        List<SpawnResult> spawnResults,
+        List<FailedAttemptResult> failedAttempts) {
+      Preconditions.checkArgument(!testContinuation.isDone());
+      this.testRunnerSpawn = testRunnerSpawn;
+      this.testContinuation = testContinuation;
+      this.keepGoing = keepGoing;
+      this.maxAttempts = maxAttempts;
+      this.spawnResults = spawnResults;
+      this.failedAttempts = failedAttempts;
+    }
+
+    RunAttemptsContinuation(
+        TestRunnerSpawn testRunnerSpawn,
+        TestAttemptContinuation testContinuation,
+        boolean keepGoing) {
+      this(testRunnerSpawn, testContinuation, keepGoing, 0, new ArrayList<>(), new ArrayList<>());
+    }
+
+    @Nullable
+    @Override
+    public ListenableFuture<?> getFuture() {
+      return testContinuation.getFuture();
+    }
+
+    @Override
+    public ActionContinuationOrResult execute()
+        throws ActionExecutionException, InterruptedException {
+      try {
+        TestAttemptContinuation nextContinuation = testContinuation.execute();
+        if (!nextContinuation.isDone()) {
+          return new RunAttemptsContinuation(
+              testRunnerSpawn,
+              nextContinuation,
+              keepGoing,
+              maxAttempts,
+              spawnResults,
+              failedAttempts);
+        }
+
+        TestAttemptResult result = nextContinuation.get();
+        int actualMaxAttempts =
+            failedAttempts.isEmpty() ? testRunnerSpawn.getMaxAttempts(result) : maxAttempts;
+        Preconditions.checkState(actualMaxAttempts != 0);
+        return process(result, actualMaxAttempts);
+      } catch (ExecException e) {
+        throw e.toActionExecutionException(TestRunnerAction.this);
+      } catch (IOException e) {
+        // Print the stack trace, otherwise the unexpected I/O error is hard to diagnose.
+        // A stack trace could help with bugs like https://github.com/bazelbuild/bazel/issues/4924
+        testRunnerSpawn
+            .getActionExecutionContext()
+            .getEventHandler()
+            .handle(Event.error(Throwables.getStackTraceAsString(e)));
+        throw new EnvironmentalExecException("unexpected I/O exception", e)
+            .toActionExecutionException(TestRunnerAction.this);
+      }
+    }
+
+    private ActionContinuationOrResult process(TestAttemptResult result, int actualMaxAttempts)
+        throws ActionExecutionException, InterruptedException {
+      try {
+        spawnResults.addAll(result.spawnResults());
+        if (!result.hasPassed()) {
+          boolean runAnotherAttempt = failedAttempts.size() + 1 < actualMaxAttempts;
+          TestRunnerSpawn nextRunner;
+          if (runAnotherAttempt) {
+            nextRunner = testRunnerSpawn;
+          } else {
+            nextRunner = testRunnerSpawn.getFallbackRunner();
+            if (nextRunner != null) {
+              // We only support one level of fallback, in which case this gets doubled once. We
+              // don't support a different number of max attempts for the fallback strategy.
+              actualMaxAttempts = 2 * actualMaxAttempts;
+            }
+          }
+          if (nextRunner != null) {
+            failedAttempts.add(
+                testRunnerSpawn.finalizeFailedTestAttempt(result, failedAttempts.size() + 1));
+
+            TestAttemptContinuation nextContinuation = nextRunner.beginExecution();
+            if (nextContinuation.isDone()) {
+              // This avoids unnecessary creation of RunAttemptsContinuation objects, but does a
+              // recursive call in exchange. We don't allow more than 10 flaky attempts, so that
+              // should be fine.
+              return process(nextContinuation.get(), actualMaxAttempts);
+            }
+            return new RunAttemptsContinuation(
+                nextRunner,
+                nextContinuation,
+                keepGoing,
+                actualMaxAttempts,
+                spawnResults,
+                failedAttempts);
+          }
+        }
+        testRunnerSpawn.finalizeTest(result, failedAttempts);
+
+        if (!keepGoing && !result.hasPassed()) {
+          throw new TestExecException("Test failed: aborting");
+        }
+        return ActionContinuationOrResult.of(ActionResult.create(spawnResults));
+      } catch (ExecException e) {
+        throw e.toActionExecutionException(TestRunnerAction.this);
+      } catch (IOException e) {
+        // Print the stack trace, otherwise the unexpected I/O error is hard to diagnose.
+        // A stack trace could help with bugs like https://github.com/bazelbuild/bazel/issues/4924
+        testRunnerSpawn
+            .getActionExecutionContext()
+            .getEventHandler()
+            .handle(Event.error(Throwables.getStackTraceAsString(e)));
+        throw new EnvironmentalExecException("unexpected I/O exception", e)
+            .toActionExecutionException(TestRunnerAction.this);
+      }
     }
   }
 }

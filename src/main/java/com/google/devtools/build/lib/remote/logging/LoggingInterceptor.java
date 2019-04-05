@@ -14,17 +14,17 @@
 
 package com.google.devtools.build.lib.remote.logging;
 
+import build.bazel.remote.execution.v2.ActionCacheGrpc;
+import build.bazel.remote.execution.v2.CapabilitiesGrpc;
+import build.bazel.remote.execution.v2.ContentAddressableStorageGrpc;
+import build.bazel.remote.execution.v2.ExecutionGrpc;
+import build.bazel.remote.execution.v2.RequestMetadata;
 import com.google.bytestream.ByteStreamGrpc;
 import com.google.devtools.build.lib.clock.Clock;
 import com.google.devtools.build.lib.remote.logging.RemoteExecutionLog.LogEntry;
 import com.google.devtools.build.lib.remote.util.TracingMetadataUtils;
 import com.google.devtools.build.lib.util.io.AsynchronousFileOutputStream;
-import com.google.devtools.remoteexecution.v1test.ActionCacheGrpc;
-import com.google.devtools.remoteexecution.v1test.ContentAddressableStorageGrpc;
-import com.google.devtools.remoteexecution.v1test.ExecutionGrpc;
-import com.google.devtools.remoteexecution.v1test.RequestMetadata;
 import com.google.protobuf.Timestamp;
-import com.google.watcher.v1.WatcherGrpc;
 import io.grpc.CallOptions;
 import io.grpc.Channel;
 import io.grpc.ClientCall;
@@ -59,16 +59,20 @@ public class LoggingInterceptor implements ClientInterceptor {
       MethodDescriptor<ReqT, RespT> method) {
     if (method == ExecutionGrpc.getExecuteMethod()) {
       return new ExecuteHandler();
-    } else if (method == WatcherGrpc.getWatchMethod()) {
-      return new WatchHandler();
+    } else if (method == ExecutionGrpc.getWaitExecutionMethod()) {
+      return new WaitExecutionHandler();
     } else if (method == ActionCacheGrpc.getGetActionResultMethod()) {
       return new GetActionResultHandler();
+    } else if (method == ActionCacheGrpc.getUpdateActionResultMethod()) {
+      return new UpdateActionResultHandler();
     } else if (method == ContentAddressableStorageGrpc.getFindMissingBlobsMethod()) {
       return new FindMissingBlobsHandler();
     } else if (method == ByteStreamGrpc.getReadMethod()) {
       return new ReadHandler();
     } else if (method == ByteStreamGrpc.getWriteMethod()) {
       return new WriteHandler();
+    } else if (method == CapabilitiesGrpc.getGetCapabilitiesMethod()) {
+      return new GetCapabilitiesHandler();
     }
     return null;
   }

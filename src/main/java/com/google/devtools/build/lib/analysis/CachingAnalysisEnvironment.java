@@ -36,7 +36,7 @@ import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.skyframe.BuildInfoCollectionValue;
 import com.google.devtools.build.lib.skyframe.PrecomputedValue;
 import com.google.devtools.build.lib.skyframe.WorkspaceStatusValue;
-import com.google.devtools.build.lib.syntax.SkylarkSemantics;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.skyframe.SkyFunction;
 import java.io.PrintWriter;
@@ -50,7 +50,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
-import java.util.function.Consumer;
 import javax.annotation.Nullable;
 
 /**
@@ -69,6 +68,7 @@ public class CachingAnalysisEnvironment implements AnalysisEnvironment {
    */
   private final boolean isSystemEnv;
   private final boolean extendedSanityChecks;
+  private final boolean allowAnalysisFailures;
 
   private final ActionKeyContext actionKeyContext;
 
@@ -84,31 +84,29 @@ public class CachingAnalysisEnvironment implements AnalysisEnvironment {
    */
   final List<ActionAnalysisMetadata> actions = new ArrayList<>();
 
-  private Consumer<Artifact.SourceArtifact> sourceDependencyListener;
-
   public CachingAnalysisEnvironment(
       ArtifactFactory artifactFactory,
       ActionKeyContext actionKeyContext,
       ArtifactOwner owner,
       boolean isSystemEnv,
       boolean extendedSanityChecks,
+      boolean allowAnalysisFailures,
       ExtendedEventHandler errorEventListener,
-      SkyFunction.Environment env,
-      Consumer<Artifact.SourceArtifact> sourceDependencyListener) {
+      SkyFunction.Environment env) {
     this.artifactFactory = artifactFactory;
     this.actionKeyContext = actionKeyContext;
     this.owner = Preconditions.checkNotNull(owner);
     this.isSystemEnv = isSystemEnv;
     this.extendedSanityChecks = extendedSanityChecks;
+    this.allowAnalysisFailures = allowAnalysisFailures;
     this.errorEventListener = errorEventListener;
     this.skyframeEnv = env;
     middlemanFactory = new MiddlemanFactory(artifactFactory, this);
     artifacts = new HashMap<>();
-    this.sourceDependencyListener = sourceDependencyListener;
   }
 
   public void disable(Target target) {
-    if (!hasErrors()) {
+    if (!hasErrors() && !allowAnalysisFailures) {
       verifyGeneratedArtifactHaveActions(target);
     }
     artifacts = null;
@@ -310,8 +308,8 @@ public class CachingAnalysisEnvironment implements AnalysisEnvironment {
   }
 
   @Override
-  public SkylarkSemantics getSkylarkSemantics() throws InterruptedException {
-    return PrecomputedValue.SKYLARK_SEMANTICS.get(skyframeEnv);
+  public StarlarkSemantics getSkylarkSemantics() throws InterruptedException {
+    return PrecomputedValue.STARLARK_SEMANTICS.get(skyframeEnv);
   }
 
   @Override
@@ -342,9 +340,7 @@ public class CachingAnalysisEnvironment implements AnalysisEnvironment {
 
   @Override
   public ImmutableList<Artifact> getBuildInfo(
-      RuleContext ruleContext, BuildInfoKey key, BuildConfiguration config)
-      throws InterruptedException {
-    boolean stamp = AnalysisUtils.isStampingEnabled(ruleContext, config);
+      boolean stamp, BuildInfoKey key, BuildConfiguration config) throws InterruptedException {
     BuildInfoCollectionValue collectionValue =
         (BuildInfoCollectionValue) skyframeEnv.getValue(BuildInfoCollectionValue.key(key, config));
     if (collectionValue == null) {
@@ -357,10 +353,5 @@ public class CachingAnalysisEnvironment implements AnalysisEnvironment {
   @Override
   public ArtifactOwner getOwner() {
     return owner;
-  }
-
-  @Override
-  public void registerSourceDependency(Artifact.SourceArtifact source) {
-    sourceDependencyListener.accept(source);
   }
 }

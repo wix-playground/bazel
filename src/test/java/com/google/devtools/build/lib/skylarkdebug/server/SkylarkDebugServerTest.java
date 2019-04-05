@@ -155,7 +155,7 @@ public class SkylarkDebugServerTest {
                 SkylarkDebuggingProtos.PausedThread.newBuilder()
                     .setId(threadId)
                     .setName(threadName)
-                    .setPauseReason(PauseReason.ALL_THREADS_PAUSED)
+                    .setPauseReason(PauseReason.INITIALIZING)
                     .setLocation(expectedLocation)
                     .build()));
 
@@ -441,7 +441,7 @@ public class SkylarkDebugServerTest {
                 Scope.newBuilder()
                     .setName("global")
                     .addBinding(getValueProto("c", 3))
-                    .addBinding(getValueProto("fn", env.lookup("fn"))))
+                    .addBinding(getValueProto("fn", env.moduleLookup("fn"))))
             .build());
 
     assertFramesEqualIgnoringValueIdentifiers(
@@ -458,7 +458,7 @@ public class SkylarkDebugServerTest {
                     .setName("global")
                     .addBinding(getValueProto("a", 1))
                     .addBinding(getValueProto("c", 3))
-                    .addBinding(getValueProto("fn", env.lookup("fn"))))
+                    .addBinding(getValueProto("fn", env.moduleLookup("fn"))))
             .build());
   }
 

@@ -13,7 +13,6 @@
 // limitations under the License.
 package com.google.devtools.build.lib.packages;
 
-import com.google.common.annotations.VisibleForTesting;
 import com.google.devtools.build.lib.events.Location;
 import java.util.Arrays;
 import javax.annotation.Nullable;
@@ -84,15 +83,15 @@ public class AttributeContainer {
   }
 
   /**
-   * {@see #isAttributeValueExplicitlySpecified(String)}
+   * See {@link #isAttributeValueExplicitlySpecified(String)}.
    */
   public boolean isAttributeValueExplicitlySpecified(Attribute attribute) {
     return isAttributeValueExplicitlySpecified(attribute.getName());
   }
 
   /**
-   * Returns true iff the value of the specified attribute is explicitly set in the BUILD file.
-   * This returns true also if the value explicity specified in the BUILD file is the same as the
+   * Returns true iff the value of the specified attribute is explicitly set in the BUILD file. This
+   * returns true also if the value explicitly specified in the BUILD file is the same as the
    * attribute's default value. In addition, this method return false if the rule has no attribute
    * with the given name.
    */
@@ -217,11 +216,5 @@ public class AttributeContainer {
       attributeLocations = Arrays.copyOf(attributeLocations, attributeLocations.length + 2);
     }
     attributeLocations[locationIndex] = location;
-  }
-
-  @VisibleForTesting
-  void setAttributeLocation(Attribute attribute, Location location) {
-    Integer index = ruleClass.getAttributeIndex(attribute.getName());
-    setAttributeLocation(index, location);
   }
 }

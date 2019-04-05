@@ -255,8 +255,8 @@ public class SkylarkRepositoryIntegrationTest extends BuildViewTestCase {
       // This is expected
     }
     assertDoesNotContainEvent("cycle");
-    assertContainsEvent("Maybe repository 'foo' was defined later in your WORKSPACE file?");
-    assertContainsEvent("Failed to load Skylark extension '@foo//:def.bzl'.");
+    assertContainsEvent("repository 'foo' was defined too late in your WORKSPACE file");
+    assertContainsEvent("Failed to load Starlark extension '@foo//:def.bzl'.");
   }
 
   @Test
@@ -279,8 +279,8 @@ public class SkylarkRepositoryIntegrationTest extends BuildViewTestCase {
       // This is expected
     }
     assertDoesNotContainEvent("cycle");
-    assertContainsEvent("Maybe repository 'foo' was defined later in your WORKSPACE file?");
-    assertContainsEvent("Failed to load Skylark extension '@foo//:def.bzl'.");
+    assertContainsEvent("the repository 'foo' was defined too late in your WORKSPACE file");
+    assertContainsEvent("Failed to load Starlark extension '@foo//:def.bzl'.");
   }
 
   @Test
@@ -305,10 +305,9 @@ public class SkylarkRepositoryIntegrationTest extends BuildViewTestCase {
       assertThat(expected)
           .hasMessageThat()
           .contains(
-              "Failed to load Skylark extension "
+              "Failed to load Starlark extension "
                   + "'@git_repo//xyz:foo.bzl'.\n"
-                  + "It usually happens when the repository is not defined prior to being used.\n"
-                  + "Maybe repository 'git_repo' was defined later in your WORKSPACE file?");
+                  + "It usually happens when the repository is not defined prior to being used.\n");
     }
   }
 

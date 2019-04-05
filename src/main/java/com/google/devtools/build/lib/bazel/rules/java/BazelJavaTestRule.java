@@ -58,7 +58,7 @@ public final class BazelJavaTestRule implements RuleDefinition {
         // Primarily this is intended to help test changes to Proguard.
         .add(
             attr(":proguard", LABEL)
-                .cfg(HostTransition.INSTANCE)
+                .cfg(HostTransition.createFactory())
                 .value(JavaSemantics.PROGUARD)
                 .exec())
         .add(attr(":extra_proguard_specs", LABEL_LIST).value(JavaSemantics.EXTRA_PROGUARD_SPECS))
@@ -70,10 +70,10 @@ public final class BazelJavaTestRule implements RuleDefinition {
             attr("$lcov_merger", LABEL)
                 .value(
                     Label.parseAbsoluteUnchecked(
-                        "@bazel_tools//tools/test/LcovMerger/java/com/google/devtools/lcovmerger:Main")))
+                        "@bazel_tools//tools/test/CoverageOutputGenerator/java/com/google/devtools/coverageoutputgenerator:Main")))
         .add(
             attr("$jacocorunner", LABEL)
-                .value(Label.parseAbsoluteUnchecked("@bazel_tools//tools/jdk:JacocoCoverage")))
+                .value(env.getToolsLabel("//tools/jdk:JacocoCoverageRunner")))
         /* <!-- #BLAZE_RULE(java_test).ATTRIBUTE(test_class) -->
         The Java class to be loaded by the test runner.<br/>
         <p>
@@ -83,9 +83,11 @@ public final class BazelJavaTestRule implements RuleDefinition {
         </p>
         <p>
           This attribute specifies the name of a Java class to be run by
-          this test. It is rare to need to set this. If this argument is omitted, the Java class
-          whose name corresponds to the <code>name</code> of this
-          <code>java_test</code> rule will be used.
+          this test. It is rare to need to set this. If this argument is omitted,
+          it will be inferred using the target's <code>name</code> and its
+          source-root-relative path. If the test is located outside a known
+          source root, Bazel will report an error if <code>test_class</code>
+          is unset.
         </p>
         <p>
           For JUnit3, the test class needs to either be a subclass of

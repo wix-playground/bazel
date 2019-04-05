@@ -143,9 +143,38 @@ public class AnalysisFailureReportingTest extends AnalysisTestCase {
                 toId(
                     Iterables.getOnlyElement(result.getTopLevelTargetsWithConfigs())
                         .getConfiguration()),
-                "target '//bar:bar' is not visible from target '//foo:foo'. "
-                    + "Check the visibility declaration of the former target if you think the "
-                    + "dependency is legitimate"));
+                "in sh_library rule //foo:foo: target '//bar:bar' is not visible from target "
+                    + "'//foo:foo'. Check the visibility declaration of the former target if you "
+                    + "think the dependency is legitimate"));
+  }
+
+  @Test
+  public void testVisibilityErrorNoKeepGoing() throws Exception {
+    scratch.file("foo/BUILD",
+        "sh_library(name = 'foo', deps = ['//bar'])");
+    scratch.file("bar/BUILD",
+        "sh_library(name = 'bar', visibility = ['//visibility:private'])");
+
+    try {
+      update(eventBus, defaultFlags(), "//foo");
+    } catch (ViewCreationFailedException e) {
+      // Ignored; we check for the correct eventbus event below.
+    }
+
+    Label topLevel = Label.parseAbsoluteUnchecked("//foo");
+    BuildConfiguration expectedConfig =
+        Iterables.getOnlyElement(
+            skyframeExecutor
+                .getSkyframeBuildView()
+                .getBuildConfigurationCollection().getTargetConfigurations());
+    assertThat(collector.events.get(topLevel))
+        .containsExactly(
+            new AnalysisFailedCause(
+                Label.parseAbsolute("//foo", ImmutableMap.of()),
+                toId(expectedConfig),
+                "in sh_library rule //foo:foo: target '//bar:bar' is not visible from target "
+                    + "'//foo:foo'. Check the visibility declaration of the former target if you "
+                    + "think the dependency is legitimate"));
   }
 
   // TODO(ulfjack): Add more tests for

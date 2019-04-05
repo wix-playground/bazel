@@ -7,7 +7,7 @@ title: Installing Bazel
 
 See the instructions for installing Bazel on:
 
-*   [Ubuntu Linux (16.04 and 14.04)](install-ubuntu.md)
+*   [Ubuntu Linux](install-ubuntu.md)
 *   [Fedora 25, 26, 27, 28, and CentOS 7](install-redhat.md)
 *   [macOS](install-os-x.md)
 *   [Windows](install-windows.md)
@@ -19,7 +19,10 @@ See the instructions for installing Bazel on:
 *   [Scoop](https://github.com/lukesampson/scoop/blob/master/bucket/bazel.json)
 *   [Nixpkgs](https://github.com/NixOS/nixpkgs/blob/master/pkgs/development/tools/build-managers/bazel/default.nix)
 *   [Parabola](https://www.parabola.nu/packages/?q=bazel)
-*   [FreeBSD](Ports: https://www.freshports.org/devel/bazel)
+*   [FreeBSD](https://www.freshports.org/devel/bazel)
+
+## Community-Supported Architectures
+*   [ppc64le](https://oplab9.parqtec.unicamp.br/pub/ppc64el/bazel)
 
 
 For other platforms, you can try to [compile from source](install-compile-source.md).

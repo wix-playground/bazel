@@ -181,6 +181,8 @@ void SetDebugLog(bool enabled) {
   }
 }
 
+bool IsRunningWithinTest() { return ExistsEnv("TEST_TMPDIR"); }
+
 void WithEnvVars::SetEnvVars(const map<string, EnvVarValue>& vars) {
   for (const auto& var : vars) {
     switch (var.second.action) {

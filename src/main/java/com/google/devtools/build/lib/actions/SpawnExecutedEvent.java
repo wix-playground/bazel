@@ -14,29 +14,34 @@
 
 package com.google.devtools.build.lib.actions;
 
+import com.google.common.base.Preconditions;
+import com.google.devtools.build.lib.events.ExtendedEventHandler;
+
 /** This event is fired during the build, when a subprocess is executed. */
-public class SpawnExecutedEvent {
-  private final ActionAnalysisMetadata actionMetadata;
-  private final int exitCode;
+public class SpawnExecutedEvent implements ExtendedEventHandler.ProgressLike {
+  private final Spawn spawn;
   private final SpawnResult result;
 
   public SpawnExecutedEvent(
-      ActionAnalysisMetadata actionMetadata,
-      int exitCode,
+      Spawn spawn,
       SpawnResult result) {
-    this.actionMetadata = actionMetadata;
-    this.exitCode = exitCode;
-    this.result = result;
+    this.spawn = Preconditions.checkNotNull(spawn);
+    this.result = Preconditions.checkNotNull(result);
+  }
+
+  /** Returns the Spawn. */
+  public Spawn getSpawn() {
+    return spawn;
   }
 
   /** Returns the action. */
   public ActionAnalysisMetadata getActionMetadata() {
-    return actionMetadata;
+    return spawn.getResourceOwner();
   }
 
   /** Returns the action exit code. */
   public int getExitCode() {
-    return exitCode;
+    return result.exitCode();
   }
 
   /** Returns the distributor reply. */

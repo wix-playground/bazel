@@ -40,7 +40,10 @@ filegroup(
 
 filegroup(
     name = "workspace-file",
-    srcs = [":WORKSPACE", ":distdir.bzl"],
+    srcs = [
+        ":WORKSPACE",
+        ":distdir.bzl",
+    ],
     visibility = [
         "//src/test/shell/bazel:__subpackages__",
     ],
@@ -65,6 +68,11 @@ load("//tools/build_defs/pkg:pkg.bzl", "pkg_tar")
 pkg_tar(
     name = "bazel-srcs",
     srcs = [":srcs"],
+    remap_paths = {
+        # Rewrite paths coming from local repositories back into third_party.
+        "../googleapis": "third_party/googleapis",
+        "../remoteapis": "third_party/remoteapis",
+    },
     strip_prefix = ".",
     # Public but bazel-only visibility.
     visibility = ["//:__subpackages__"],
@@ -114,4 +122,20 @@ filegroup(
     name = "dummy_toolchain_reference",
     srcs = ["@bazel_toolchains//configs/debian8_clang/0.2.0/bazel_0.9.0:empty"],
     visibility = ["//visibility:public"],
+)
+
+platform(
+    name = "rbe_ubuntu1604_with_network_and_privileged",
+    parents = ["@bazel_toolchains//configs/ubuntu16_04_clang/latest:platform"],
+    remote_execution_properties = """
+        {PARENT_REMOTE_EXECUTION_PROPERTIES}
+        properties: {
+          name: "dockerNetwork"
+          value: "standard"
+        }
+        properties: {
+          name: "dockerPrivileged"
+          value: "true"
+        }
+        """,
 )

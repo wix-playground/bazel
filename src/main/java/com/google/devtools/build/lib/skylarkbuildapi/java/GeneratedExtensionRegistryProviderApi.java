@@ -33,7 +33,8 @@ import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
     category = SkylarkModuleCategory.PROVIDER)
 public interface GeneratedExtensionRegistryProviderApi<FileT extends FileApi> extends StructApi {
 
-  public static final String NAME = "GeneratedExtensionRegistryProvider";
+  /** The name of the provider for this info object. */
+  String NAME = "GeneratedExtensionRegistryProvider";
 
   @SkylarkCallable(name = "rule_label", structField = true, doc = "", documented = false)
   Label getGeneratingRuleLabel();
@@ -91,7 +92,9 @@ public interface GeneratedExtensionRegistryProviderApi<FileT extends FileApi> ex
               generic1 = FileApi.class),
         },
         selfCall = true)
-    @SkylarkConstructor(objectType = GeneratedExtensionRegistryProviderApi.class)
+    @SkylarkConstructor(
+        objectType = GeneratedExtensionRegistryProviderApi.class,
+        receiverNameForDoc = NAME)
     GeneratedExtensionRegistryProviderApi<FileT> create(
         Label generatingRuleLabel,
         boolean isLite,

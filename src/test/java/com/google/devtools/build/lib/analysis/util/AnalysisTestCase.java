@@ -13,9 +13,15 @@
 // limitations under the License.
 package com.google.devtools.build.lib.analysis.util;
 
+import static com.google.common.collect.ImmutableMap.toImmutableMap;
+import static com.google.common.collect.ImmutableMultiset.toImmutableMultiset;
+import static com.google.common.truth.Truth.assertThat;
+
+import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableMultiset;
 import com.google.common.collect.ImmutableSortedSet;
 import com.google.common.collect.Iterables;
 import com.google.common.eventbus.EventBus;
@@ -47,7 +53,7 @@ import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
 import com.google.devtools.build.lib.packages.NativeAspectClass;
 import com.google.devtools.build.lib.packages.PackageFactory;
-import com.google.devtools.build.lib.packages.SkylarkSemanticsOptions;
+import com.google.devtools.build.lib.packages.StarlarkSemanticsOptions;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.packages.util.MockToolsConfig;
 import com.google.devtools.build.lib.pkgcache.LoadingOptions;
@@ -73,12 +79,13 @@ import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
 import com.google.devtools.build.lib.vfs.ModifiedFileSet;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
+import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.SkyKey;
-import com.google.devtools.common.options.InvocationPolicyEnforcer;
 import com.google.devtools.common.options.Options;
 import com.google.devtools.common.options.OptionsParser;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import org.junit.Before;
@@ -158,10 +165,19 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
             rootDirectory,
             /* defaultSystemJavabase= */ null,
             analysisMock.getProductName());
-    workspaceStatusActionFactory =
-        new AnalysisTestUtil.DummyWorkspaceStatusActionFactory(directories);
+    workspaceStatusActionFactory = new AnalysisTestUtil.DummyWorkspaceStatusActionFactory();
 
     mockToolsConfig = new MockToolsConfig(rootDirectory);
+    mockToolsConfig.create("/bazel_tools_workspace/WORKSPACE", "workspace(name = 'bazel_tools')");
+    mockToolsConfig.create("/bazel_tools_workspace/tools/build_defs/repo/BUILD");
+    mockToolsConfig.create(
+        "/bazel_tools_workspace/tools/build_defs/repo/http.bzl",
+        "def http_archive(**kwargs):",
+        "  pass",
+        "",
+        "def http_file(**kwargs):",
+        "  pass");
+
     analysisMock.setupMockClient(mockToolsConfig);
     analysisMock.setupMockWorkspaceFiles(directories.getEmbeddedBinariesRoot());
 
@@ -197,11 +213,16 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
     PackageFactory pkgFactory =
         analysisMock
             .getPackageFactoryBuilderForTesting(directories)
-            .build(ruleClassProvider);
+            .build(ruleClassProvider, fileSystem);
     useConfiguration();
     skyframeExecutor =
         createSkyframeExecutor(pkgFactory, ruleClassProvider.getBuildInfoFactories());
+    reinitializeSkyframeExecutor();
+    packageManager = skyframeExecutor.getPackageManager();
+    buildView = new BuildViewForTesting(directories, ruleClassProvider, skyframeExecutor, null);
+  }
 
+  private void reinitializeSkyframeExecutor() {
     TestConstants.processSkyframeExecutorForTesting(skyframeExecutor);
     PackageCacheOptions packageCacheOptions = Options.getDefaults(PackageCacheOptions.class);
     packageCacheOptions.showLoadingProgress = true;
@@ -209,9 +230,7 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
     skyframeExecutor.preparePackageLoading(
         pkgLocator,
         packageCacheOptions,
-        Options.getDefaults(SkylarkSemanticsOptions.class),
-        ruleClassProvider.getDefaultsPackageContent(
-            analysisMock.getInvocationPolicyEnforcer().getInvocationPolicy()),
+        Options.getDefaults(StarlarkSemanticsOptions.class),
         UUID.randomUUID(),
         ImmutableMap.<String, String>of(),
         new TimestampGranularityMonitor(BlazeClock.instance()));
@@ -219,15 +238,20 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
     skyframeExecutor.injectExtraPrecomputedValues(
         ImmutableList.of(
             PrecomputedValue.injected(
+                RepositoryDelegatorFunction.RESOLVED_FILE_INSTEAD_OF_WORKSPACE,
+                Optional.<RootedPath>absent()),
+            PrecomputedValue.injected(
                 RepositoryDelegatorFunction.REPOSITORY_OVERRIDES,
                 ImmutableMap.<RepositoryName, PathFragment>of()),
             PrecomputedValue.injected(
                 RepositoryDelegatorFunction.DEPENDENCY_FOR_UNCONDITIONAL_FETCHING,
                 RepositoryDelegatorFunction.DONT_FETCH_UNCONDITIONALLY)));
+  }
 
-    packageManager = skyframeExecutor.getPackageManager();
-    buildView = new BuildViewForTesting(directories, ruleClassProvider, skyframeExecutor, null);
-
+  /** Resets the SkyframeExecutor, as if a clean had been executed. */
+  protected void cleanSkyframe() {
+    skyframeExecutor.resetEvaluator();
+    reinitializeSkyframeExecutor();
   }
 
   protected AnalysisMock getAnalysisMock() {
@@ -249,20 +273,19 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
                 Arrays.asList(
                     ExecutionOptions.class,
                     PackageCacheOptions.class,
-                    SkylarkSemanticsOptions.class,
+                    StarlarkSemanticsOptions.class,
                     BuildRequestOptions.class,
                     AnalysisOptions.class,
                     KeepGoingOption.class,
                     LoadingPhaseThreadsOption.class,
                     LoadingOptions.class),
                 ruleClassProvider.getConfigurationOptions()));
-    optionsParser.parse(new String[] {"--default_visibility=public" });
+    optionsParser.parse("--default_visibility=public", "--cpu=k8", "--host_cpu=k8");
+    optionsParser.parse(TestConstants.PRODUCT_SPECIFIC_FLAGS);
     optionsParser.parse(args);
     if (defaultFlags().contains(Flag.TRIMMED_CONFIGURATIONS)) {
       optionsParser.parse("--experimental_dynamic_configs=on");
     }
-    InvocationPolicyEnforcer optionsPolicyEnforcer = analysisMock.getInvocationPolicyEnforcer();
-    optionsPolicyEnforcer.enforce(optionsParser);
 
     buildOptions = ruleClassProvider.createBuildOptions(optionsParser);
   }
@@ -319,6 +342,7 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
     AnalysisOptions viewOptions = optionsParser.getOptions(AnalysisOptions.class);
     // update --keep_going option if test requested it.
     boolean keepGoing = flags.contains(Flag.KEEP_GOING);
+    boolean discardAnalysisCache = viewOptions.discardAnalysisCache;
     viewOptions.skyframePrepareAnalysis = flags.contains(Flag.SKYFRAME_PREPARE_ANALYSIS);
 
     PackageCacheOptions packageCacheOptions = optionsParser.getOptions(PackageCacheOptions.class);
@@ -333,15 +357,13 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
     packageCacheOptions.showLoadingProgress = true;
     packageCacheOptions.globbingThreads = 7;
 
-    SkylarkSemanticsOptions skylarkSemanticsOptions =
-        optionsParser.getOptions(SkylarkSemanticsOptions.class);
+    StarlarkSemanticsOptions starlarkSemanticsOptions =
+        optionsParser.getOptions(StarlarkSemanticsOptions.class);
 
     skyframeExecutor.preparePackageLoading(
         pathPackageLocator,
         packageCacheOptions,
-        skylarkSemanticsOptions,
-        ruleClassProvider.getDefaultsPackageContent(
-            analysisMock.getInvocationPolicyEnforcer().getInvocationPolicy()),
+        starlarkSemanticsOptions,
         UUID.randomUUID(),
         ImmutableMap.<String, String>of(),
         new TimestampGranularityMonitor(BlazeClock.instance()));
@@ -361,8 +383,6 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
 
     BuildRequestOptions requestOptions = optionsParser.getOptions(BuildRequestOptions.class);
     ImmutableSortedSet<String> multiCpu = ImmutableSortedSet.copyOf(requestOptions.multiCpus);
-    skyframeExecutor.setConfigurationFragmentFactories(
-        ruleClassProvider.getConfigurationFragments());
     analysisResult =
         buildView.update(
             loadingResult,
@@ -375,6 +395,9 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
             AnalysisTestUtil.TOP_LEVEL_ARTIFACT_CONTEXT,
             reporter,
             eventBus);
+    if (discardAnalysisCache) {
+      buildView.clearAnalysisCache(analysisResult.getTargetsToBuild(), analysisResult.getAspects());
+    }
     masterConfig = analysisResult.getConfigurationCollection();
     return analysisResult;
   }
@@ -496,8 +519,23 @@ public abstract class AnalysisTestCase extends FoundationTestCase {
     return buildView.getSkyframeEvaluatedTargetKeysForTesting();
   }
 
-  protected int getTargetsVisited() {
-    return buildView.getTargetsVisited();
+  protected void assertNumberOfAnalyzedConfigurationsOfTargets(
+      Map<String, Integer> targetsWithCounts) {
+    ImmutableMultiset<Label> actualSet =
+        getSkyframeEvaluatedTargetKeys().stream()
+            .filter(key -> key instanceof ConfiguredTargetKey)
+            .map(key -> ((ConfiguredTargetKey) key).getLabel())
+            .collect(toImmutableMultiset());
+    ImmutableMap<Label, Integer> expected =
+        targetsWithCounts.entrySet().stream()
+            .collect(
+                toImmutableMap(
+                    entry -> Label.parseAbsoluteUnchecked(entry.getKey()),
+                    entry -> entry.getValue()));
+    ImmutableMap<Label, Integer> actual =
+        expected.keySet().stream()
+            .collect(toImmutableMap(label -> label, label -> actualSet.count(label)));
+    assertThat(actual).containsExactlyEntriesIn(expected);
   }
 
   protected String getAnalysisError() {

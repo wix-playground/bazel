@@ -70,6 +70,7 @@ Dumper* Create(std::string* error = nullptr);
 }  // namespace embedded_binaries
 
 struct GlobalVariables;
+class StartupOptions;
 
 class SignalHandler {
  public:
@@ -95,7 +96,8 @@ void SigPrintf(const char *format, ...);
 
 std::string GetProcessIdAsString();
 
-// Get the absolute path to the binary being executed.
+// Get an absolute path to the binary being executed that is guaranteed to be
+// readable.
 std::string GetSelfPath();
 
 // Returns the directory Bazel can use to store output.
@@ -112,9 +114,6 @@ void WarnFilesystemType(const std::string& output_base);
 // The results are monotonic, i.e. subsequent calls to this method never return
 // a value less than a previous result.
 uint64_t GetMillisecondsMonotonic();
-
-// Returns elapsed milliseconds since the process started.
-uint64_t GetMillisecondsSinceProcessStart();
 
 // Set cpu and IO scheduling properties. Note that this can take ~50ms
 // on Linux, so it should only be called when necessary.
@@ -157,7 +156,9 @@ int ExecuteDaemon(const std::string& exe,
                   const std::map<std::string, EnvVarValue>& env,
                   const std::string& daemon_output,
                   const bool daemon_output_append,
+                  const std::string& binaries_dir,
                   const std::string& server_dir,
+                  const StartupOptions* options,
                   BlazeServerStartup** server_startup);
 
 // A character used to separate paths in a list.
@@ -214,6 +215,8 @@ void CreateSecureOutputRoot(const std::string& path);
 
 std::string GetEnv(const std::string& name);
 
+std::string GetPathEnv(const std::string& name);
+
 bool ExistsEnv(const std::string& name);
 
 void SetEnv(const std::string& name, const std::string& value);
@@ -233,12 +236,13 @@ std::string GetUserName();
 // Returns true iff the current terminal is running inside an Emacs.
 bool IsEmacsTerminal();
 
-// Returns true iff the current terminal can support color and cursor movement.
-bool IsStandardTerminal();
+// Returns true if stderr is connected to a terminal that can support color
+// and cursor movement.
+bool IsStderrStandardTerminal();
 
-// Returns the number of columns of the terminal to which stdout is
+// Returns the number of columns of the terminal to which stderr is
 // connected, or 80 if there is no such terminal.
-int GetTerminalColumns();
+int GetStderrTerminalColumns();
 
 // Gets the system-wide explicit limit for the given resource.
 //
@@ -256,7 +260,15 @@ int32_t GetExplicitSystemLimit(const int resource);
 // raised; false otherwise.
 bool UnlimitResources();
 
-void DetectBashOrDie();
+// Raises the soft coredump limit to the hard limit in an attempt to let
+// coredumps work. This is a best-effort operation and may or may not be
+// implemented for a given platform. Returns true if all limits were properly
+// raised; false otherwise.
+bool UnlimitCoredumps();
+
+#if defined(_WIN32) || defined(__CYGWIN__)
+std::string DetectBashAndExportBazelSh();
+#endif  // if defined(_WIN32) || defined(__CYGWIN__)
 
 // This function has no effect on Unix platforms.
 // On Windows, this function looks into PATH to find python.exe, if python

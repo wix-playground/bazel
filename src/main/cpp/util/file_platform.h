@@ -209,6 +209,9 @@ void ForEachDirectoryEntry(const std::string &path,
 std::wstring GetCwdW();
 bool MakeDirectoriesW(const std::wstring &path, unsigned int mode);
 
+// Check if `path` is a directory.
+bool IsDirectoryW(const std::wstring &path);
+
 // Interface to be implemented by ForEachDirectoryEntryW clients.
 class DirectoryEntryConsumerW {
  public:

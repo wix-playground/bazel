@@ -21,16 +21,6 @@ from src.test.py.bazel import test_base
 
 class RunfilesTest(test_base.TestBase):
 
-  def testAttemptToBuildRunfilesOnWindows(self):
-    if not self.IsWindows():
-      self.skipTest("only applicable to Windows")
-    self.ScratchFile("WORKSPACE")
-    exit_code, _, stderr = self.RunBazel(
-        ["build", "--experimental_enable_runfiles"])
-    self.assertNotEqual(exit_code, 0)
-    self.assertIn("building runfiles is not supported on Windows",
-                  "\n".join(stderr))
-
   def _AssertRunfilesLibraryInBazelToolsRepo(self, family, lang_name):
     for s, t, exe in [("WORKSPACE.mock", "WORKSPACE",
                        False), ("foo/BUILD.mock", "foo/BUILD",
@@ -198,8 +188,8 @@ class RunfilesTest(test_base.TestBase):
 
     for lang in [("java", "Java"), ("sh", "Bash"), ("cc", "C++")]:
       exit_code, _, stderr = self.RunBazel([
-          "build", "--verbose_failures",
-          "--experimental_enable_runfiles=no", "//bar:bar-" + lang[0]
+          "build", "--verbose_failures", "--enable_runfiles=no",
+          "//bar:bar-" + lang[0]
       ])
       self.AssertExitCode(exit_code, 0, stderr)
 

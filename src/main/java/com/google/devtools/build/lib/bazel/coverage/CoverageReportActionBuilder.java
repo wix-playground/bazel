@@ -52,6 +52,7 @@ import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import javax.annotation.Nullable;
 
 /**
  * A class to create the coverage report generator action.
@@ -82,7 +83,7 @@ import java.util.List;
 public final class CoverageReportActionBuilder {
 
   private static final ResourceSet LOCAL_RESOURCES =
-      ResourceSet.createWithRamCpuIo(750 /*MB*/, 0.5 /*CPU*/, 0.0 /*IO*/);
+      ResourceSet.createWithRamCpu(/* memoryMb= */ 750, /* cpuUsage= */ 1);
 
   private static final ActionOwner ACTION_OWNER = ActionOwner.SYSTEM_ACTION_OWNER;
 
@@ -152,9 +153,8 @@ public final class CoverageReportActionBuilder {
   public CoverageReportActionBuilder() {
   }
 
-  /**
-   * Returns the coverage report action. May return null in case of an error.
-   */
+  /** Returns the coverage report action. May return null in case of an error. */
+  @Nullable
   public CoverageReportActionsWrapper createCoverageActionsWrapper(
       EventHandler reporter,
       BlazeDirectories directories,

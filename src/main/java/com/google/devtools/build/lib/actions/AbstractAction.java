@@ -38,7 +38,6 @@ import com.google.devtools.build.lib.syntax.SkylarkList;
 import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
 import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.vfs.FileSystem;
-import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.Symlinks;
@@ -57,10 +56,15 @@ import javax.annotation.concurrent.GuardedBy;
 @ThreadSafe
 public abstract class AbstractAction implements Action, ActionApi {
   /**
-   * An arbitrary default resource set. Currently 250MB of memory, 50% CPU and 0% of total I/O.
+   * An arbitrary default resource set. We assume that a typical subprocess is single-threaded
+   * (i.e., uses one CPU core) and CPU-bound, and uses a small-ish amount of memory. In the past,
+   * we've seen that assuming less than one core can lead to local overload. Unless you have data
+   * indicating otherwise (for example, we've observed in the past that C++ linking can use large
+   * amounts of memory), we suggest to use this default set.
    */
+  // TODO(ulfjack): Collect actual data to confirm that this is an acceptable approximation.
   public static final ResourceSet DEFAULT_RESOURCE_SET =
-      ResourceSet.createWithRamCpuIo(250, 0.5, 0);
+      ResourceSet.createWithRamCpu(250, 1);
 
   /**
    * The owner/inputs/outputs attributes below should never be directly accessed even within
@@ -210,6 +214,8 @@ public abstract class AbstractAction implements Action, ActionApi {
    */
   @Override
   public synchronized void updateInputs(Iterable<Artifact> inputs) {
+    Preconditions.checkState(
+        discoversInputs(), "Can't update inputs unless discovering: %s %s", this, inputs);
     this.inputs = CollectionUtils.makeImmutable(inputs);
     inputsDiscovered = true;
   }
@@ -322,6 +328,11 @@ public abstract class AbstractAction implements Action, ActionApi {
   }
 
   @Override
+  public boolean isShareable() {
+    return true;
+  }
+
+  @Override
   public boolean showsOutputUnconditionally() {
     return false;
   }
@@ -401,7 +412,7 @@ public abstract class AbstractAction implements Action, ActionApi {
         parentDir.setWritable(true);
         deleteOutput(fileSystem, output);
       } else if (path.isDirectory(Symlinks.NOFOLLOW)) {
-        FileSystemUtils.deleteTree(path);
+        path.deleteTree();
       } else {
         throw e;
       }
@@ -413,22 +424,20 @@ public abstract class AbstractAction implements Action, ActionApi {
    * checking, this method must be called.
    */
   protected void checkInputsForDirectories(
-      EventHandler eventHandler, MetadataProvider metadataProvider) throws ExecException {
+      EventHandler eventHandler, MetadataProvider metadataProvider) throws IOException {
     // Report "directory dependency checking" warning only for non-generated directories (generated
     // ones will be reported earlier).
     for (Artifact input : getMandatoryInputs()) {
       // Assume that if the file did not exist, we would not have gotten here.
-      try {
-        if (input.isSourceArtifact()
-            && metadataProvider.getMetadata(input).getType().isDirectory()) {
-          // TODO(ulfjack): What about dependency checking of special files?
-          eventHandler.handle(Event.warn(getOwner().getLocation(),
-              String.format(
-                  "input '%s' to %s is a directory; dependency checking of directories is unsound",
-                  input.prettyPrint(), getOwner().getLabel())));
-        }
-      } catch (IOException e) {
-        throw new UserExecException(e);
+      if (input.isSourceArtifact() && metadataProvider.getMetadata(input).getType().isDirectory()) {
+        // TODO(ulfjack): What about dependency checking of special files?
+        eventHandler.handle(
+            Event.warn(
+                getOwner().getLocation(),
+                String.format(
+                    "input '%s' to %s is a directory; "
+                        + "dependency checking of directories is unsound",
+                    input.prettyPrint(), getOwner().getLabel())));
       }
     }
   }
@@ -569,7 +578,7 @@ public abstract class AbstractAction implements Action, ActionApi {
 
   @Override
   public SkylarkDict<String, String> getEnv() {
-    return SkylarkDict.copyOf(null, env.getFixedEnv());
+    return SkylarkDict.copyOf(null, env.getFixedEnv().toMap());
   }
 
   @Override

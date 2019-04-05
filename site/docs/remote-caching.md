@@ -29,7 +29,6 @@ make builds significantly faster.
 * [Disk cache](#disk-cache)
 * [Known Issues](#known-issues)
 * [External Links](#external-links)
-* [Bazel remote execution (in development)](#bazel-remote-execution-in-development)
 
 ## Remote caching overview
 
@@ -165,7 +164,9 @@ the key securely, as anyone with the key can read and write arbitrary data
 to/from your GCS bucket.
 
 4. Connect to Cloud Storage by adding the following flags to your Bazel command:
-   * Pass the following URL to Bazel by using the flag: `--remote_http_cache=https://storage.googleapis.com/bucket-name` where `bucket-name` is the name of your storage bucket.
+   * Pass the following URL to Bazel by using the flag:
+       `--remote_cache=https://storage.googleapis.com/bucket-name`
+       where `bucket-name` is the name of your storage bucket.
    * Pass the authentication key using the flag: `--google_credentials=/path/to/your/secret-key.json`.
 
 5. You can configure Cloud Storage to automatically delete old files. To do so, see
@@ -244,7 +245,7 @@ Use the following flags to:
 * disable sandboxing
 
 ```
-build --remote_http_cache=http://replace-with-your.host:port
+build --remote_cache=http://replace-with-your.host:port
 build --spawn_strategy=standalone
 ```
 
@@ -253,7 +254,7 @@ following flags to read and write from the remote cache with sandboxing
 enabled:
 
 ```
-build --remote_http_cache=http://replace-with-your.host:port
+build --remote_cache=http://replace-with-your.host:port
 ```
 
 ### Read only from the remote cache
@@ -262,7 +263,7 @@ Use the following flags to: read from the remote cache with sandboxing
 disabled.
 
 ```
-build --remote_http_cache=http://replace-with-your.host:port
+build --remote_cache=http://replace-with-your.host:port
 build --remote_upload_local_results=false
 build --spawn_strategy=standalone
 ```
@@ -271,7 +272,7 @@ Using the remote cache with sandboxing enabled is experimental. Use the
 following flags to read from the remote cache with sandboxing enabled:
 
 ```
-build --remote_http_cache=http://replace-with-your.host:port
+build --remote_cache=http://replace-with-your.host:port
 build --remote_upload_local_results=false
 ```
 
@@ -310,7 +311,7 @@ is similar to curl's `--unix-socket` flag. Use the following to configure unix
 domain socket:
 
 ```
-build --remote_http_cache=http://replace-with-your.host:port
+build --remote_cache=http://replace-with-your.host:port
 build --remote_cache_proxy=unix:/replace/with/socket/path
 ```
 
@@ -333,12 +334,6 @@ You can pass a user-specific path to the `--disk_cache` flag using the `~` alias
 when enabling the disk cache for all developers of a project via the project's
 checked in `.bazelrc` file.
 
-To enable cache hits across different workspaces, use the following flag:
-
-```
-build --experimental_strict_action_env
-```
-
 ## Known issues
 
 **Input file modification during a build**
@@ -353,15 +348,14 @@ build.
 
 **Environment variables leaking into an action**
 
-An action definition contains environment variables. This can be a problem
-for sharing remote cache hits across machines. For example, environments
-with different `$PATH` variables won't share cache hits. You can specify
-`--experimental_strict_action_env` to ensure that that's not the case and
-that only environment variables explicitly whitelisted via `--action_env`
-are included in an action definition. Bazel's Debian/Ubuntu package used
-to install `/etc/bazel.bazelrc` with a whitelist of environment variables
-including `$PATH`. If you are getting fewer cache hits than expected, check
-that your environment doesn't have an old `/etc/bazel.bazelrc` file.
+An action definition contains environment variables. This can be a problem for
+sharing remote cache hits across machines. For example, environments with
+different `$PATH` variables won't share cache hits. Only environment variables
+explicitly whitelisted via `--action_env` are included in an action
+definition. Bazel's Debian/Ubuntu package used to install `/etc/bazel.bazelrc`
+with a whitelist of environment variables including `$PATH`. If you are getting
+fewer cache hits than expected, check that your environment doesn't have an old
+`/etc/bazel.bazelrc` file.
 
 
 **Bazel does not track tools outside a workspace**
@@ -378,16 +372,9 @@ watch [issue #4558] for updates.
 
 * **Faster Bazel builds with remote caching: a benchmark:** Nicolò Valigi wrote a [blog post](https://nicolovaligi.com/faster-bazel-remote-caching-benchmark.html) in which he benchmarks remote caching in Bazel.
 
-## Bazel remote execution (in development)
 
-A [gRPC protocol] that supports both remote caching and remote execution
-is in development. Remote execution allows Bazel to execute actions on a
-separate platform, such as a datacenter.  You can try remote execution with
-[Buildfarm], an open source project that aims to provide a distributed remote
-execution platform.
-
-[Adapting Rules for Remote Execution](https://docs.bazel.build/versions/master/remote-execution-rules.html)
-[Troubleshooting Remote Execution](https://docs.bazel.build/versions/master/remote-execution-sandbox.html)
+[Adapting Rules for Remote Execution]: https://docs.bazel.build/versions/master/remote-execution-rules.html
+[Troubleshooting Remote Execution]: https://docs.bazel.build/versions/master/remote-execution-sandbox.html
 [WebDAV module]: http://nginx.org/en/docs/http/ngx_http_dav_module.html
 [docker image]: https://hub.docker.com/r/buchgr/bazel-remote-cache/
 [GitHub]: https://github.com/buchgr/bazel-remote/
@@ -402,5 +389,8 @@ execution platform.
 [AWS S3]: https://aws.amazon.com/s3
 [issue #3360]: https://github.com/bazelbuild/bazel/issues/3360
 [gRPC protocol]: https://github.com/googleapis/googleapis/blob/master/google/devtools/remoteexecution/v1test/remote_execution.proto
+[Buildbarn]: https://github.com/buildbarn
 [Buildfarm]: https://github.com/bazelbuild/bazel-buildfarm
+[BuildGrid]: https://gitlab.com/BuildGrid/buildgrid
 [issue #4558]: https://github.com/bazelbuild/bazel/issues/4558
+

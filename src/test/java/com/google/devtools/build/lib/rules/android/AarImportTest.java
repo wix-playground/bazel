@@ -68,7 +68,9 @@ public class AarImportTest extends BuildViewTestCase {
         "    main_dex_list_creator = 'main_dex_list_creator',",
         "    proguard = 'proguard',",
         "    shrinked_android_jar = 'shrinked_android_jar',",
-        "    zipalign = 'zipalign')");
+        "    zipalign = 'zipalign',",
+        "    tags = ['__ANDROID_RULES_MIGRATION__'],",
+        ")");
     scratch.file(
         "a/BUILD",
         "aar_import(",
@@ -120,6 +122,7 @@ public class AarImportTest extends BuildViewTestCase {
         "    jars = ['baz.jar'],",
         "    constraints = ['android'],",
         ")");
+    getAnalysisMock().ccSupport().setupCcToolchainConfigForCpu(mockToolsConfig, "armeabi-v7a");
   }
 
   @Test
@@ -230,11 +233,10 @@ public class AarImportTest extends BuildViewTestCase {
     assertThat(outputGroup).contains(mergedAssetsZip);
 
     // Get the other artifact from the output group
-    Artifact artifact = ActionsTestUtil.getFirstArtifactEndingWith(outputGroup, ".txt");
+    Artifact artifact = ActionsTestUtil.getFirstArtifactEndingWith(outputGroup, "jdeps.proto");
 
     assertThat(artifact.isTreeArtifact()).isFalse();
-    assertThat(artifact.getExecPathString())
-        .endsWith("_aar/last/aar_import_deps_checker_result.txt");
+    assertThat(artifact.getExecPathString()).endsWith("_aar/last/jdeps.proto");
 
     SpawnAction checkerAction = getGeneratingSpawnAction(artifact);
     List<String> arguments = checkerAction.getArguments();
@@ -244,9 +246,9 @@ public class AarImportTest extends BuildViewTestCase {
             "--classpath_entry",
             "--directdep",
             "--input",
-            "--output",
             "--checking_mode=error",
             "--rule_label",
+            "//a:last",
             "--jdeps_output");
     ensureArgumentsHaveClassEntryOptionWithSuffix(
         arguments, "/intermediate/classes_and_libs_merged.jar");
@@ -281,15 +283,14 @@ public class AarImportTest extends BuildViewTestCase {
     assertThat(outputGroup).contains(mergedAssetsZip);
 
     // Get the other artifact from the output group
-    Artifact artifact = ActionsTestUtil.getFirstArtifactEndingWith(outputGroup, ".txt");
+    Artifact artifact = ActionsTestUtil.getFirstArtifactEndingWith(outputGroup, "jdeps.proto");
     checkDepsCheckerOutputArtifact(artifact, expectedCheckingMode);
   }
 
   private void checkDepsCheckerOutputArtifact(Artifact artifact, String expectedCheckingMode)
       throws CommandLineExpansionException {
     assertThat(artifact.isTreeArtifact()).isFalse();
-    assertThat(artifact.getExecPathString())
-        .endsWith("_aar/bar/aar_import_deps_checker_result.txt");
+    assertThat(artifact.getExecPathString()).endsWith("_aar/bar/jdeps.proto");
 
     SpawnAction checkerAction = getGeneratingSpawnAction(artifact);
     List<String> arguments = checkerAction.getArguments();
@@ -298,7 +299,6 @@ public class AarImportTest extends BuildViewTestCase {
             "--bootclasspath_entry",
             "--classpath_entry",
             "--input",
-            "--output",
             "--rule_label",
             "--jdeps_output",
             "--checking_mode=" + expectedCheckingMode);

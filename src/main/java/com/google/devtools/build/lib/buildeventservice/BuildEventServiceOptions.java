@@ -45,8 +45,7 @@ public class BuildEventServiceOptions extends OptionsBase {
         "Specifies how long bazel should wait for the BES/BEP upload to complete after the "
             + "build and tests have finished. A valid timeout is a natural number followed by a "
             + "unit: Days (d), hours (h), minutes (m), seconds (s), and milliseconds (ms). The "
-            + "default value is '0' which means that there is no timeout and that the upload will "
-            + "continue in the background after a build has finished."
+            + "default value is '0' which means that there is no timeout."
   )
   public Duration besTimeout;
 
@@ -96,16 +95,24 @@ public class BuildEventServiceOptions extends OptionsBase {
   public List<String> besKeywords;
 
   @Option(
-    name = "bes_outerr_buffer_size",
-    defaultValue = "10240",
-    documentationCategory = OptionDocumentationCategory.LOGGING,
-    effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
-    help =
-        "Specifies the maximal size of stdout or stderr to be buffered in BEP, before it is "
-            + "reported as a progress event. Individual writes are still reported in a single "
-            + "event, even if larger than the specified value."
-  )
-  public long besOuterrBufferSize;
+      name = "bes_outerr_buffer_size",
+      defaultValue = "10240",
+      documentationCategory = OptionDocumentationCategory.LOGGING,
+      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
+      help =
+          "Specifies the maximal size of stdout or stderr to be buffered in BEP, before it is "
+              + "reported as a progress event. Individual writes are still reported in a single "
+              + "event, even if larger than the specified value up to --bes_outerr_chunk_size.")
+  public int besOuterrBufferSize;
+
+  @Option(
+      name = "bes_outerr_chunk_size",
+      defaultValue = "1048576", // 2^20 = 1MB
+      documentationCategory = OptionDocumentationCategory.LOGGING,
+      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
+      help =
+          "Specifies the maximal size of stdout or stderr to be sent to BEP in a single message.")
+  public int besOuterrChunkSize;
 
   @Option(
       name = "bes_results_url",

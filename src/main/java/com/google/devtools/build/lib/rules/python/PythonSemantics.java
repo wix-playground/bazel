@@ -19,9 +19,8 @@ import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesSupport;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.analysis.test.InstrumentedFilesCollector.InstrumentationSpec;
-import com.google.devtools.build.lib.collect.nestedset.NestedSet;
-import com.google.devtools.build.lib.rules.cpp.CcLinkingInfo;
-import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
 import java.util.Collection;
 import java.util.List;
 
@@ -33,20 +32,25 @@ import java.util.List;
  */
 public interface PythonSemantics {
   /**
-   * Called at the beginning of the analysis of {@code py_binary} rules to validate its attributes.
+   * Called at the beginning of the analysis of {@code py_binary}, {@code py_test}, and {@code
+   * py_library} targets to validate their attributes.
    */
   void validate(RuleContext ruleContext, PyCommon common);
 
-  /** Extends for the default and data runfiles of {@code py_binary} rules with custom elements. */
+  /**
+   * Extends for the default and data runfiles of {@code py_binary} and {@code py_test} rules with
+   * custom elements.
+   */
   void collectRunfilesForBinary(
-      RuleContext ruleContext,
-      Runfiles.Builder builder,
-      PyCommon common,
-      CcLinkingInfo ccLinkingInfo)
-      throws InterruptedException;
+      RuleContext ruleContext, Runfiles.Builder builder, PyCommon common, CcInfo ccInfo)
+      throws InterruptedException, RuleErrorException;
 
-  /** Extends the default runfiles of {@code py_binary} rules with custom elements. */
-  void collectDefaultRunfilesForBinary(RuleContext ruleContext, Runfiles.Builder builder)
+  /**
+   * Extends the default runfiles of {@code py_binary} and {@code py_test} rules with custom
+   * elements.
+   */
+  void collectDefaultRunfilesForBinary(
+      RuleContext ruleContext, PyCommon common, Runfiles.Builder builder)
       throws InterruptedException;
 
   /** Collects a rule's default runfiles. */
@@ -63,29 +67,30 @@ public interface PythonSemantics {
   Collection<Artifact> precompiledPythonFiles(
       RuleContext ruleContext, Collection<Artifact> sources, PyCommon common);
 
-  /**
-   * Returns a list of PathFragments for the import paths specified in the imports attribute.
-   */
-  List<PathFragment> getImports(RuleContext ruleContext);
+  /** Returns a list of PathFragments for the import paths specified in the imports attribute. */
+  List<String> getImports(RuleContext ruleContext);
 
   /**
    * Create the actual executable artifact.
    *
    * <p>This should create a generating action for {@code common.getExecutable()}.
    */
+  // TODO(brandjon): I believe this always returns common.getExecutable(), so we should be able to
+  // eliminate the return as redundant.
   Artifact createExecutable(
       RuleContext ruleContext,
       PyCommon common,
-      CcLinkingInfo ccLinkingInfo,
-      NestedSet<PathFragment> imports)
-      throws InterruptedException;
+      CcInfo ccInfo,
+      Runfiles.Builder runfilesBuilder)
+      throws InterruptedException, RuleErrorException;
 
   /**
-   * Called at the end of the analysis of {@code py_binary} rules.
+   * Called at the end of the analysis of {@code py_binary} and {@code py_test} targets.
+   *
    * @throws InterruptedException
    */
-  void postInitBinary(RuleContext ruleContext, RunfilesSupport runfilesSupport,
-      PyCommon common) throws InterruptedException;
+  void postInitExecutable(RuleContext ruleContext, RunfilesSupport runfilesSupport, PyCommon common)
+      throws InterruptedException, RuleErrorException;
 
-  CcLinkingInfo buildCcLinkingInfoProvider(Iterable<? extends TransitiveInfoCollection> deps);
+  CcInfo buildCcInfoProvider(Iterable<? extends TransitiveInfoCollection> deps);
 }

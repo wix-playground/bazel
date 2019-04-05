@@ -17,6 +17,8 @@ package com.google.devtools.build.buildjar.javac.plugins.errorprone;
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.buildjar.InvalidCommandLineException;
 import com.google.devtools.build.buildjar.javac.plugins.BlazeJavaCompilerPlugin;
+import com.google.devtools.build.buildjar.javac.statistics.BlazeJavacStatistics;
+import com.google.devtools.build.buildjar.javac.statistics.BlazeJavacStatistics.StopwatchSpan;
 import com.google.errorprone.BaseErrorProneJavaCompiler;
 import com.google.errorprone.ErrorProneAnalyzer;
 import com.google.errorprone.ErrorProneError;
@@ -92,21 +94,30 @@ public final class ErrorPronePlugin extends BlazeJavaCompilerPlugin {
   }
 
   @Override
-  public void init(Context context, Log log, JavaCompiler compiler) {
-    super.init(context, log, compiler);
+  public void init(
+      Context context,
+      Log log,
+      JavaCompiler compiler,
+      BlazeJavacStatistics.Builder statisticsBuilder) {
+    super.init(context, log, compiler, statisticsBuilder);
 
     setupMessageBundle(context);
 
     if (epOptions == null) {
       epOptions = ErrorProneOptions.empty();
     }
-    errorProneAnalyzer = new ErrorProneAnalyzer(scannerSupplier, epOptions, context);
+    errorProneAnalyzer =
+        ErrorProneAnalyzer.createByScanningForPlugins(scannerSupplier, epOptions, context);
   }
 
   /** Run Error Prone analysis after performing dataflow checks. */
   @Override
   public void postFlow(Env<AttrContext> env) {
-    try {
+    try (StopwatchSpan ignored =
+        statisticsBuilder.newTimingSpan(
+            duration ->
+                statisticsBuilder.addErrorProneTiming(
+                    env.toplevel.sourcefile.getName(), duration))) {
       errorProneAnalyzer.finished(new TaskEvent(Kind.ANALYZE, env.toplevel, env.enclClass.sym));
     } catch (ErrorProneError e) {
       e.logFatalError(log);

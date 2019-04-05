@@ -13,9 +13,13 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
+import com.google.common.base.Predicates;
+import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
+import com.google.devtools.build.lib.util.GroupedList;
 import com.google.errorprone.annotations.CanIgnoreReturnValue;
 import java.util.Map;
+import java.util.Set;
 import javax.annotation.Nullable;
 
 /**
@@ -61,15 +65,25 @@ public interface QueryableGraph {
   }
 
   /**
-   * Examines all the given keys. Returns an iterable of keys whose corresponding nodes are
-   * currently available to be fetched.
+   * Optimistically prefetches dependencies.
    *
-   * <p>Note: An unavailable node does not mean it is not in the graph. It only means it's not ready
-   * to be fetched immediately.
-   *
-   * @param reason the reason the nodes are being requested.
+   * @see PrefetchDepsRequest
    */
-  Iterable<SkyKey> getCurrentlyAvailableNodes(Iterable<SkyKey> keys, Reason reason);
+  default void prefetchDeps(PrefetchDepsRequest request) throws InterruptedException {
+    if (request.oldDeps.isEmpty()) {
+      return;
+    }
+    request.excludedKeys = request.depKeys.toSet();
+    getBatchAsync(
+        request.requestor,
+        Reason.PREFETCH,
+        Iterables.filter(request.oldDeps, Predicates.not(Predicates.in(request.excludedKeys))));
+  }
+
+  /** Checks whether this graph stores reverse dependencies. */
+  default boolean storesReverseDeps() {
+    return true;
+  }
 
   /**
    * The reason that a node is being looked up in the Skyframe graph.
@@ -148,5 +162,36 @@ public interface QueryableGraph {
 
     /** Some other reason than one of the above. */
     OTHER,
+  }
+
+  /** Parameters for {@link QueryableGraph#prefetchDeps}. */
+  static class PrefetchDepsRequest {
+    public final SkyKey requestor;
+
+    /**
+     * Old dependencies to prefetch.
+     *
+     * <p>The implementation might ignore this if it has another way to determine the dependencies.
+     */
+    public final Set<SkyKey> oldDeps;
+
+    /**
+     * Direct deps that will be subsequently fetched and therefore should be excluded from
+     * prefetching.
+     */
+    public final GroupedList<SkyKey> depKeys;
+
+    /**
+     * Output parameter: {@code depKeys} as a set.
+     *
+     * <p>The implementation might set this, in which case, the caller could reuse it.
+     */
+    @Nullable public Set<SkyKey> excludedKeys = null;
+
+    public PrefetchDepsRequest(SkyKey requestor, Set<SkyKey> oldDeps, GroupedList<SkyKey> depKeys) {
+      this.requestor = requestor;
+      this.oldDeps = oldDeps;
+      this.depKeys = depKeys;
+    }
   }
 }

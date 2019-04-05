@@ -22,6 +22,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.jimfs.Configuration;
 import com.google.common.jimfs.Jimfs;
 import com.google.devtools.build.buildjar.javac.plugins.dependency.StrictJavaDepsPlugin;
+import com.google.devtools.build.buildjar.javac.statistics.BlazeJavacStatistics;
 import com.google.devtools.build.java.turbine.javac.JavacTurbineCompileResult.Status;
 import com.sun.source.util.JavacTask;
 import com.sun.tools.javac.api.ClientCodeWrapper.Trusted;
@@ -32,7 +33,6 @@ import com.sun.tools.javac.util.Context;
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.lang.reflect.Method;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.FileSystem;
@@ -46,7 +46,6 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import javax.annotation.Nullable;
 import javax.tools.Diagnostic;
 import javax.tools.JavaFileObject;
@@ -156,16 +155,13 @@ public class JavacTurbineCompiler {
     protected ClassLoader getClassLoader(URL[] urls) {
       return new URLClassLoader(
           urls,
-          new ClassLoader(null) {
+          new ClassLoader(getPlatformClassLoader()) {
             @Override
             protected Class<?> findClass(String name) throws ClassNotFoundException {
-              Class<?> c = Class.forName(name);
-              if (name.startsWith("com.sun.source.") || name.startsWith("com.sun.tools.")) {
-                return c;
-              }
-              if (c.getClassLoader() == null
-                  || Objects.equals(getClassLoaderName(c.getClassLoader()), "platform")) {
-                return c;
+              if (name.startsWith("com.sun.source.")
+                  || name.startsWith("com.sun.tools.")
+                  || name.startsWith("com.google.devtools.build.buildjar.javac.statistics.")) {
+                return Class.forName(name);
               }
               throw new ClassNotFoundException(name);
             }
@@ -173,24 +169,20 @@ public class JavacTurbineCompiler {
     }
   }
 
-  // TODO(cushon): remove this use of reflection if Java 9 is released.
-  private static String getClassLoaderName(ClassLoader classLoader) {
-    Method method;
+  public static ClassLoader getPlatformClassLoader() {
     try {
-      method = ClassLoader.class.getMethod("getName");
-    } catch (NoSuchMethodException e) {
-      // ClassLoader#getName doesn't exist in JDK 8 and earlier.
-      return null;
-    }
-    try {
-      return (String) method.invoke(classLoader, new Object[] {});
+      // In JDK 9+, all platform classes are visible to the platform class loader:
+      // https://docs.oracle.com/javase/9/docs/api/java/lang/ClassLoader.html#getPlatformClassLoader--
+      return (ClassLoader) ClassLoader.class.getMethod("getPlatformClassLoader").invoke(null);
     } catch (ReflectiveOperationException e) {
-      throw new LinkageError(e.getMessage(), e);
+      // In earlier releases, set 'null' as the parent to delegate to the boot class loader.
+      return null;
     }
   }
 
   static void setupContext(
       Context context, @Nullable StrictJavaDepsPlugin sjd, JavacTransitive transitive) {
     JavacTurbineJavaCompiler.preRegister(context, sjd, transitive);
+    BlazeJavacStatistics.preRegister(context);
   }
 }

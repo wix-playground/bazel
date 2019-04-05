@@ -29,7 +29,6 @@ import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.vfs.FileSystem;
-import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.Symlinks;
 import java.io.IOException;
@@ -58,7 +57,7 @@ public final class CreateIncSymlinkAction extends AbstractAction {
   @Override
   public void prepare(FileSystem fileSystem, Path execRoot) throws IOException {
     if (includePath.isDirectory(Symlinks.NOFOLLOW)) {
-      FileSystemUtils.deleteTree(includePath);
+      includePath.deleteTree();
     }
     super.prepare(fileSystem, execRoot);
   }
@@ -99,6 +98,11 @@ public final class CreateIncSymlinkAction extends AbstractAction {
   @Override
   public String getMnemonic() {
     return "Symlink";
+  }
+
+  @Override
+  public boolean mayInsensitivelyPropagateInputs() {
+    return true;
   }
 }
 

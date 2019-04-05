@@ -8,14 +8,14 @@ filegroup(
 )
 
 filegroup(
-    name = "embedded_tools_srcs",
+    name = "embedded_build_and_license",
     srcs = [
         "BUILD.tools",
         "LICENSE",
-        ":jarjar_command_deploy.jar",
     ],
 )
 
+# jarjar_bin
 java_binary(
     name = "jarjar_command",
     srcs = glob(

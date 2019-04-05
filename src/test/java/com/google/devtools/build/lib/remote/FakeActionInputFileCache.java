@@ -13,6 +13,8 @@
 // limitations under the License.
 package com.google.devtools.build.lib.remote;
 
+import build.bazel.remote.execution.v2.Digest;
+import build.bazel.remote.execution.v2.Tree;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.BiMap;
 import com.google.common.collect.HashBiMap;
@@ -26,8 +28,6 @@ import com.google.devtools.build.lib.vfs.FileStatus;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.Symlinks;
-import com.google.devtools.remoteexecution.v1test.Digest;
-import com.google.devtools.remoteexecution.v1test.Tree;
 import java.io.IOException;
 
 /** A fake implementation of the {@link MetadataProvider} interface. */
@@ -47,7 +47,10 @@ final class FakeActionInputFileCache implements MetadataProvider {
     Path path = execRoot.getRelative(input.getExecPath());
     FileStatus stat = path.stat(Symlinks.FOLLOW);
     return FileArtifactValue.createNormalFile(
-        HashCode.fromString(hexDigest).asBytes(), FileContentsProxy.create(stat), stat.getSize());
+        HashCode.fromString(hexDigest).asBytes(),
+        FileContentsProxy.create(stat),
+        stat.getSize(),
+        /*isShareable=*/ true);
   }
 
   @Override

@@ -14,11 +14,11 @@
 
 package com.google.devtools.build.skydoc.fakebuildapi;
 
-import com.google.devtools.build.lib.skylarkbuildapi.SkylarkConfigApi.BuildSettingApi;
+import com.google.devtools.build.lib.skylarkbuildapi.StarlarkConfigApi.BuildSettingApi;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkPrinter;
 
 /**
- * Fake implementation of {@link BuildSettingApi};
+ * Fake implementation of {@link BuildSettingApi}.
  */
 public class FakeBuildSettingDescriptor implements BuildSettingApi {
   @Override

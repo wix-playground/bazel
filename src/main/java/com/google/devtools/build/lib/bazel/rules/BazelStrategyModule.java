@@ -18,108 +18,82 @@ import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.analysis.actions.FileWriteActionContext;
 import com.google.devtools.build.lib.analysis.actions.TemplateExpansionContext;
 import com.google.devtools.build.lib.buildtool.BuildRequest;
+import com.google.devtools.build.lib.exec.ExecutionOptions;
 import com.google.devtools.build.lib.exec.ExecutorBuilder;
 import com.google.devtools.build.lib.exec.SpawnCache;
+import com.google.devtools.build.lib.remote.RemoteModule;
+import com.google.devtools.build.lib.remote.options.RemoteOptions;
 import com.google.devtools.build.lib.rules.android.WriteAdbArgsActionContext;
-import com.google.devtools.build.lib.rules.cpp.CppCompileActionContext;
 import com.google.devtools.build.lib.rules.cpp.CppIncludeExtractionContext;
 import com.google.devtools.build.lib.rules.cpp.CppIncludeScanningContext;
 import com.google.devtools.build.lib.runtime.BlazeModule;
 import com.google.devtools.build.lib.runtime.Command;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
-import com.google.devtools.common.options.Converters.AssignmentConverter;
-import com.google.devtools.common.options.Option;
-import com.google.devtools.common.options.OptionDocumentationCategory;
-import com.google.devtools.common.options.OptionEffectTag;
+import com.google.devtools.build.lib.util.OS;
+import com.google.devtools.build.lib.util.RegexFilter;
 import com.google.devtools.common.options.OptionsBase;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
 /** Module which registers the strategy options for Bazel. */
 public class BazelStrategyModule extends BlazeModule {
-  /**
-   * Execution options affecting how we execute the build actions (but not their semantics).
-   */
-  public static class BazelExecutionOptions extends OptionsBase {
-    @Option(
-      name = "spawn_strategy",
-      defaultValue = "",
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.UNKNOWN},
-      help =
-          "Specify how spawn actions are executed by default. "
-              + "'standalone' means run all of them locally without any kind of sandboxing. "
-              + "'sandboxed' means to run them in a sandboxed environment with limited privileges "
-              + "(details depend on platform support)."
-    )
-    public String spawnStrategy;
-
-    @Option(
-      name = "genrule_strategy",
-      defaultValue = "",
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.UNKNOWN},
-      help =
-          "Specify how to execute genrules. "
-              + "'standalone' means run all of them locally. "
-              + "'sandboxed' means run them in namespaces based sandbox (available only on Linux)"
-    )
-    public String genruleStrategy;
-
-    @Option(
-      name = "strategy",
-      allowMultiple = true,
-      converter = AssignmentConverter.class,
-      defaultValue = "",
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.UNKNOWN},
-      help =
-          "Specify how to distribute compilation of other spawn actions. "
-              + "Example: 'Javac=local' means to spawn Java compilation locally. "
-              + "'JavaIjar=sandboxed' means to spawn Java Ijar actions in a sandbox. "
-    )
-    public List<Map.Entry<String, String>> strategy;
-  }
-
   @Override
   public Iterable<Class<? extends OptionsBase>> getCommandOptions(Command command) {
     return "build".equals(command.name())
-        ? ImmutableList.<Class<? extends OptionsBase>>of(BazelExecutionOptions.class)
-        : ImmutableList.<Class<? extends OptionsBase>>of();
+        ? ImmutableList.of(ExecutionOptions.class, RemoteOptions.class)
+        : ImmutableList.of();
   }
 
   @Override
   public void executorInit(CommandEnvironment env, BuildRequest request, ExecutorBuilder builder) {
     builder.addActionContext(new WriteAdbArgsActionContext(env.getClientEnv().get("HOME")));
-    BazelExecutionOptions options = env.getOptions().getOptions(BazelExecutionOptions.class);
+    ExecutionOptions options = env.getOptions().getOptions(ExecutionOptions.class);
+    RemoteOptions remoteOptions = env.getOptions().getOptions(RemoteOptions.class);
 
-    // Default strategies for certain mnemonics - they can be overridden by --strategy= flags.
-    builder.addStrategyByMnemonic("Javac", "worker");
-    builder.addStrategyByMnemonic("Closure", "worker");
-    builder.addStrategyByMnemonic("DexBuilder", "worker");
+    List<String> spawnStrategies = new ArrayList<>(options.spawnStrategy);
 
-    for (Map.Entry<String, String> strategy : options.strategy) {
-      String strategyName = strategy.getValue();
-      // TODO(philwo) - remove this when the standalone / local mess is cleaned up.
-      // Some flag expansions use "local" as the strategy name, but the strategy is now called
-      // "standalone", so we'll translate it here.
-      if (strategyName.equals("local")) {
-        strategyName = "standalone";
+    if (options.incompatibleListBasedExecutionStrategySelection) {
+      if (spawnStrategies.isEmpty()) {
+        if (RemoteModule.shouldEnableRemoteExecution(remoteOptions)) {
+          spawnStrategies.add("remote");
+        }
+        spawnStrategies.add("worker");
+        // Sandboxing is not yet available on Windows.
+        if (OS.getCurrent() != OS.WINDOWS) {
+          spawnStrategies.add("sandboxed");
+        }
+        spawnStrategies.add("local");
       }
-      builder.addStrategyByMnemonic(strategy.getKey(), strategyName);
+    } else {
+      // Default strategies for certain mnemonics - they can be overridden by --strategy= flags.
+      builder.addStrategyByMnemonic("Javac", ImmutableList.of("worker"));
+      builder.addStrategyByMnemonic("Closure", ImmutableList.of("worker"));
+      builder.addStrategyByMnemonic("DexBuilder", ImmutableList.of("worker"));
+
+      // The --spawn_strategy= flag is a bit special: If it's set to the empty string, we actually
+      // have to pass a literal empty string to the builder to trigger the "use the strategy that
+      // was registered last" behavior. Otherwise we would have no default strategy at all and Bazel
+      // would crash.
+      if (spawnStrategies.isEmpty()) {
+        spawnStrategies = ImmutableList.of("");
+      }
     }
 
-    if (!options.genruleStrategy.isEmpty()) {
-      builder.addStrategyByMnemonic("Genrule", options.genruleStrategy);
+    // Allow genrule_strategy to also be overridden by --strategy= flags.
+    builder.addStrategyByMnemonic("Genrule", options.genruleStrategy);
+
+    for (Map.Entry<String, List<String>> strategy : options.strategy) {
+      builder.addStrategyByMnemonic(strategy.getKey(), strategy.getValue());
     }
 
-    // TODO(bazel-team): put this in getActionContexts (key=SpawnActionContext.class) instead
-    if (!options.spawnStrategy.isEmpty()) {
-      builder.addStrategyByMnemonic("", options.spawnStrategy);
+    builder.addStrategyByMnemonic("", spawnStrategies);
+
+    for (Map.Entry<RegexFilter, List<String>> entry : options.strategyByRegexp) {
+      builder.addStrategyByRegexp(entry.getKey(), entry.getValue());
     }
 
     builder
-        .addStrategyByContext(CppCompileActionContext.class, "")
         .addStrategyByContext(CppIncludeExtractionContext.class, "")
         .addStrategyByContext(CppIncludeScanningContext.class, "")
         .addStrategyByContext(FileWriteActionContext.class, "")

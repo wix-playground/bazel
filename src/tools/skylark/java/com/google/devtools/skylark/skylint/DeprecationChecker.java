@@ -19,8 +19,9 @@ import com.google.devtools.build.lib.syntax.FunctionDefStatement;
 import com.google.devtools.build.lib.syntax.Identifier;
 import com.google.devtools.build.lib.syntax.LoadStatement;
 import com.google.devtools.build.lib.syntax.StringLiteral;
+import com.google.devtools.skylark.common.DocstringUtils;
+import com.google.devtools.skylark.common.DocstringUtils.DocstringInfo;
 import com.google.devtools.skylark.skylint.DependencyAnalyzer.DependencyCollector;
-import com.google.devtools.skylark.skylint.DocstringUtils.DocstringInfo;
 import com.google.devtools.skylark.skylint.Environment.NameInfo;
 import com.google.devtools.skylark.skylint.Environment.NameInfo.Kind;
 import com.google.devtools.skylark.skylint.Linter.FileFacade;
@@ -128,9 +129,9 @@ public class DeprecationChecker extends AstVisitorWithNameResolution {
         LoadStatement stmt,
         Path loadedPath,
         Map<String, DeprecatedSymbol> loadedFileInfo) {
-      for (Map.Entry<Identifier, String> entry : stmt.getSymbolMap().entrySet()) {
-        String originalName = entry.getValue();
-        String alias = entry.getKey().getName();
+      for (LoadStatement.Binding binding : stmt.getBindings()) {
+        String originalName = binding.getOriginalName().getName();
+        String alias = binding.getLocalName().getName();
         DeprecatedSymbol originalDeprecation = loadedFileInfo.get(originalName);
         if (originalDeprecation != null) {
           currentFileInfo.put(alias, originalDeprecation);
@@ -147,8 +148,8 @@ public class DeprecationChecker extends AstVisitorWithNameResolution {
         String symbol = entry.getKey();
         StringLiteral docstring = entry.getValue();
         DocstringInfo info = DocstringUtils.parseDocstring(docstring, new ArrayList<>());
-        if (!info.deprecated.isEmpty()) {
-          deprecationInfos.put(symbol, new DeprecatedSymbol(path, symbol, info.deprecated));
+        if (!info.getDeprecated().isEmpty()) {
+          deprecationInfos.put(symbol, new DeprecatedSymbol(path, symbol, info.getDeprecated()));
         }
       }
       return deprecationInfos;

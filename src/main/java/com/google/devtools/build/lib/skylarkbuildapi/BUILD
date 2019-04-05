@@ -12,7 +12,18 @@ licenses(["notice"])  # Apache 2.0
 
 filegroup(
     name = "srcs",
-    srcs = glob(["**"]),
+    srcs = glob(["**"]) + [
+        "//src/main/java/com/google/devtools/build/lib/skylarkbuildapi/android:srcs",
+        "//src/main/java/com/google/devtools/build/lib/skylarkbuildapi/apple:srcs",
+        "//src/main/java/com/google/devtools/build/lib/skylarkbuildapi/config:srcs",
+        "//src/main/java/com/google/devtools/build/lib/skylarkbuildapi/cpp:srcs",
+        "//src/main/java/com/google/devtools/build/lib/skylarkbuildapi/java:srcs",
+        "//src/main/java/com/google/devtools/build/lib/skylarkbuildapi/platform:srcs",
+        "//src/main/java/com/google/devtools/build/lib/skylarkbuildapi/python:srcs",
+        "//src/main/java/com/google/devtools/build/lib/skylarkbuildapi/repository:srcs",
+        "//src/main/java/com/google/devtools/build/lib/skylarkbuildapi/test:srcs",
+        "//src/main/java/com/google/devtools/build/lib/skylarkbuildapi/proto:srcs",
+    ],
 )
 
 java_library(
@@ -20,6 +31,7 @@ java_library(
     srcs = glob(["*.java"]),
     deps = [
         "//src/main/java/com/google/devtools/build/lib:events",
+        "//src/main/java/com/google/devtools/build/lib:skylark_semantics",
         "//src/main/java/com/google/devtools/build/lib:skylarkinterface",
         "//src/main/java/com/google/devtools/build/lib:syntax",
         "//src/main/java/com/google/devtools/build/lib/cmdline",

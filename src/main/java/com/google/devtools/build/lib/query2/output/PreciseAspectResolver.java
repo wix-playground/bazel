@@ -30,11 +30,8 @@ import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.pkgcache.PackageProvider;
-import com.google.devtools.build.lib.util.BinaryPredicate;
 import java.util.LinkedHashSet;
-import java.util.Map;
 import java.util.Set;
-import javax.annotation.Nullable;
 
 /**
  * An aspect resolver that returns only those aspects that are possibly active given the rule
@@ -52,35 +49,50 @@ public class PreciseAspectResolver implements AspectResolver {
   }
 
   @Override
-  public ImmutableMultimap<Attribute, Label> computeAspectDependencies(Target target,
-      DependencyFilter dependencyFilter)
-      throws InterruptedException {
+  public ImmutableMultimap<Attribute, Label> computeAspectDependencies(
+      Target target, DependencyFilter dependencyFilter) throws InterruptedException {
     Multimap<Attribute, Label> result = LinkedListMultimap.create();
     if (target instanceof Rule) {
+      Rule rule = (Rule) target;
       Multimap<Attribute, Label> transitions =
-          ((Rule) target).getTransitions(DependencyFilter.NO_NODEP_ATTRIBUTES);
-      for (Map.Entry<Attribute, Label> entry : transitions.entries()) {
-        Target toTarget;
-        try {
-          toTarget = packageProvider.getTarget(eventHandler, entry.getValue());
-          result.putAll(
-              AspectDefinition.visitAspectsIfRequired(
-                  target,
-                  entry.getKey(),
-                  toTarget,
-                  dependencyFilter));
-        } catch (NoSuchThingException e) {
-          // Do nothing. One of target direct deps has an error. The dependency on the BUILD file
-          // (or one of the files included in it) will be reported in the query result of :BUILD.
+          rule.getTransitions(DependencyFilter.NO_NODEP_ATTRIBUTES);
+      for (Attribute attribute : transitions.keySet()) {
+        for (Aspect aspect : attribute.getAspects(rule)) {
+          if (hasDepThatSatisfies(aspect, transitions.get(attribute))) {
+            AspectDefinition.forEachLabelDepFromAllAttributesOfAspect(
+                rule, aspect, dependencyFilter, result::put);
+          }
         }
       }
     }
     return ImmutableMultimap.copyOf(result);
   }
 
-  @Override
-  public Set<Label> computeBuildFileDependencies(Package pkg)
+  private boolean hasDepThatSatisfies(Aspect aspect, Iterable<Label> labelDeps)
       throws InterruptedException {
+    for (Label toLabel : labelDeps) {
+      Target toTarget;
+      try {
+        toTarget = packageProvider.getTarget(eventHandler, toLabel);
+      } catch (NoSuchThingException e) {
+        // Do nothing interesting. One of target direct deps has an error. The dependency on the
+        // BUILD file (or one of the files included in it) will be reported in the query result of
+        // :BUILD.
+        continue;
+      }
+      if (!(toTarget instanceof Rule)) {
+        continue;
+      }
+      if (AspectDefinition.satisfies(
+          aspect, ((Rule) toTarget).getRuleClassObject().getAdvertisedProviders())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  @Override
+  public Set<Label> computeBuildFileDependencies(Package pkg) throws InterruptedException {
     Set<Label> result = new LinkedHashSet<>();
     result.addAll(pkg.getSkylarkFileDependencies());
 
@@ -97,17 +109,14 @@ public class PreciseAspectResolver implements AspectResolver {
       Multimap<Attribute, Label> depsWithPossibleAspects =
           ((Rule) target)
               .getTransitions(
-                  new BinaryPredicate<Rule, Attribute>() {
-                    @Override
-                    public boolean apply(@Nullable Rule rule, Attribute attribute) {
-                      for (Aspect aspectWithParameters : attribute.getAspects(rule)) {
-                        if (!aspectWithParameters.getDefinition().getAttributes().isEmpty()) {
-                          return true;
-                        }
+                  (Rule rule, Attribute attribute) -> {
+                    for (Aspect aspectWithParameters : attribute.getAspects(rule)) {
+                      if (!aspectWithParameters.getDefinition().getAttributes().isEmpty()) {
+                        return true;
                       }
-
-                      return false;
                     }
+
+                    return false;
                   });
 
       // ...and add the package of the aspect.

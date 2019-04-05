@@ -16,13 +16,14 @@ package com.google.devtools.build.lib.util.io;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.io.ByteStreams;
 import com.google.devtools.build.lib.concurrent.ThreadSafety;
+import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
-import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.PrintStream;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * An implementation of {@link OutErr} that captures all out/err output into
@@ -37,6 +38,8 @@ import java.io.PrintStream;
 // individually ThreadCompatible.
 @ThreadSafety.ThreadCompatible
 public class FileOutErr extends OutErr {
+
+  private final AtomicInteger childCount = new AtomicInteger();
 
   /**
    * Create a new FileOutErr that will write its input,
@@ -81,16 +84,6 @@ public class FileOutErr extends OutErr {
     // We need this function to duplicate the single new object into both arguments
     // of the super-constructor.
     super(stream, stream);
-  }
-
-  // Set a filter for FileOutputStream
-  public void setOutputFilter(OutputFilter outputFilter) {
-    getFileOutputStream().setFilter(outputFilter);
-  }
-
-  // Set a filter for FileErrorStream
-  public void setErrorFilter(OutputFilter outputFilter) {
-    getFileErrorStream().setFilter(outputFilter);
   }
 
   /**
@@ -171,11 +164,20 @@ public class FileOutErr extends OutErr {
   }
 
   /**
-   * Writes the captured out content to the given output stream,
+   * Writes the captured error content to the given error stream,
    * avoiding keeping the entire contents in memory.
    */
   public void dumpErrAsLatin1(OutputStream out) {
     getFileErrorStream().dumpOut(out);
+  }
+
+  /**
+   * Writes the captured content to the given {@link FileOutErr},
+   * avoiding keeping the entire contents in memory.
+   */
+  public static void dump(FileOutErr from, FileOutErr to) {
+    from.dumpOutAsLatin1(to.getOutputStream());
+    from.dumpErrAsLatin1(to.getErrorStream());
   }
 
   private AbstractFileRecordingOutputStream getFileOutputStream() {
@@ -186,6 +188,18 @@ public class FileOutErr extends OutErr {
     return (AbstractFileRecordingOutputStream) getErrorStream();
   }
 
+  @ThreadSafe
+  public FileOutErr childOutErr() {
+    int index = childCount.getAndIncrement();
+    Path outPath = getFileOutputStream().getFileUnsafe();
+    Path errPath = getFileErrorStream().getFileUnsafe();
+    if (outPath == null || errPath == null) {
+      return new FileOutErr();
+    }
+    return new FileOutErr(
+        outPath.getParentDirectory().getRelative(outPath.getBaseName() + "-" + index),
+        errPath.getParentDirectory().getRelative(errPath.getBaseName() + "-" + index));
+  }
   /**
    * An abstract supertype for the two other inner classes in this type
    * to implement streams that can write to a file.
@@ -220,15 +234,10 @@ public class FileOutErr extends OutErr {
      */
     abstract void dumpOut(OutputStream out);
 
+    abstract Path getFileUnsafe();
+
     /** Closes and deletes the output. */
     abstract void clear() throws IOException;
-
-    /**
-     * Set a Filter for the output
-     *
-     * @param outputFilter
-     */
-    abstract void setFilter(OutputFilter outputFilter);
   }
 
   /**
@@ -247,6 +256,11 @@ public class FileOutErr extends OutErr {
 
     @Override
     Path getFile() {
+      return null;
+    }
+
+    @Override
+    Path getFileUnsafe() {
       return null;
     }
 
@@ -270,10 +284,6 @@ public class FileOutErr extends OutErr {
     }
 
     @Override
-    void setFilter(OutputFilter outputFilter) {}
-
-
-    @Override
     public void write(byte[] b, int off, int len) {
     }
 
@@ -284,11 +294,6 @@ public class FileOutErr extends OutErr {
     @Override
     public void write(byte[] b) {
     }
-  }
-
-  /** An interface to get a filtered output stream from the original one. */
-  public interface OutputFilter {
-    FilterOutputStream getFilteredOutputStream(OutputStream outputStream);
   }
 
   /**
@@ -314,7 +319,6 @@ public class FileOutErr extends OutErr {
     private final Path outputFile;
     private OutputStream outputStream;
     private String error;
-    private OutputFilter outputFilter;
     private boolean mightHaveOutput = false;
 
     protected FileRecordingOutputStream(Path outputFile) {
@@ -334,6 +338,11 @@ public class FileOutErr extends OutErr {
       return outputFile;
     }
 
+    @Override
+    Path getFileUnsafe() {
+      return outputFile;
+    }
+
     private void markDirty() {
       mightHaveOutput = true;
     }
@@ -342,9 +351,6 @@ public class FileOutErr extends OutErr {
       // you should hold the lock before you invoke this method
       if (outputStream == null) {
         outputStream = outputFile.getOutputStream();
-        if (outputFilter != null) {
-          outputStream = outputFilter.getFilteredOutputStream(outputStream);
-        }
       }
       return outputStream;
     }
@@ -359,11 +365,6 @@ public class FileOutErr extends OutErr {
       outputStream = null;
       outputFile.delete();
       mightHaveOutput = false;
-    }
-
-    @Override
-    void setFilter(OutputFilter outputFilter) {
-      this.outputFilter = outputFilter;
     }
 
     /**
@@ -416,6 +417,7 @@ public class FileOutErr extends OutErr {
         if (mightHaveOutput && getFile().exists()) {
           try (InputStream in = getFile().getInputStream()) {
             ByteStreams.copy(in, out);
+            out.flush();
           }
         }
       } catch (IOException ex) {

@@ -10,7 +10,7 @@ a datacenter. A [gRPC protocol](https://github.com/googleapis/googleapis/blob/ma
 is currently in development. You can try remote execution with [bazel-buildfarm](https://github.com/bazelbuild/bazel-buildfarm),
 an open-source project that aims to provide a distributed remote execution
 platform. This document is intended for Bazel users writing custom build and
-test rules in Skylark who want to understand the requirements for Bazel rules in
+test rules who want to understand the requirements for Bazel rules in
 the context of remote execution.
 
 This document uses the following terminology when referring to different
@@ -132,12 +132,14 @@ remote execution:
     build to fail on the remote execution platform as Bazel will not be able to
     locate them. Instead, create symlinks using standard build actions so that
     the symlinked tools and libraries are accessible from Bazel's `runfiles`
-    tree. Do not use [`repository_ctx.symlink`](https://docs.bazel.build/versions/master/skylark/lib/repository_ctx.html#symlink)
+    tree. Do not use [`repository_ctx.symlink`](skylark/lib/repository_ctx.html#symlink)
     to symlink target files outside of the external repo directory.
 
 *   **Mutating the host platform.** Avoid creating files outside of the Bazel
     `runfiles` tree, creating environment variables, and similar actions, as
      they may behave unexpectedly on the remote execution platform.
+
+To help find potential non-hermetic behavior you can use [Workspace rules log](/workspace-log.md).
 
 If an external dependency executes specific operations dependent on the host
 platform, we recommend splitting those operations between `WORKSPACE` and build

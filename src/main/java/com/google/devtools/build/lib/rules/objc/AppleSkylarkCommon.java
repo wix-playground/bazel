@@ -26,13 +26,12 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.packages.Attribute.SplitTransitionProvider;
-import com.google.devtools.build.lib.packages.Info;
 import com.google.devtools.build.lib.packages.NativeProvider;
 import com.google.devtools.build.lib.packages.Provider;
 import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
 import com.google.devtools.build.lib.packages.SkylarkAspect;
 import com.google.devtools.build.lib.packages.SkylarkInfo;
+import com.google.devtools.build.lib.packages.StructImpl;
 import com.google.devtools.build.lib.rules.apple.AppleConfiguration;
 import com.google.devtools.build.lib.rules.apple.ApplePlatform;
 import com.google.devtools.build.lib.rules.apple.ApplePlatform.PlatformType;
@@ -42,13 +41,16 @@ import com.google.devtools.build.lib.rules.apple.XcodeConfigProvider;
 import com.google.devtools.build.lib.rules.apple.XcodeVersionProperties;
 import com.google.devtools.build.lib.rules.objc.AppleBinary.AppleBinaryOutput;
 import com.google.devtools.build.lib.rules.objc.ObjcProvider.Key;
+import com.google.devtools.build.lib.skylarkbuildapi.FileApi;
 import com.google.devtools.build.lib.skylarkbuildapi.SkylarkRuleContextApi;
+import com.google.devtools.build.lib.skylarkbuildapi.SplitTransitionProviderApi;
 import com.google.devtools.build.lib.skylarkbuildapi.apple.AppleCommonApi;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkValue;
 import com.google.devtools.build.lib.syntax.Environment;
 import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.syntax.Runtime;
 import com.google.devtools.build.lib.syntax.SkylarkDict;
+import com.google.devtools.build.lib.syntax.SkylarkList;
 import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.Map;
@@ -83,8 +85,8 @@ public class AppleSkylarkCommon
   @VisibleForTesting
   public static final String MISSING_KEY_ERROR = "No value for required key %s was present.";
 
-  @Nullable private Info platformType;
-  @Nullable private Info platform;
+  @Nullable private StructImpl platformType;
+  @Nullable private StructImpl platform;
 
   private ObjcProtoAspect objcProtoAspect;
 
@@ -98,7 +100,7 @@ public class AppleSkylarkCommon
   }
 
   @Override
-  public Info getPlatformTypeStruct() {
+  public StructImpl getPlatformTypeStruct() {
     if (platformType == null) {
       platformType = PlatformType.getSkylarkStruct();
     }
@@ -106,7 +108,7 @@ public class AppleSkylarkCommon
   }
 
   @Override
-  public Info getPlatformStruct() {
+  public StructImpl getPlatformStruct() {
     if (platform == null) {
       platform = ApplePlatform.getSkylarkStruct();
     }
@@ -173,7 +175,7 @@ public class AppleSkylarkCommon
   }
 
   @Override
-  public SplitTransitionProvider getMultiArchSplitProvider() {
+  public SplitTransitionProviderApi getMultiArchSplitProvider() {
     return new MultiArchSplitTransitionProvider();
   }
 
@@ -209,7 +211,7 @@ public class AppleSkylarkCommon
 
   @Override
   public AppleDynamicFrameworkInfo newDynamicFrameworkProvider(
-      Artifact dylibBinary,
+      Object dylibBinary,
       ObjcProvider depsObjcProvider,
       Object dynamicFrameworkDirs,
       Object dynamicFrameworkFiles) {
@@ -228,18 +230,27 @@ public class AppleSkylarkCommon
         dynamicFrameworkFiles != Runtime.NONE
             ? ((SkylarkNestedSet) dynamicFrameworkFiles).getSet(Artifact.class)
             : NestedSetBuilder.<Artifact>emptySet(Order.STABLE_ORDER);
+    Artifact binary = (dylibBinary != Runtime.NONE) ? (Artifact) dylibBinary : null;
+
     return new AppleDynamicFrameworkInfo(
-        dylibBinary, depsObjcProvider, frameworkDirs, frameworkFiles);
+        binary, depsObjcProvider, frameworkDirs, frameworkFiles);
   }
 
   @Override
-  public Info linkMultiArchBinary(
-      SkylarkRuleContextApi skylarkRuleContextApi, Environment environment)
+  public StructImpl linkMultiArchBinary(
+      SkylarkRuleContextApi skylarkRuleContextApi,
+      SkylarkList<String> extraLinkopts,
+      SkylarkList<? extends FileApi> extraLinkInputs,
+      Environment environment)
       throws EvalException, InterruptedException {
     SkylarkRuleContext skylarkRuleContext = (SkylarkRuleContext) skylarkRuleContextApi;
     try {
       RuleContext ruleContext = skylarkRuleContext.getRuleContext();
-      AppleBinaryOutput appleBinaryOutput = AppleBinary.linkMultiArchBinary(ruleContext);
+      AppleBinaryOutput appleBinaryOutput =
+          AppleBinary.linkMultiArchBinary(
+              ruleContext,
+              extraLinkopts.getImmutableList(),
+              SkylarkList.castList(extraLinkInputs, Artifact.class, "extra_link_inputs"));
       return createAppleBinaryOutputSkylarkStruct(appleBinaryOutput, environment);
     } catch (RuleErrorException | ActionConflictException exception) {
       throw new EvalException(null, exception);
@@ -260,9 +271,10 @@ public class AppleSkylarkCommon
    * Creates a Skylark struct that contains the results of the {@code link_multi_arch_binary}
    * function.
    */
-  private Info createAppleBinaryOutputSkylarkStruct(
+  private StructImpl createAppleBinaryOutputSkylarkStruct(
       AppleBinaryOutput output, Environment environment) {
-    Provider constructor = new NativeProvider<Info>(Info.class, "apple_binary_output") {};
+    Provider constructor =
+        new NativeProvider<StructImpl>(StructImpl.class, "apple_binary_output") {};
     // We have to transform the output group dictionary into one that contains SkylarkValues instead
     // of plain NestedSets because the Skylark caller may want to return this directly from their
     // implementation function.

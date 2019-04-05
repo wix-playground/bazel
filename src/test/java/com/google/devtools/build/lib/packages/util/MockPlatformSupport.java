@@ -17,15 +17,25 @@ import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.testutil.TestConstants;
 import java.io.IOException;
+import javax.annotation.Nullable;
 
 /** Mocking support for platforms and toolchains. */
 public class MockPlatformSupport {
 
   /** Adds mocks for basic host and target platform. */
-  public static void setup(MockToolsConfig mockToolsConfig, String platformsPath)
+  public static void setup(MockToolsConfig mockToolsConfig, String bazelToolsPlatformsPath)
+      throws IOException {
+    setup(mockToolsConfig, bazelToolsPlatformsPath, null);
+  }
+
+  /** Adds mocks for basic host and target platform. */
+  public static void setup(
+      MockToolsConfig mockToolsConfig,
+      String bazelToolsPlatformsPath,
+      @Nullable String localConfigPlatformPath)
       throws IOException {
     mockToolsConfig.create(
-        platformsPath + "/BUILD",
+        bazelToolsPlatformsPath + "/BUILD",
         "package(default_visibility=['//visibility:public'])",
         "constraint_setting(name = 'cpu')",
         "constraint_value(",
@@ -42,6 +52,14 @@ public class MockPlatformSupport {
         ")",
         "constraint_value(",
         "    name = 'arm',",
+        "    constraint_setting = ':cpu',",
+        ")",
+        "constraint_value(",
+        "    name = 'aarch64',",
+        "    constraint_setting = ':cpu',",
+        ")",
+        "constraint_value(",
+        "    name = 's390x',",
         "    constraint_setting = ':cpu',",
         ")",
         "constraint_setting(name = 'os')",
@@ -63,6 +81,10 @@ public class MockPlatformSupport {
         ")",
         "constraint_value(",
         "    name = 'windows',",
+        "    constraint_setting = ':os',",
+        ")",
+        "constraint_value(",
+        "    name = 'freebsd',",
         "    constraint_setting = ':os',",
         ")",
         "platform(",
@@ -95,10 +117,31 @@ public class MockPlatformSupport {
         "        ':windows',",
         "    ],",
         ")");
+    mockToolsConfig.create(
+        bazelToolsPlatformsPath + "/java/constraints/BUILD",
+        "package(default_visibility = ['//visibility:public'])",
+        "constraint_setting(name = 'runtime')",
+        "constraint_value(",
+        "    name = 'jdk8',",
+        "    constraint_setting = ':runtime',",
+        ")",
+        "constraint_value(",
+        "    name = 'jdk11',",
+        "    constraint_setting = ':runtime',",
+        ")");
+    if (localConfigPlatformPath != null) {
+      // Only create these if the local config workspace exists.
+      mockToolsConfig.create(
+          localConfigPlatformPath + "/WORKSPACE", "workspace(name = 'local_config_platform')");
+      mockToolsConfig.create(
+          localConfigPlatformPath + "/BUILD",
+          "package(default_visibility=['//visibility:public'])",
+          "platform(name = 'host')");
+    }
   }
 
-  /** Adds a mock piii platform. */
-  public static void addMockPiiiPlatform(MockToolsConfig mockToolsConfig, Label crosstoolLabel)
+  /** Adds a mock K8 platform. */
+  public static void addMockK8Platform(MockToolsConfig mockToolsConfig, Label crosstoolLabel)
       throws Exception {
     mockToolsConfig.create(
         "mock_platform/BUILD",
@@ -106,14 +149,14 @@ public class MockPlatformSupport {
         "constraint_setting(name = 'mock_setting')",
         "constraint_value(name = 'mock_value', constraint_setting = ':mock_setting')",
         "platform(",
-        "   name = 'mock-piii-platform',",
+        "   name = 'mock-k8-platform',",
         "   constraint_values = [':mock_value'],",
         ")",
         "toolchain(",
-        "   name = 'toolchain_cc-compiler-piii',",
+        "   name = 'toolchain_cc-compiler-k8',",
         "   toolchain_type = '" + TestConstants.TOOLS_REPOSITORY + "//tools/cpp:toolchain_type',",
         "   toolchain = '"
-            + crosstoolLabel.getRelativeWithRemapping("cc-compiler-piii", ImmutableMap.of())
+            + crosstoolLabel.getRelativeWithRemapping("cc-compiler-k8-compiler", ImmutableMap.of())
             + "',",
         "   target_compatible_with = [':mock_value'],",
         ")");

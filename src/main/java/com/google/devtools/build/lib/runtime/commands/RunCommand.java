@@ -30,6 +30,7 @@ import com.google.devtools.build.lib.analysis.RunfilesSupport;
 import com.google.devtools.build.lib.analysis.ShToolchain;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.RunUnder;
+import com.google.devtools.build.lib.analysis.test.TestConfiguration;
 import com.google.devtools.build.lib.analysis.test.TestProvider;
 import com.google.devtools.build.lib.analysis.test.TestRunnerAction;
 import com.google.devtools.build.lib.analysis.test.TestTargetExecutionSettings;
@@ -38,6 +39,7 @@ import com.google.devtools.build.lib.buildtool.BuildRequestOptions;
 import com.google.devtools.build.lib.buildtool.BuildResult;
 import com.google.devtools.build.lib.buildtool.BuildTool;
 import com.google.devtools.build.lib.buildtool.OutputDirectoryLinksUtils;
+import com.google.devtools.build.lib.buildtool.PathPrettyPrinter;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.Reporter;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
@@ -66,6 +68,7 @@ import com.google.devtools.build.lib.util.CommandDescriptionForm;
 import com.google.devtools.build.lib.util.CommandFailureUtils;
 import com.google.devtools.build.lib.util.ExitCode;
 import com.google.devtools.build.lib.util.FileType;
+import com.google.devtools.build.lib.util.OS;
 import com.google.devtools.build.lib.util.OptionsUtils;
 import com.google.devtools.build.lib.util.ShellEscaper;
 import com.google.devtools.build.lib.util.io.OutErr;
@@ -77,7 +80,7 @@ import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
 import com.google.devtools.common.options.OptionsBase;
 import com.google.devtools.common.options.OptionsParser;
-import com.google.devtools.common.options.OptionsProvider;
+import com.google.devtools.common.options.OptionsParsingResult;
 import com.google.protobuf.ByteString;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -187,16 +190,15 @@ public class RunCommand implements BlazeCommand  {
     BuildRequestOptions requestOptions = env.getOptions().getOptions(BuildRequestOptions.class);
 
     PathFragment executablePath = executable.getPath().asFragment();
-    PathFragment prettyExecutablePath =
-        OutputDirectoryLinksUtils.getPrettyPath(
-            executable.getPath(),
-            env.getWorkspaceName(),
+    PathPrettyPrinter prettyPrinter =
+        OutputDirectoryLinksUtils.getPathPrettyPrinter(
+            requestOptions.getSymlinkPrefix(productName),
+            productName,
             env.getWorkspace(),
             requestOptions.printWorkspaceInOutputPathsIfNeeded
                 ? env.getWorkingDirectory()
-                : env.getWorkspace(),
-            requestOptions.getSymlinkPrefix(productName),
-            productName);
+                : env.getWorkspace());
+    PathFragment prettyExecutablePath = prettyPrinter.getPrettyPath(executable.getPath());
 
     RunUnder runUnder = env.getOptions().getOptions(BuildConfiguration.Options.class).runUnder;
     // Insert the command prefix specified by the "--run_under=<command-prefix>" option
@@ -233,7 +235,7 @@ public class RunCommand implements BlazeCommand  {
   }
 
   @Override
-  public BlazeCommandResult exec(CommandEnvironment env, OptionsProvider options) {
+  public BlazeCommandResult exec(CommandEnvironment env, OptionsParsingResult options) {
     RunOptions runOptions = options.getOptions(RunOptions.class);
     // This list should look like: ["//executable:target", "arg1", "arg2"]
     List<String> targetAndArgs = options.getResidue();
@@ -387,8 +389,11 @@ public class RunCommand implements BlazeCommand  {
       Path tmpDirRoot = TestStrategy.getTmpRoot(
           env.getWorkspace(), env.getExecRoot(), executionOptions);
       PathFragment relativeTmpDir = tmpDirRoot.relativeTo(env.getExecRoot());
-      Duration timeout = configuration.getTestTimeout().get(
-          testAction.getTestProperties().getTimeout());
+      Duration timeout =
+          configuration
+              .getFragment(TestConfiguration.class)
+              .getTestTimeout()
+              .get(testAction.getTestProperties().getTimeout());
       runEnvironment.putAll(testPolicy.computeTestEnvironment(
           testAction,
           env.getClientEnv(),
@@ -507,7 +512,8 @@ public class RunCommand implements BlazeCommand  {
         runfilesSupport.getRunfilesDirectory(),
         false);
     helper.createSymlinksUsingCommand(
-        env.getExecRoot(), env.getBlazeWorkspace().getBinTools(), ImmutableMap.of());
+        env.getExecRoot(), env.getBlazeWorkspace().getBinTools(),
+        /* shellEnvironment= */ ImmutableMap.of(), /* outErr= */ null);
     return workingDir;
   }
 
@@ -518,11 +524,19 @@ public class RunCommand implements BlazeCommand  {
       String cmd) {
     Path scriptPath = env.getWorkingDirectory().getRelative(scriptPathFrag);
     try {
-      FileSystemUtils.writeContent(
-          scriptPath,
-          StandardCharsets.ISO_8859_1,
-          "#!" + shellExecutable.getPathString() + "\n" + cmd + " \"$@\"");
-      scriptPath.setExecutable(true);
+      if (OS.getCurrent() == OS.WINDOWS) {
+        FileSystemUtils.writeContent(
+            scriptPath,
+            StandardCharsets.ISO_8859_1,
+            "@echo off\n" + cmd + " %*");
+        scriptPath.setExecutable(true);
+      } else {
+        FileSystemUtils.writeContent(
+            scriptPath,
+            StandardCharsets.ISO_8859_1,
+            "#!" + shellExecutable.getPathString() + "\n" + cmd + " \"$@\"");
+        scriptPath.setExecutable(true);
+      }
     } catch (IOException e) {
       env.getReporter().handle(Event.error("Error writing run script:" + e.getMessage()));
       return false;

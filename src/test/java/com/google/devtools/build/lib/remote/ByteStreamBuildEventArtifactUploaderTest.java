@@ -17,6 +17,7 @@ import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 
+import build.bazel.remote.execution.v2.Digest;
 import com.google.bytestream.ByteStreamProto.WriteRequest;
 import com.google.bytestream.ByteStreamProto.WriteResponse;
 import com.google.common.io.BaseEncoding;
@@ -28,14 +29,13 @@ import com.google.devtools.build.lib.buildeventstream.PathConverter;
 import com.google.devtools.build.lib.clock.JavaClock;
 import com.google.devtools.build.lib.remote.ByteStreamUploaderTest.FixedBackoff;
 import com.google.devtools.build.lib.remote.ByteStreamUploaderTest.MaybeFailOnceUploadService;
-import com.google.devtools.build.lib.remote.Retrier.RetryException;
 import com.google.devtools.build.lib.remote.util.DigestUtil;
+import com.google.devtools.build.lib.remote.util.TestUtils;
 import com.google.devtools.build.lib.remote.util.TracingMetadataUtils;
 import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
-import com.google.devtools.remoteexecution.v1test.Digest;
 import io.grpc.Context;
 import io.grpc.ManagedChannel;
 import io.grpc.Server;
@@ -138,14 +138,13 @@ public class ByteStreamBuildEventArtifactUploaderTest {
     serviceRegistry.addService(new MaybeFailOnceUploadService(blobsByHash));
 
     RemoteRetrier retrier =
-        new RemoteRetrier(
-            () -> new FixedBackoff(1, 0), (e) -> true, retryService, Retrier.ALLOW_ALL_CALLS);
+        TestUtils.newRemoteRetrier(() -> new FixedBackoff(1, 0), (e) -> true, retryService);
     ReferenceCountedChannel refCntChannel = new ReferenceCountedChannel(channel);
     ByteStreamUploader uploader =
         new ByteStreamUploader("instance", refCntChannel, null, 3, retrier);
     ByteStreamBuildEventArtifactUploader artifactUploader =
         new ByteStreamBuildEventArtifactUploader(
-            uploader, "localhost", withEmptyMetadata, "instance");
+            uploader, "localhost", withEmptyMetadata, "instance", /* maxUploadThreads= */ 100);
 
     PathConverter pathConverter = artifactUploader.upload(filesToUpload).get();
     for (Path file : filesToUpload.keySet()) {
@@ -171,7 +170,7 @@ public class ByteStreamBuildEventArtifactUploaderTest {
     ByteStreamUploader uploader = mock(ByteStreamUploader.class);
     ByteStreamBuildEventArtifactUploader artifactUploader =
         new ByteStreamBuildEventArtifactUploader(
-            uploader, "localhost", withEmptyMetadata, "instance");
+            uploader, "localhost", withEmptyMetadata, "instance", /* maxUploadThreads= */ 100);
     PathConverter pathConverter = artifactUploader.upload(filesToUpload).get();
     assertThat(pathConverter.apply(dir)).isNull();
     artifactUploader.shutdown();
@@ -227,20 +226,18 @@ public class ByteStreamBuildEventArtifactUploaderTest {
     });
 
     RemoteRetrier retrier =
-        new RemoteRetrier(
-            () -> new FixedBackoff(1, 0), (e) -> true, retryService, Retrier.ALLOW_ALL_CALLS);
+        TestUtils.newRemoteRetrier(() -> new FixedBackoff(1, 0), (e) -> true, retryService);
     ReferenceCountedChannel refCntChannel = new ReferenceCountedChannel(channel);
     ByteStreamUploader uploader =
         new ByteStreamUploader("instance", refCntChannel, null, 3, retrier);
     ByteStreamBuildEventArtifactUploader artifactUploader =
         new ByteStreamBuildEventArtifactUploader(
-            uploader, "localhost", withEmptyMetadata, "instance");
+            uploader, "localhost", withEmptyMetadata, "instance", /* maxUploadThreads= */ 100);
 
     try {
       artifactUploader.upload(filesToUpload).get();
       fail("exception expected.");
     } catch (ExecutionException e) {
-      assertThat(e.getCause()).isInstanceOf(RetryException.class);
       assertThat(Status.fromThrowable(e).getCode()).isEqualTo(Status.CANCELLED.getCode());
     }
 

@@ -23,7 +23,6 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
-import com.google.devtools.build.lib.analysis.config.ConfigurationEnvironment;
 import com.google.devtools.build.lib.analysis.config.ConfigurationFragmentFactory;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
 import com.google.devtools.build.lib.analysis.skylark.annotations.SkylarkConfigurationField;
@@ -31,14 +30,12 @@ import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.rules.apple.AppleCommandLineOptions.AppleBitcodeMode;
 import com.google.devtools.build.lib.rules.apple.ApplePlatform.PlatformType;
-import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.skylarkbuildapi.apple.AppleConfigurationApi;
 import java.util.ArrayList;
 import java.util.List;
 import javax.annotation.Nullable;
 
 /** A configuration containing flags required for Apple platforms and tools. */
-@AutoCodec
 @Immutable
 public class AppleConfiguration extends BuildConfiguration.Fragment
     implements AppleConfigurationApi<PlatformType> {
@@ -75,14 +72,12 @@ public class AppleConfiguration extends BuildConfiguration.Fragment
   private final ImmutableList<String> macosCpus;
   private final AppleBitcodeMode bitcodeMode;
   private final Label xcodeConfigLabel;
-  private final boolean enableAppleCrosstool;
   private final AppleCommandLineOptions options;
   @Nullable private final Label defaultProvisioningProfileLabel;
   private final boolean mandatoryMinimumVersion;
   private final boolean objcProviderFromLinked;
 
-  @AutoCodec.Instantiator
-  AppleConfiguration(AppleCommandLineOptions options, String iosCpu) {
+  private AppleConfiguration(AppleCommandLineOptions options, String iosCpu) {
     this.options = options;
     this.iosCpu = iosCpu;
     this.appleSplitCpu = Preconditions.checkNotNull(options.appleSplitCpu, "appleSplitCpu");
@@ -103,7 +98,6 @@ public class AppleConfiguration extends BuildConfiguration.Fragment
     this.bitcodeMode = options.appleBitcodeMode;
     this.xcodeConfigLabel =
         Preconditions.checkNotNull(options.xcodeVersionConfig, "xcodeConfigLabel");
-    this.enableAppleCrosstool = options.enableAppleCrosstoolTransition;
     this.defaultProvisioningProfileLabel = options.defaultProvisioningProfile;
     this.mandatoryMinimumVersion = options.mandatoryMinimumVersion;
     this.objcProviderFromLinked = options.objcProviderFromLinked;
@@ -383,21 +377,6 @@ public class AppleConfiguration extends BuildConfiguration.Fragment
     return xcodeConfigLabel;
   }
 
-  private boolean shouldDistinguishOutputDirectory() {
-    if (options.appleCrosstoolInOutputDirectoryName) {
-      return configurationDistinguisher != ConfigurationDistinguisher.UNKNOWN;
-    } else {
-      if (configurationDistinguisher == ConfigurationDistinguisher.UNKNOWN) {
-        return false;
-      } else if (configurationDistinguisher == ConfigurationDistinguisher.APPLE_CROSSTOOL
-          && enableAppleCrosstool) {
-        return false;
-      } else {
-        return true;
-      }
-    }
-  }
-
   @Nullable
   @Override
   public String getOutputDirectoryName() {
@@ -410,7 +389,7 @@ public class AppleConfiguration extends BuildConfiguration.Fragment
         components.add("min" + options.getMinimumOsVersion());
       }
     }
-    if (shouldDistinguishOutputDirectory()) {
+    if (configurationDistinguisher != ConfigurationDistinguisher.UNKNOWN) {
       components.add(configurationDistinguisher.getFileSystemName());
     }
 
@@ -460,7 +439,7 @@ public class AppleConfiguration extends BuildConfiguration.Fragment
    */
   public static class Loader implements ConfigurationFragmentFactory {
     @Override
-    public AppleConfiguration create(ConfigurationEnvironment env, BuildOptions buildOptions) {
+    public AppleConfiguration create(BuildOptions buildOptions) {
       AppleCommandLineOptions appleOptions = buildOptions.get(AppleCommandLineOptions.class);
       String cpu = buildOptions.get(BuildConfiguration.Options.class).cpu;
       return AppleConfiguration.create(appleOptions, cpu);
@@ -484,8 +463,6 @@ public class AppleConfiguration extends BuildConfiguration.Fragment
    */
   public enum ConfigurationDistinguisher {
     UNKNOWN("unknown"),
-    /** Split transition distinguisher for {@code ios_application} rule. */
-    IOS_APPLICATION("ios_application"),
     /** Distinguisher for {@code apple_binary} rule with "ios" platform_type. */
     APPLEBIN_IOS("applebin_ios"),
     /** Distinguisher for {@code apple_binary} rule with "watchos" platform_type. */

@@ -17,12 +17,16 @@ package com.google.devtools.build.lib.rules.cpp;
 import static com.google.common.truth.Truth.assertThat;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.platform.ToolchainInfo;
 import com.google.devtools.build.lib.analysis.util.AnalysisMock;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
+import com.google.devtools.build.lib.packages.util.Crosstool.CcToolchainConfig;
+import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.FeatureConfiguration;
 import java.util.List;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -37,7 +41,8 @@ public class CppLinkstampCompileHelperTest extends BuildViewTestCase {
   public void testLinkstampCompileOptionsForExecutable() throws Exception {
     AnalysisMock.get()
         .ccSupport()
-        .setupCrosstool(mockToolsConfig, "builtin_sysroot: '/usr/local/custom-sysroot'");
+        .setupCcToolchainConfig(
+            mockToolsConfig, CcToolchainConfig.builder().withSysroot("/usr/local/custom-sysroot"));
     useConfiguration();
     scratch.file(
         "x/BUILD",
@@ -60,10 +65,16 @@ public class CppLinkstampCompileHelperTest extends BuildViewTestCase {
     CppCompileAction linkstampCompileAction =
         (CppCompileAction) getGeneratingAction(compiledLinkstamp);
 
+    CcToolchainProvider ccToolchainProvider =
+        (CcToolchainProvider)
+            getConfiguredTarget(
+                    ruleClassProvider.getToolsRepository() + "//tools/cpp:current_cc_toolchain")
+                .get(ToolchainInfo.PROVIDER);
+
     List<String> arguments = linkstampCompileAction.getArguments();
     assertThatArgumentsAreValid(
         arguments,
-        getConfiguration(target).getFragment(CppConfiguration.class).toString(),
+        ccToolchainProvider.getToolchainIdentifier(),
         target.getLabel().getCanonicalForm(),
         executable.getFilename());
   }
@@ -90,7 +101,8 @@ public class CppLinkstampCompileHelperTest extends BuildViewTestCase {
   public void testLinkstampCompileOptionsForSharedLibrary() throws Exception {
     AnalysisMock.get()
         .ccSupport()
-        .setupCrosstool(mockToolsConfig, "builtin_sysroot: '/usr/local/custom-sysroot'");
+        .setupCcToolchainConfig(
+            mockToolsConfig, CcToolchainConfig.builder().withSysroot("/usr/local/custom-sysroot"));
     useConfiguration();
     scratch.file(
         "x/BUILD",
@@ -114,17 +126,29 @@ public class CppLinkstampCompileHelperTest extends BuildViewTestCase {
 
     CppCompileAction linkstampCompileAction =
         (CppCompileAction) getGeneratingAction(compiledLinkstamp);
+    CcToolchainProvider ccToolchainProvider =
+        (CcToolchainProvider)
+            getConfiguredTarget(
+                    ruleClassProvider.getToolsRepository() + "//tools/cpp:current_cc_toolchain")
+                .get(ToolchainInfo.PROVIDER);
 
     List<String> arguments = linkstampCompileAction.getArguments();
     assertThatArgumentsAreValid(
         arguments,
-        getConfiguration(target).getFragment(CppConfiguration.class).toString(),
+        ccToolchainProvider.getToolchainIdentifier(),
         target.getLabel().getCanonicalForm(),
         executable.getFilename());
   }
 
   @Test
   public void testLinkstampRespectsPicnessFromConfiguration() throws Exception {
+    getAnalysisMock()
+        .ccSupport()
+        .setupCcToolchainConfig(
+            mockToolsConfig,
+            CcToolchainConfig.builder()
+                .withFeatures(CppRuleClasses.SUPPORTS_PIC, CppRuleClasses.PIC));
+
     useConfiguration("--force_pic");
     scratch.file(
         "x/BUILD",
@@ -203,7 +227,14 @@ public class CppLinkstampCompileHelperTest extends BuildViewTestCase {
     Artifact executable = getExecutable(target);
     CcToolchainProvider toolchain =
         CppHelper.getToolchainUsingDefaultCcToolchainAttribute(getRuleContext(target));
-    boolean usePic = CppHelper.usePicForBinaries(getRuleContext(target), toolchain);
+    CppConfiguration cppConfiguration = getRuleContext(target).getFragment(CppConfiguration.class);
+    FeatureConfiguration featureConfiguration =
+        CcCommon.configureFeaturesOrThrowEvalException(
+            /* requestedFeatures= */ ImmutableSet.of(),
+            /* unsupportedFeatures= */ ImmutableSet.of(),
+            toolchain,
+            cppConfiguration);
+    boolean usePic = CppHelper.usePicForBinaries(toolchain, cppConfiguration, featureConfiguration);
 
     CppLinkAction generatingAction = (CppLinkAction) getGeneratingAction(executable);
 

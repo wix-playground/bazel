@@ -14,13 +14,13 @@
 package com.google.devtools.build.lib.rules.cpp;
 
 import com.google.common.base.Preconditions;
-import com.google.common.base.Supplier;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.config.BuildOptions;
 import com.google.devtools.build.lib.events.Location;
+import com.google.devtools.build.lib.packages.RuleErrorConsumer;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.FeatureConfiguration;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainVariables.StringSequenceBuilder;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainVariables.VariablesExtension;
@@ -37,11 +37,6 @@ public enum CompileBuildVariables {
    * --conlyopt options.
    */
   USER_COMPILE_FLAGS("user_compile_flags"),
-  /**
-   * Variable for all flags coming from legacy crosstool fields, such as compiler_flag,
-   * optional_compiler_flag, cxx_flag.
-   */
-  LEGACY_COMPILE_FLAGS("legacy_compile_flags"),
   /** Variable for flags coming from unfiltered_cxx_flag CROSSTOOL fields. */
   UNFILTERED_COMPILE_FLAGS("unfiltered_compile_flags"),
   /** Variable for the path to the output file when output is an object file. */
@@ -82,6 +77,8 @@ public enum CompileBuildVariables {
   GCOV_GCNO_FILE("gcov_gcno_file"),
   /** Variable for the LTO indexing bitcode file. */
   LTO_INDEXING_BITCODE_FILE("lto_indexing_bitcode_file"),
+  /** Variable marking fission is used. */
+  IS_USING_FISSION("is_using_fission"),
   /** Variable for the per object debug info file. */
   PER_OBJECT_DEBUG_INFO_FILE("per_object_debug_info_file"),
   /** Variable present when the output is compiled as position independent. */
@@ -106,12 +103,15 @@ public enum CompileBuildVariables {
   }
 
   public static CcToolchainVariables setupVariablesOrReportRuleError(
-      RuleContext ruleContext,
+      RuleErrorConsumer ruleErrorConsumer,
       FeatureConfiguration featureConfiguration,
       CcToolchainProvider ccToolchainProvider,
+      BuildOptions buildOptions,
+      CppConfiguration cppConfiguration,
       String sourceFile,
       String outputFile,
       String gcnoFile,
+      boolean isUsingFission,
       String dwoFile,
       String ltoIndexingFile,
       ImmutableList<String> includes,
@@ -132,9 +132,12 @@ public enum CompileBuildVariables {
       return setupVariablesOrThrowEvalException(
           featureConfiguration,
           ccToolchainProvider,
+          buildOptions,
+          cppConfiguration,
           sourceFile,
           outputFile,
           gcnoFile,
+          isUsingFission,
           dwoFile,
           ltoIndexingFile,
           includes,
@@ -150,13 +153,9 @@ public enum CompileBuildVariables {
           getSafePathStrings(includeDirs),
           getSafePathStrings(quoteIncludeDirs),
           getSafePathStrings(systemIncludeDirs),
-          defines,
-          /* addLegacyCxxOptions= */ CppFileTypes.CPP_SOURCE.matches(sourceFile)
-              || CppFileTypes.CPP_HEADER.matches(sourceFile)
-              || CppFileTypes.CPP_MODULE_MAP.matches(sourceFile)
-              || CppFileTypes.CLIF_INPUT_PROTO.matches(sourceFile));
+          defines);
     } catch (EvalException e) {
-      ruleContext.ruleError(e.getMessage());
+      ruleErrorConsumer.ruleError(e.getMessage());
       return CcToolchainVariables.EMPTY;
     }
   }
@@ -164,11 +163,14 @@ public enum CompileBuildVariables {
   public static CcToolchainVariables setupVariablesOrThrowEvalException(
       FeatureConfiguration featureConfiguration,
       CcToolchainProvider ccToolchainProvider,
+      BuildOptions buildOptions,
+      CppConfiguration cppConfiguration,
       String sourceFile,
       // TODO(b/76195763): Remove once blaze with cl/189769259 is released and crosstools are
       // updated.
       String outputFile,
       String gcnoFile,
+      boolean isUsingFission,
       String dwoFile,
       String ltoIndexingFile,
       ImmutableList<String> includes,
@@ -184,8 +186,7 @@ public enum CompileBuildVariables {
       Iterable<String> includeDirs,
       Iterable<String> quoteIncludeDirs,
       Iterable<String> systemIncludeDirs,
-      Iterable<String> defines,
-      boolean addLegacyCxxOptions)
+      Iterable<String> defines)
       throws EvalException {
     Preconditions.checkNotNull(directModuleMaps);
     Preconditions.checkNotNull(includeDirs);
@@ -193,25 +194,14 @@ public enum CompileBuildVariables {
     Preconditions.checkNotNull(systemIncludeDirs);
     Preconditions.checkNotNull(defines);
     CcToolchainVariables.Builder buildVariables =
-        new CcToolchainVariables.Builder(ccToolchainProvider.getBuildVariables());
+        CcToolchainVariables.builder(
+            ccToolchainProvider.getBuildVariables(buildOptions, cppConfiguration));
 
     buildVariables.addStringSequenceVariable(
         USER_COMPILE_FLAGS.getVariableName(), userCompileFlags);
 
-    buildVariables.addLazyStringSequenceVariable(
-        LEGACY_COMPILE_FLAGS.getVariableName(),
-        getLegacyCompileFlagsSupplier(ccToolchainProvider, addLegacyCxxOptions));
-
     if (sourceFile != null) {
       buildVariables.addStringVariable(SOURCE_FILE.getVariableName(), sourceFile);
-    }
-
-    if (sourceFile == null
-        || (!CppFileTypes.OBJC_SOURCE.matches(sourceFile)
-            && !CppFileTypes.OBJCPP_SOURCE.matches(sourceFile))) {
-      buildVariables.addLazyStringSequenceVariable(
-          UNFILTERED_COMPILE_FLAGS.getVariableName(),
-          getUnfilteredCompileFlagsSupplier(ccToolchainProvider));
     }
 
     String fakeOutputFileOrRealOutputFile = fakeOutputFile != null ? fakeOutputFile : outputFile;
@@ -281,7 +271,8 @@ public enum CompileBuildVariables {
     buildVariables.addStringSequenceVariable(PREPROCESSOR_DEFINES.getVariableName(), allDefines);
 
     if (usePic) {
-      if (!featureConfiguration.isEnabled(CppRuleClasses.PIC)) {
+      if (!featureConfiguration.isEnabled(CppRuleClasses.PIC)
+          && !featureConfiguration.isEnabled(CppRuleClasses.SUPPORTS_PIC)) {
         throw new EvalException(Location.BUILTIN, CcCommon.PIC_CONFIGURATION_ERROR);
       }
       buildVariables.addStringVariable(PIC.getVariableName(), "");
@@ -291,6 +282,9 @@ public enum CompileBuildVariables {
       buildVariables.addStringVariable(GCOV_GCNO_FILE.getVariableName(), gcnoFile);
     }
 
+    if (isUsingFission) {
+      buildVariables.addStringVariable(IS_USING_FISSION.getVariableName(), "");
+    }
     if (dwoFile != null) {
       buildVariables.addStringVariable(PER_OBJECT_DEBUG_INFO_FILE.getVariableName(), dwoFile);
     }
@@ -316,35 +310,6 @@ public enum CompileBuildVariables {
         .stream()
         .map(PathFragment::getSafePathString)
         .collect(ImmutableList.toImmutableList());
-  }
-
-  /**
-   * Supplier that computes legacy_compile_flags lazily at the execution phase.
-   *
-   * <p>Dear friends of the lambda, this method exists to limit the scope of captured variables only
-   * to arguments (to prevent accidental capture of enclosing instance which could regress memory).
-   */
-  private static Supplier<ImmutableList<String>> getLegacyCompileFlagsSupplier(
-      CcToolchainProvider toolchain, boolean addLegacyCxxOptions) {
-    return () -> {
-      ImmutableList.Builder<String> legacyCompileFlags = ImmutableList.builder();
-      legacyCompileFlags.addAll(toolchain.getLegacyCompileOptions());
-      if (addLegacyCxxOptions) {
-        legacyCompileFlags.addAll(toolchain.getLegacyCxxOptions());
-      }
-      return legacyCompileFlags.build();
-    };
-  }
-
-  /**
-   * Supplier that computes unfiltered_compile_flags lazily at the execution phase.
-   *
-   * <p>Dear friends of the lambda, this method exists to limit the scope of captured variables only
-   * to arguments (to prevent accidental capture of enclosing instance which could regress memory).
-   */
-  private static Supplier<ImmutableList<String>> getUnfilteredCompileFlagsSupplier(
-      CcToolchainProvider ccToolchain) {
-    return () -> ccToolchain.getUnfilteredCompilerOptions();
   }
 
   private static String toPathString(PathFragment a) {

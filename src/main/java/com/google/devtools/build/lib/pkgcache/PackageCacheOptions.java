@@ -14,6 +14,7 @@
 
 package com.google.devtools.build.lib.pkgcache;
 
+
 import com.google.common.base.Splitter;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
@@ -27,7 +28,6 @@ import com.google.devtools.common.options.Converters;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
-import com.google.devtools.common.options.OptionMetadataTag;
 import com.google.devtools.common.options.OptionsBase;
 import com.google.devtools.common.options.OptionsParsingException;
 import java.util.List;
@@ -150,17 +150,6 @@ public class PackageCacheOptions extends OptionsBase {
             + "this flag to false to see the effect on incremental build times."
   )
   public boolean checkOutputFiles;
-
-  @Option(
-      name = "experimental_enable_tools_defaults_package",
-      defaultValue = "false",
-      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
-      metadataTags = {OptionMetadataTag.EXPERIMENTAL},
-      help =
-          "If true, Blaze constructs an in-memory //tools/defaults package based on the command"
-              + " line options. If false, //tools/defaults is resolved as a regular package.")
-  public boolean experimentalInMemoryToolsDefaultsPackage;
 
   /**
    * A converter from strings containing comma-separated names of packages to lists of strings.

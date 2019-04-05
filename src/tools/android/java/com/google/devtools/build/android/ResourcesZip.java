@@ -37,6 +37,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
@@ -59,6 +60,7 @@ public class ResourcesZip {
   @Nullable private final Path apkWithAssets;
   @Nullable private final Path proto;
   @Nullable private final Path attributes;
+  @Nullable private final Path packages;
   @Nullable private final Path ids;
 
   private ResourcesZip(
@@ -67,13 +69,15 @@ public class ResourcesZip {
       @Nullable Path ids,
       @Nullable Path apkWithAssets,
       @Nullable Path proto,
-      @Nullable Path attributes) {
+      @Nullable Path attributes,
+      @Nullable Path packages) {
     this.resourcesRoot = resourcesRoot;
     this.assetsRoot = assetsRoot;
     this.ids = ids;
     this.apkWithAssets = apkWithAssets;
     this.proto = proto;
     this.attributes = attributes;
+    this.packages = packages;
   }
 
   /**
@@ -81,7 +85,7 @@ public class ResourcesZip {
    * @param assetsRoot The root of the raw assets.
    */
   public static ResourcesZip from(Path resourcesRoot, Path assetsRoot) {
-    return new ResourcesZip(resourcesRoot, assetsRoot, null, null, null, null);
+    return new ResourcesZip(resourcesRoot, assetsRoot, null, null, null, null, null);
   }
 
   /**
@@ -94,6 +98,7 @@ public class ResourcesZip {
         resourcesRoot,
         assetsRoot,
         resourceIds != null && Files.exists(resourceIds) ? resourceIds : null,
+        null,
         null,
         null,
         null);
@@ -111,25 +116,26 @@ public class ResourcesZip {
         resourceIds != null && Files.exists(resourceIds) ? resourceIds : null,
         apkWithAssets,
         null,
+        null,
         null);
   }
 
   /**
    * @param proto apk in proto format.
    * @param attributes Tooling attributes.
-   * @param resourcesRoot The root of the raw resources.
-   * @param apkWithAssets The apk containing assets.
    * @param resourceIds Optional path to a file containing the resource ids.
+   * @param packages Optional path to a file containing the dependency packages.
    */
   public static ResourcesZip fromApkWithProto(
-      Path proto, Path attributes, Path resourcesRoot, Path apkWithAssets, Path resourceIds) {
+      Path proto, Path attributes, Path resourceIds, Path packages) {
     return new ResourcesZip(
-        resourcesRoot,
+        /* resourcesRoot= */ null,
         /* assetsRoot= */ null,
         resourceIds != null && Files.exists(resourceIds) ? resourceIds : null,
-        apkWithAssets,
+        /* apkWithAssets= */ null,
         proto,
-        attributes);
+        attributes,
+        packages);
   }
 
   /** Creates a ResourcesZip from an archive by expanding into the workingDirectory. */
@@ -156,10 +162,16 @@ public class ResourcesZip {
     return new ResourcesZip(
         Files.createDirectories(workingDirectory.resolve("res")),
         Files.createDirectories(workingDirectory.resolve("assets")),
-        workingDirectory.resolve("ids.txt"),
+        ifExists(workingDirectory.resolve("ids.txt")),
+        /** apkWithAssets */
         null,
-        workingDirectory.resolve("apk.pb"),
-        workingDirectory.resolve("tools.attributes.pb"));
+        ifExists(workingDirectory.resolve("apk.pb")),
+        ifExists(workingDirectory.resolve("tools.attributes.pb")),
+        ifExists(workingDirectory.resolve("packages.txt")));
+  }
+
+  private static Path ifExists(Path path) {
+    return Files.exists(path) ? path : null;
   }
 
   /**
@@ -171,7 +183,7 @@ public class ResourcesZip {
    */
   public void writeTo(Path output, boolean compress) throws IOException {
     try (final ZipBuilder zip = ZipBuilder.createFor(output)) {
-      if (Files.exists(resourcesRoot)) {
+      if (resourcesRoot != null && Files.exists(resourcesRoot)) {
         ZipBuilderVisitorWithDirectories visitor =
             new ZipBuilderVisitorWithDirectories(zip, resourcesRoot, "res");
         visitor.setCompress(compress);
@@ -185,7 +197,7 @@ public class ResourcesZip {
         visitor.writeEntries();
       }
 
-      if (apkWithAssets != null) {
+      if (apkWithAssets != null && Files.exists(apkWithAssets)) {
         ZipFile apkZip = new ZipFile(apkWithAssets.toString());
         if (apkZip.getEntry("assets/") == null) {
           zip.addEntry("assets/", new byte[0], compress ? ZipEntry.DEFLATED : ZipEntry.STORED);
@@ -201,7 +213,7 @@ public class ResourcesZip {
                     throw new RuntimeException(e);
                   }
                 });
-      } else if (Files.exists(assetsRoot)) {
+      } else if (assetsRoot != null && Files.exists(assetsRoot)) {
         ZipBuilderVisitorWithDirectories visitor =
             new ZipBuilderVisitorWithDirectories(zip, assetsRoot, "assets");
         visitor.setCompress(compress);
@@ -219,6 +231,10 @@ public class ResourcesZip {
 
         if (attributes != null && Files.exists(attributes)) {
           zip.addEntry("tools.attributes.pb", Files.readAllBytes(attributes), ZipEntry.STORED);
+        }
+
+        if (packages != null && Files.exists(packages)) {
+          zip.addEntry("packages.txt", Files.readAllBytes(packages), ZipEntry.STORED);
         }
 
       } catch (IOException e) {
@@ -242,7 +258,7 @@ public class ResourcesZip {
             packages, rTxt, classJar, manifest, proguardMapping, resourcesRoot, logFile)
         .shrink(workingDirectory);
     return ShrunkResources.of(
-        new ResourcesZip(workingDirectory, assetsRoot, ids, null, null, attributes),
+        new ResourcesZip(workingDirectory, assetsRoot, ids, null, null, attributes, null),
         new UnvalidatedAndroidData(
             ImmutableList.of(workingDirectory), ImmutableList.of(assetsRoot), manifest));
   }
@@ -253,6 +269,7 @@ public class ResourcesZip {
    * @param packages The packages of the dependencies. Used to analyze the java code for resource
    *     references.
    * @param classJar Used to find resource references in java.
+   * @param rTxt R.txt file listing all resources.
    * @param proguardMapping Mapping used to decode java references.
    * @param logFile Destination of the resource shrinker log.
    * @param workingDirectory Temporary directory for intermediate artifacts.
@@ -265,6 +282,7 @@ public class ResourcesZip {
   public ShrunkProtoApk shrinkUsingProto(
       Set<String> packages,
       Path classJar,
+      Path rTxt,
       Path proguardMapping,
       Path logFile,
       Path workingDirectory)
@@ -275,7 +293,7 @@ public class ResourcesZip {
       final Map<String, Set<String>> toolAttributes = toAttributes();
       // record resources and manifest
       final ProtoResourceUsageAnalyzer analyzer =
-          new ProtoResourceUsageAnalyzer(packages, proguardMapping, logFile);
+          new ProtoResourceUsageAnalyzer(packages, rTxt, proguardMapping, logFile);
 
       final ProtoApk shrink =
           analyzer.shrink(
@@ -295,6 +313,16 @@ public class ResourcesZip {
         .entrySet()
         .stream()
         .collect(toMap(Entry::getKey, e -> ImmutableSet.copyOf(e.getValue().getValuesList())));
+  }
+
+  public List<String> asPackages() throws IOException {
+    return packages != null
+        ? Files.readAllLines(packages, StandardCharsets.UTF_8)
+        : ImmutableList.of();
+  }
+
+  Path asApk() {
+    return proto;
   }
 
   static class ShrunkProtoApk implements Closeable {

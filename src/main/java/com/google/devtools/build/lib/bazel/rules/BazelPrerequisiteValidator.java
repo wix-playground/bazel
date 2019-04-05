@@ -19,6 +19,7 @@ import com.google.devtools.build.lib.analysis.AliasProvider.TargetMode;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.packages.Attribute;
+import com.google.devtools.build.lib.packages.FunctionSplitTransitionWhitelist;
 import com.google.devtools.build.lib.packages.NonconfigurableAttributeMapper;
 import com.google.devtools.build.lib.packages.PackageGroup;
 import com.google.devtools.build.lib.packages.RawAttributeMapper;
@@ -71,7 +72,7 @@ public class BazelPrerequisiteValidator
                     + "the dependency is legitimate",
                 AliasProvider.describeTargetWithAliases(prerequisite, TargetMode.WITHOUT_KIND),
                 rule.getLabel());
-        context.reportError(rule.getLocation(), errorMessage);
+        context.ruleError(errorMessage);
       }
       // We can always post the visibility error as, regardless of the value of keep going,
       // that target will not be built.
@@ -85,9 +86,11 @@ public class BazelPrerequisiteValidator
       boolean containsPackageSpecificationProvider =
           requiredProviders.getDescription().contains("PackageSpecificationProvider");
       // TODO(plf): Add the PackageSpecificationProvider to the 'visibility' attribute.
-      if (!attrName.equals("visibility") && !containsPackageSpecificationProvider) {
-        context.reportError(
-            rule.getAttributeLocation(attrName),
+      if (!attrName.equals("visibility")
+          && !attrName.equals(FunctionSplitTransitionWhitelist.WHITELIST_ATTRIBUTE_NAME)
+          && !containsPackageSpecificationProvider) {
+        context.attributeError(
+            attrName,
             "in "
                 + attrName
                 + " attribute of "
@@ -132,7 +135,7 @@ public class BazelPrerequisiteValidator
 
   private static boolean isTestOnlyRule(Target target) {
     return (target instanceof Rule)
-        && (NonconfigurableAttributeMapper.of((Rule) target)).has("testonly", Type.BOOLEAN)
-        && (NonconfigurableAttributeMapper.of((Rule) target)).get("testonly", Type.BOOLEAN);
+        && NonconfigurableAttributeMapper.of((Rule) target).has("testonly", Type.BOOLEAN)
+        && NonconfigurableAttributeMapper.of((Rule) target).get("testonly", Type.BOOLEAN);
   }
 }

@@ -202,6 +202,16 @@ public class BlazeServerStartupOptions extends OptionsBase {
   public int maxIdleSeconds;
 
   @Option(
+      name = "shutdown_on_low_sys_mem",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.BAZEL_CLIENT_OPTIONS,
+      effectTags = {OptionEffectTag.EAGERNESS_TO_EXIT, OptionEffectTag.LOSES_INCREMENTAL_STATE},
+      help =
+          "If max_idle_secs is set and the build server has been idle for a while, shut down the "
+              + "server when the system is low on free RAM. Linux only.")
+  public boolean shutdownOnLowSysMem;
+
+  @Option(
       name = "batch",
       defaultValue = "false",
       documentationCategory = OptionDocumentationCategory.BAZEL_CLIENT_OPTIONS,
@@ -441,4 +451,50 @@ public class BlazeServerStartupOptions extends OptionsBase {
       },
       help = "Run System.gc() when the server is idle")
   public boolean idleServerTasks;
+
+  @Option(
+      name = "unlimit_coredumps",
+      defaultValue = "false", // NOTE: purely decorative, rc files are read by the client.
+      documentationCategory = OptionDocumentationCategory.BAZEL_CLIENT_OPTIONS,
+      effectTags = {
+          OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION,
+      },
+      help = "Raises the soft coredump limit to the hard limit to make coredumps of the server"
+          + " (including the JVM) and the client possible under common conditions. Stick this"
+          + " flag in your bazelrc once and forget about it so that you get coredumps when you"
+          + " actually encounter a condition that triggers them.")
+  public boolean unlimitCoredumps;
+
+  @Option(
+      name = "incompatible_windows_style_arg_escaping",
+      defaultValue = "false", // NOTE: purely decorative, rc files are read by the client.
+      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+      effectTags = {
+        OptionEffectTag.ACTION_COMMAND_LINES,
+        OptionEffectTag.EXECUTION,
+      },
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES,
+      },
+      help =
+          "On Linux/macOS/non-Windows: no-op. On Windows: if true, then subprocess arguments are"
+              + " escaped Windows-style. When false, the arguments are escaped Bash-style. The"
+              + " Bash-style is buggy, the Windows-style is correct. See"
+              + " https://github.com/bazelbuild/bazel/issues/7122")
+  public boolean windowsStyleArgEscaping;
+
+  @Option(
+      name = "macos_qos_class",
+      defaultValue = "default", // Only for documentation; value is set and used by the client.
+      documentationCategory = OptionDocumentationCategory.BAZEL_CLIENT_OPTIONS,
+      effectTags = {
+        OptionEffectTag.HOST_MACHINE_RESOURCE_OPTIMIZATIONS,
+      },
+      help =
+          "Sets the QoS service class of the %{product} server when running on macOS. This "
+              + "flag has no effect on all other platforms but is supported to ensure rc files "
+              + "can be shared among them without changes. Possible values are: user-interactive, "
+              + "user-initiated, default, utility, and background.")
+  public String macosQosClass;
 }

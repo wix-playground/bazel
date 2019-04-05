@@ -28,11 +28,16 @@ import com.google.devtools.build.lib.syntax.SkylarkList;
  * An interface for a provider that exposes the use of <a
  * href="https://developer.android.com/topic/libraries/data-binding/index.html">data binding</a>.
  */
-@SkylarkModule(name = "UsesDataBindingInfo", doc = "", documented = false)
+@SkylarkModule(
+    name = "UsesDataBindingInfo",
+    doc =
+        "Do not use this module. It is intended for migration purposes only. If you depend on it, "
+            + "you will be broken when it is removed.",
+    documented = false)
 public interface UsesDataBindingProviderApi<T extends FileApi> extends StructApi {
 
   /** Name of this info object. */
-  public static String NAME = "UsesDataBindingInfo";
+  String NAME = "UsesDataBindingInfo";
 
   /**
    * Returns the metadata outputs from this rule's annotation processing that describe how it
@@ -42,12 +47,18 @@ public interface UsesDataBindingProviderApi<T extends FileApi> extends StructApi
   ImmutableList<T> getMetadataOutputs();
 
   /** The provider implementing this can construct the UsesDataBindingInfo provider. */
-  @SkylarkModule(name = "Provider", doc = "", documented = false)
+  @SkylarkModule(
+      name = "Provider",
+      doc =
+          "Do not use this module. It is intended for migration purposes only. If you depend on "
+              + "it, you will be broken when it is removed.",
+      documented = false)
   public interface Provider<F extends FileApi> extends ProviderApi {
 
     @SkylarkCallable(
         name = NAME,
         doc = "The <code>UsesDataBindingInfo</code> constructor.",
+        documented = false,
         parameters = {
           @Param(
               name = "metadata_outputs",

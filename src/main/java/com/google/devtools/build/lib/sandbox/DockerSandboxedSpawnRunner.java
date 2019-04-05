@@ -14,6 +14,7 @@
 
 package com.google.devtools.build.lib.sandbox;
 
+import build.bazel.remote.execution.v2.Platform;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
@@ -32,13 +33,13 @@ import com.google.devtools.build.lib.exec.local.PosixLocalEnvProvider;
 import com.google.devtools.build.lib.runtime.CommandCompleteEvent;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
 import com.google.devtools.build.lib.runtime.ProcessWrapperUtil;
+import com.google.devtools.build.lib.sandbox.SandboxHelpers.SandboxOutputs;
 import com.google.devtools.build.lib.shell.Command;
 import com.google.devtools.build.lib.shell.CommandException;
 import com.google.devtools.build.lib.util.OS;
 import com.google.devtools.build.lib.util.ProcessUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.remoteexecution.v1test.Platform;
 import com.google.protobuf.TextFormat;
 import com.google.protobuf.TextFormat.ParseException;
 import java.io.ByteArrayInputStream;
@@ -60,7 +61,7 @@ final class DockerSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
 
   // The name of the container image entry in the Platform proto
   // (see third_party/googleapis/devtools/remoteexecution/*/remote_execution.proto and
-  // experimental_remote_platform_override in
+  // remote_default_platform_properties in
   // src/main/java/com/google/devtools/build/lib/remote/RemoteOptions.java)
   private static final String CONTAINER_IMAGE_ENTRY_NAME = "container-image";
   private static final String DOCKER_IMAGE_PREFIX = "docker://";
@@ -208,9 +209,9 @@ final class DockerSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
     sandboxExecRoot.createDirectory();
 
     Map<String, String> environment =
-        localEnvProvider.rewriteLocalEnv(spawn.getEnvironment(), execRoot, "/tmp");
+        localEnvProvider.rewriteLocalEnv(spawn.getEnvironment(), binTools, "/tmp");
 
-    ImmutableSet<PathFragment> outputs = SandboxHelpers.getOutputFiles(spawn);
+    SandboxOutputs outputs = SandboxHelpers.getOutputs(spawn);
     Duration timeout = context.getTimeout();
 
     UUID uuid = UUID.randomUUID();
@@ -240,7 +241,9 @@ final class DockerSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
         .setPrivileged(getSandboxOptions().dockerPrivileged)
         .setEnvironmentVariables(environment)
         .setKillDelay(timeoutKillDelay)
-        .setCreateNetworkNamespace(!(allowNetwork || Spawns.requiresNetwork(spawn)))
+        .setCreateNetworkNamespace(
+            !(allowNetwork
+                || Spawns.requiresNetwork(spawn, getSandboxOptions().defaultSandboxAllowNetwork)))
         .setCommandId(commandId)
         .setUuid(uuid);
     // If uid / gid are -1, we are on an operating system that doesn't require us to set them on the
@@ -261,7 +264,11 @@ final class DockerSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
             sandboxExecRoot,
             cmdLine.build(),
             cmdEnv.getClientEnv(),
-            SandboxHelpers.processInputFiles(spawn, context, execRoot),
+            SandboxHelpers.processInputFiles(
+                spawn,
+                context,
+                execRoot,
+                getSandboxOptions().symlinkedSandboxExpandsTreeArtifactsInRunfilesTree),
             outputs,
             ImmutableSet.of());
 
@@ -356,7 +363,8 @@ final class DockerSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
     try {
       cmd.executeAsync(stdIn, stdOut, stdErr, Command.KILL_SUBPROCESS_ON_INTERRUPT).get();
     } catch (CommandException e) {
-      throw new UserExecException("Running command " + cmd.toDebugString() + " failed: " + stdErr);
+      throw new UserExecException(
+          "Running command " + cmd.toDebugString() + " failed: " + stdErr, e);
     }
     return stdOut.toString().trim();
   }
@@ -393,7 +401,8 @@ final class DockerSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
         throw new IllegalArgumentException(
             String.format(
                 "Platform %s contained multiple container-image entries, but only one is allowed.",
-                spawn.getExecutionPlatform().label()));
+                spawn.getExecutionPlatform().label()),
+            e);
       }
     } else {
       return Optional.empty();

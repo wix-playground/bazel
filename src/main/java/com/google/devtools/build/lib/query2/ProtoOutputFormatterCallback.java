@@ -21,7 +21,7 @@ import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.config.ConfigMatchingProvider;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.events.Reporter;
+import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.AttributeFormatter;
 import com.google.devtools.build.lib.packages.ConfiguredAttributeMapper;
@@ -34,6 +34,8 @@ import com.google.devtools.build.lib.query2.proto.proto2api.Build;
 import com.google.devtools.build.lib.query2.proto.proto2api.Build.QueryResult;
 import com.google.devtools.build.lib.rules.AliasConfiguredTarget;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
+import com.google.protobuf.Message;
+import com.google.protobuf.TextFormat;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.Map;
@@ -41,6 +43,23 @@ import java.util.Map;
 /** Proto output formatter for cquery results. */
 public class ProtoOutputFormatterCallback extends CqueryThreadsafeCallback {
 
+  /** Defines the types of proto output this class can handle. */
+  public enum OutputType {
+    BINARY("proto"),
+    TEXT("textproto");
+
+    private final String formatName;
+
+    OutputType(String formatName) {
+      this.formatName = formatName;
+    }
+
+    public String formatName() {
+      return formatName;
+    }
+  }
+
+  private final OutputType outputType;
   private final AspectResolver resolver;
 
   private AnalysisProtos.CqueryResult.Builder protoResult;
@@ -48,13 +67,15 @@ public class ProtoOutputFormatterCallback extends CqueryThreadsafeCallback {
   private ConfiguredTarget currentTarget;
 
   ProtoOutputFormatterCallback(
-      Reporter reporter,
+      ExtendedEventHandler eventHandler,
       CqueryOptions options,
       OutputStream out,
       SkyframeExecutor skyframeExecutor,
       TargetAccessor<ConfiguredTarget> accessor,
-      AspectResolver resolver) {
-    super(reporter, options, out, skyframeExecutor, accessor);
+      AspectResolver resolver,
+      OutputType outputType) {
+    super(eventHandler, options, out, skyframeExecutor, accessor);
+    this.outputType = outputType;
     this.resolver = resolver;
   }
 
@@ -67,21 +88,34 @@ public class ProtoOutputFormatterCallback extends CqueryThreadsafeCallback {
   public void close(boolean failFast) throws IOException {
     if (!failFast && printStream != null) {
       if (options.protoIncludeConfigurations) {
-        protoResult.build().writeTo(printStream);
+        writeData(protoResult.build());
       } else {
         // Documentation promises that setting this flag to false means we convert directly
         // to the build.proto format. This is hard to test in integration testing due to the way
         // proto output is turned readable (codex). So change the following code with caution.
         QueryResult.Builder queryResult = Build.QueryResult.newBuilder();
         protoResult.getResultsList().forEach(ct -> queryResult.addTarget(ct.getTarget()));
-        queryResult.build().writeTo(printStream);
+        writeData(queryResult.build());
       }
+    }
+  }
+
+  private void writeData(Message message) throws IOException {
+    switch (outputType) {
+      case BINARY:
+        message.writeTo(printStream);
+        break;
+      case TEXT:
+        TextFormat.print(message, printStream);
+        break;
+      default:
+        throw new IllegalStateException("Unknown outputType " + outputType.formatName());
     }
   }
 
   @Override
   public String getName() {
-    return "proto";
+    return outputType.formatName();
   }
 
   @VisibleForTesting
@@ -118,12 +152,18 @@ public class ProtoOutputFormatterCallback extends CqueryThreadsafeCallback {
   private class ConfiguredProtoOutputFormatter extends ProtoOutputFormatter {
     @Override
     protected void addAttributes(Build.Rule.Builder rulePb, Rule rule) throws InterruptedException {
-      ConfiguredTarget ctForConfigConditions = currentTarget;
-      while (ctForConfigConditions instanceof AliasConfiguredTarget) {
-        ctForConfigConditions = ((AliasConfiguredTarget) ctForConfigConditions).getActual();
+      // We know <code>currentTarget</code> will be one of these two types of configured targets
+      // because this method is only triggered in ProtoOutputFormatter.toTargetProtoBuffer when
+      // the target in currentTarget is an instanceof Rule.
+      ImmutableMap<Label, ConfigMatchingProvider> configConditions;
+      if (currentTarget instanceof AliasConfiguredTarget) {
+        configConditions = ((AliasConfiguredTarget) currentTarget).getConfigConditions();
+      } else if (currentTarget instanceof RuleConfiguredTarget) {
+        configConditions = ((RuleConfiguredTarget) currentTarget).getConfigConditions();
+      } else {
+        // Other subclasses of ConfiguredTarget don't have attribute information.
+        return;
       }
-      ImmutableMap<Label, ConfigMatchingProvider> configConditions =
-          ((RuleConfiguredTarget) ctForConfigConditions).getConfigConditions();
       ConfiguredAttributeMapper attributeMapper =
           ConfiguredAttributeMapper.of(rule, configConditions);
       Map<Attribute, Build.Attribute> serializedAttributes = Maps.newHashMap();

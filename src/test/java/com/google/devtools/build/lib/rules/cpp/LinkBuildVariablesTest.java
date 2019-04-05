@@ -21,12 +21,16 @@ import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.util.AnalysisMock;
+import com.google.devtools.build.lib.packages.util.Crosstool.CcToolchainConfig;
 import com.google.devtools.build.lib.packages.util.MockCcSupport;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainVariables.LibraryToLinkValue;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainVariables.VariableValue;
 import com.google.devtools.build.lib.rules.cpp.Link.LinkTargetType;
+import java.io.IOException;
 import java.util.List;
+import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -35,8 +39,27 @@ import org.junit.runners.JUnit4;
 @RunWith(JUnit4.class)
 public class LinkBuildVariablesTest extends LinkBuildVariablesTestCase {
 
+  @Before
+  public void createFooFooCcLibraryForRuleContext() throws IOException {
+    scratch.file("foo/BUILD", "cc_library(name = 'foo')");
+  }
+
+  private RuleContext getRuleContext() throws Exception {
+    return getRuleContext(getConfiguredTarget("//foo:foo"));
+  }
+
+  @Test
+  public void testIsUsingFissionIsIdenticalForCompileAndLink() {
+    assertThat(LinkBuildVariables.IS_USING_FISSION.getVariableName())
+        .isEqualTo(CompileBuildVariables.IS_USING_FISSION.getVariableName());
+  }
+
   @Test
   public void testForcePicBuildVariable() throws Exception {
+    AnalysisMock.get()
+        .ccSupport()
+        .setupCcToolchainConfig(
+            mockToolsConfig, CcToolchainConfig.builder().withFeatures(CppRuleClasses.SUPPORTS_PIC));
     useConfiguration("--force_pic");
     scratch.file("x/BUILD", "cc_binary(name = 'bin', srcs = ['a.cc'])");
     scratch.file("x/a.cc");
@@ -44,13 +67,18 @@ public class LinkBuildVariablesTest extends LinkBuildVariablesTestCase {
     ConfiguredTarget target = getConfiguredTarget("//x:bin");
     CcToolchainVariables variables = getLinkBuildVariables(target, Link.LinkTargetType.EXECUTABLE);
     String variableValue =
-        getVariableValue(variables, LinkBuildVariables.FORCE_PIC.getVariableName());
+        getVariableValue(
+            getRuleContext(), variables, LinkBuildVariables.FORCE_PIC.getVariableName());
     assertThat(variableValue).contains("");
   }
 
   @Test
   public void testLibrariesToLinkAreExported() throws Exception {
-    AnalysisMock.get().ccSupport().setupCrosstool(mockToolsConfig);
+    AnalysisMock.get()
+        .ccSupport()
+        .setupCcToolchainConfig(
+            mockToolsConfig,
+            CcToolchainConfig.builder().withFeatures(CppRuleClasses.SUPPORTS_DYNAMIC_LINKER));
     useConfiguration();
 
     scratch.file("x/BUILD", "cc_library(name = 'foo', srcs = ['a.cc'])");
@@ -80,7 +108,6 @@ public class LinkBuildVariablesTest extends LinkBuildVariablesTestCase {
 
   @Test
   public void testLibrarySearchDirectoriesAreExported() throws Exception {
-    AnalysisMock.get().ccSupport().setupCrosstool(mockToolsConfig);
     useConfiguration();
 
     scratch.file("x/BUILD", "cc_binary(name = 'bin', srcs = ['some-dir/bar.so'])");
@@ -90,13 +117,14 @@ public class LinkBuildVariablesTest extends LinkBuildVariablesTestCase {
     CcToolchainVariables variables = getLinkBuildVariables(target, Link.LinkTargetType.EXECUTABLE);
     List<String> variableValue =
         getSequenceVariableValue(
-            variables, LinkBuildVariables.LIBRARY_SEARCH_DIRECTORIES.getVariableName());
+            getRuleContext(),
+            variables,
+            LinkBuildVariables.LIBRARY_SEARCH_DIRECTORIES.getVariableName());
     assertThat(Iterables.getOnlyElement(variableValue)).contains("some-dir");
   }
 
   @Test
   public void testLinkerParamFileIsExported() throws Exception {
-    AnalysisMock.get().ccSupport().setupCrosstool(mockToolsConfig);
     useConfiguration();
 
     scratch.file("x/BUILD", "cc_binary(name = 'bin', srcs = ['some-dir/bar.so'])");
@@ -105,19 +133,42 @@ public class LinkBuildVariablesTest extends LinkBuildVariablesTestCase {
     ConfiguredTarget target = getConfiguredTarget("//x:bin");
     CcToolchainVariables variables = getLinkBuildVariables(target, Link.LinkTargetType.EXECUTABLE);
     String variableValue =
-        getVariableValue(variables, LinkBuildVariables.LINKER_PARAM_FILE.getVariableName());
+        getVariableValue(
+            getRuleContext(), variables, LinkBuildVariables.LINKER_PARAM_FILE.getVariableName());
     assertThat(variableValue).matches(".*bin/x/bin" + "-2.params$");
   }
 
   @Test
-  public void testInterfaceLibraryBuildingVariablesWhenGenerationPossible() throws Exception {
-    // Make sure the interface shared object generation is enabled in the configuration
-    // (which it is not by default for some windows toolchains)
+  public void testInterfaceLibraryBuildingVariablesWhenLegacyGenerationPossible() throws Exception {
     AnalysisMock.get()
         .ccSupport()
-        .setupCrosstool(mockToolsConfig, "supports_interface_shared_objects: true");
+        .setupCcToolchainConfig(
+            mockToolsConfig,
+            CcToolchainConfig.builder()
+                .withFeatures(
+                    CppRuleClasses.SUPPORTS_INTERFACE_SHARED_LIBRARIES,
+                    CppRuleClasses.SUPPORTS_DYNAMIC_LINKER));
     useConfiguration();
 
+    verifyIfsoVariables();
+  }
+
+  @Test
+  public void testInterfaceLibraryBuildingVariablesWhenGenerationPossible() throws Exception {
+    AnalysisMock.get()
+        .ccSupport()
+        .setupCcToolchainConfig(
+            mockToolsConfig,
+            CcToolchainConfig.builder()
+                .withFeatures(
+                    CppRuleClasses.SUPPORTS_DYNAMIC_LINKER,
+                    CppRuleClasses.SUPPORTS_INTERFACE_SHARED_LIBRARIES));
+    useConfiguration();
+
+    verifyIfsoVariables();
+  }
+
+  private void verifyIfsoVariables() throws Exception {
     scratch.file("x/BUILD", "cc_library(name = 'foo', srcs = ['a.cc'])");
     scratch.file("x/a.cc");
 
@@ -126,14 +177,25 @@ public class LinkBuildVariablesTest extends LinkBuildVariablesTestCase {
         getLinkBuildVariables(target, LinkTargetType.NODEPS_DYNAMIC_LIBRARY);
 
     String interfaceLibraryBuilder =
-        getVariableValue(variables, LinkBuildVariables.INTERFACE_LIBRARY_BUILDER.getVariableName());
+        getVariableValue(
+            getRuleContext(),
+            variables,
+            LinkBuildVariables.INTERFACE_LIBRARY_BUILDER.getVariableName());
     String interfaceLibraryInput =
-        getVariableValue(variables, LinkBuildVariables.INTERFACE_LIBRARY_INPUT.getVariableName());
+        getVariableValue(
+            getRuleContext(),
+            variables,
+            LinkBuildVariables.INTERFACE_LIBRARY_INPUT.getVariableName());
     String interfaceLibraryOutput =
-        getVariableValue(variables, LinkBuildVariables.INTERFACE_LIBRARY_OUTPUT.getVariableName());
+        getVariableValue(
+            getRuleContext(),
+            variables,
+            LinkBuildVariables.INTERFACE_LIBRARY_OUTPUT.getVariableName());
     String generateInterfaceLibrary =
         getVariableValue(
-            variables, LinkBuildVariables.GENERATE_INTERFACE_LIBRARY.getVariableName());
+            getRuleContext(),
+            variables,
+            LinkBuildVariables.GENERATE_INTERFACE_LIBRARY.getVariableName());
 
     assertThat(generateInterfaceLibrary).isEqualTo("yes");
     assertThat(interfaceLibraryInput).endsWith("libfoo.so");
@@ -145,15 +207,19 @@ public class LinkBuildVariablesTest extends LinkBuildVariablesTestCase {
   public void testNoIfsoBuildingWhenWhenThinLtoIndexing() throws Exception {
     // Make sure the interface shared object generation is enabled in the configuration
     // (which it is not by default for some windows toolchains)
+    invalidatePackages(true);
     AnalysisMock.get()
         .ccSupport()
-        .setupCrosstool(
+        .setupCcToolchainConfig(
             mockToolsConfig,
-            MockCcSupport.THIN_LTO_CONFIGURATION,
-            MockCcSupport.HOST_AND_NONHOST_CONFIGURATION,
-            "supports_interface_shared_objects: true",
-            "needsPic: true",
-            "supports_start_end_lib: true");
+            CcToolchainConfig.builder()
+                .withFeatures(
+                    CppRuleClasses.THIN_LTO,
+                    CppRuleClasses.SUPPORTS_PIC,
+                    MockCcSupport.HOST_AND_NONHOST_CONFIGURATION_FEATURES,
+                    CppRuleClasses.SUPPORTS_INTERFACE_SHARED_LIBRARIES,
+                    CppRuleClasses.SUPPORTS_DYNAMIC_LINKER,
+                    CppRuleClasses.SUPPORTS_START_END_LIB));
     useConfiguration("--features=thin_lto");
 
     scratch.file("x/BUILD", "cc_library(name = 'foo', srcs = ['a.cc'])");
@@ -174,14 +240,25 @@ public class LinkBuildVariablesTest extends LinkBuildVariablesTestCase {
     CcToolchainVariables variables = indexAction.getLinkCommandLine().getBuildVariables();
 
     String interfaceLibraryBuilder =
-        getVariableValue(variables, LinkBuildVariables.INTERFACE_LIBRARY_BUILDER.getVariableName());
+        getVariableValue(
+            getRuleContext(),
+            variables,
+            LinkBuildVariables.INTERFACE_LIBRARY_BUILDER.getVariableName());
     String interfaceLibraryInput =
-        getVariableValue(variables, LinkBuildVariables.INTERFACE_LIBRARY_INPUT.getVariableName());
+        getVariableValue(
+            getRuleContext(),
+            variables,
+            LinkBuildVariables.INTERFACE_LIBRARY_INPUT.getVariableName());
     String interfaceLibraryOutput =
-        getVariableValue(variables, LinkBuildVariables.INTERFACE_LIBRARY_OUTPUT.getVariableName());
+        getVariableValue(
+            getRuleContext(),
+            variables,
+            LinkBuildVariables.INTERFACE_LIBRARY_OUTPUT.getVariableName());
     String generateInterfaceLibrary =
         getVariableValue(
-            variables, LinkBuildVariables.GENERATE_INTERFACE_LIBRARY.getVariableName());
+            getRuleContext(),
+            variables,
+            LinkBuildVariables.GENERATE_INTERFACE_LIBRARY.getVariableName());
 
     assertThat(generateInterfaceLibrary).isEqualTo("no");
     assertThat(interfaceLibraryInput).endsWith("ignored");
@@ -195,7 +272,10 @@ public class LinkBuildVariablesTest extends LinkBuildVariablesTestCase {
     // (which it is not by default for some windows toolchains)
     AnalysisMock.get()
         .ccSupport()
-        .setupCrosstool(mockToolsConfig, "supports_interface_shared_objects: true");
+        .setupCcToolchainConfig(
+            mockToolsConfig,
+            CcToolchainConfig.builder()
+                .withFeatures(CppRuleClasses.SUPPORTS_INTERFACE_SHARED_LIBRARIES));
     useConfiguration();
 
     scratch.file("x/BUILD", "cc_library(name = 'foo', srcs = ['a.cc'])");
@@ -205,14 +285,25 @@ public class LinkBuildVariablesTest extends LinkBuildVariablesTestCase {
     CcToolchainVariables variables = getLinkBuildVariables(target, LinkTargetType.STATIC_LIBRARY);
 
     String interfaceLibraryBuilder =
-        getVariableValue(variables, LinkBuildVariables.INTERFACE_LIBRARY_BUILDER.getVariableName());
+        getVariableValue(
+            getRuleContext(),
+            variables,
+            LinkBuildVariables.INTERFACE_LIBRARY_BUILDER.getVariableName());
     String interfaceLibraryInput =
-        getVariableValue(variables, LinkBuildVariables.INTERFACE_LIBRARY_INPUT.getVariableName());
+        getVariableValue(
+            getRuleContext(),
+            variables,
+            LinkBuildVariables.INTERFACE_LIBRARY_INPUT.getVariableName());
     String interfaceLibraryOutput =
-        getVariableValue(variables, LinkBuildVariables.INTERFACE_LIBRARY_OUTPUT.getVariableName());
+        getVariableValue(
+            getRuleContext(),
+            variables,
+            LinkBuildVariables.INTERFACE_LIBRARY_OUTPUT.getVariableName());
     String generateInterfaceLibrary =
         getVariableValue(
-            variables, LinkBuildVariables.GENERATE_INTERFACE_LIBRARY.getVariableName());
+            getRuleContext(),
+            variables,
+            LinkBuildVariables.GENERATE_INTERFACE_LIBRARY.getVariableName());
 
     assertThat(generateInterfaceLibrary).isEqualTo("no");
     assertThat(interfaceLibraryInput).endsWith("ignored");
@@ -222,6 +313,11 @@ public class LinkBuildVariablesTest extends LinkBuildVariablesTestCase {
 
   @Test
   public void testOutputExecpath() throws Exception {
+    AnalysisMock.get()
+        .ccSupport()
+        .setupCcToolchainConfig(
+            mockToolsConfig,
+            CcToolchainConfig.builder().withFeatures(CppRuleClasses.SUPPORTS_DYNAMIC_LINKER));
     // Make sure the interface shared object generation is enabled in the configuration
     // (which it is not by default for some windows toolchains)
     scratch.file("x/BUILD", "cc_library(name = 'foo', srcs = ['a.cc'])");
@@ -231,22 +327,26 @@ public class LinkBuildVariablesTest extends LinkBuildVariablesTestCase {
     CcToolchainVariables variables =
         getLinkBuildVariables(target, LinkTargetType.NODEPS_DYNAMIC_LIBRARY);
 
-    assertThat(getVariableValue(variables, LinkBuildVariables.OUTPUT_EXECPATH.getVariableName()))
+    assertThat(
+            getVariableValue(
+                getRuleContext(), variables, LinkBuildVariables.OUTPUT_EXECPATH.getVariableName()))
         .endsWith("x/libfoo.so");
   }
 
   @Test
   public void testOutputExecpathIsNotExposedWhenThinLtoIndexing() throws Exception {
-    // Make sure the interface shared object generation is enabled in the configuration
-    // (which it is not by default for some windows toolchains)
     AnalysisMock.get()
         .ccSupport()
-        .setupCrosstool(
+        .setupCcToolchainConfig(
             mockToolsConfig,
-            MockCcSupport.THIN_LTO_CONFIGURATION,
-            MockCcSupport.HOST_AND_NONHOST_CONFIGURATION,
-            "needsPic: true",
-            "supports_start_end_lib: true");
+            CcToolchainConfig.builder()
+                .withFeatures(
+                    CppRuleClasses.THIN_LTO,
+                    MockCcSupport.HOST_AND_NONHOST_CONFIGURATION_FEATURES,
+                    CppRuleClasses.SUPPORTS_DYNAMIC_LINKER,
+                    CppRuleClasses.SUPPORTS_PIC,
+                    CppRuleClasses.SUPPORTS_INTERFACE_SHARED_LIBRARIES,
+                    CppRuleClasses.SUPPORTS_START_END_LIB));
     useConfiguration("--features=thin_lto");
 
     scratch.file("x/BUILD", "cc_library(name = 'foo', srcs = ['a.cc'])");
@@ -320,14 +420,41 @@ public class LinkBuildVariablesTest extends LinkBuildVariablesTestCase {
   }
 
   @Test
-  public void testIsUsingFissionVariable() throws Exception {
+  public void testIsUsingFissionVariableUsingLegacyFields() throws Exception {
     scratch.file("x/BUILD",
         "cc_binary(name = 'foo', srcs = ['foo.cc'])");
     scratch.file("x/foo.cc");
 
     AnalysisMock.get()
         .ccSupport()
-        .setupCrosstool(mockToolsConfig, "supports_fission: true");
+        .setupCcToolchainConfig(
+            mockToolsConfig,
+            CcToolchainConfig.builder().withFeatures(CppRuleClasses.PER_OBJECT_DEBUG_INFO));
+
+    useConfiguration("--fission=no");
+    ConfiguredTarget target = getConfiguredTarget("//x:foo");
+    CcToolchainVariables variables = getLinkBuildVariables(target, LinkTargetType.EXECUTABLE);
+    assertThat(variables.isAvailable(LinkBuildVariables.IS_USING_FISSION.getVariableName()))
+        .isFalse();
+
+    useConfiguration("--fission=yes");
+    ConfiguredTarget fissionTarget = getConfiguredTarget("//x:foo");
+    CcToolchainVariables fissionVariables =
+        getLinkBuildVariables(fissionTarget, LinkTargetType.EXECUTABLE);
+    assertThat(fissionVariables.isAvailable(LinkBuildVariables.IS_USING_FISSION.getVariableName()))
+        .isTrue();
+  }
+
+  @Test
+  public void testIsUsingFissionVariable() throws Exception {
+    scratch.file("x/BUILD", "cc_binary(name = 'foo', srcs = ['foo.cc'])");
+    scratch.file("x/foo.cc");
+
+    AnalysisMock.get()
+        .ccSupport()
+        .setupCcToolchainConfig(
+            mockToolsConfig,
+            CcToolchainConfig.builder().withFeatures(CppRuleClasses.PER_OBJECT_DEBUG_INFO));
 
     useConfiguration("--fission=no");
     ConfiguredTarget target = getConfiguredTarget("//x:foo");
@@ -347,7 +474,8 @@ public class LinkBuildVariablesTest extends LinkBuildVariablesTestCase {
   public void testSysrootVariable() throws Exception {
     AnalysisMock.get()
         .ccSupport()
-        .setupCrosstool(mockToolsConfig, "builtin_sysroot: '/usr/local/custom-sysroot'");
+        .setupCcToolchainConfig(
+            mockToolsConfig, CcToolchainConfig.builder().withSysroot("/usr/local/custom-sysroot"));
     useConfiguration();
 
     scratch.file("x/BUILD", "cc_binary(name = 'foo', srcs = ['a.cc'])");
@@ -370,32 +498,8 @@ public class LinkBuildVariablesTest extends LinkBuildVariablesTestCase {
   }
 
   @Test
-  public void testUserLinkFlags() throws Exception {
-    useConfiguration("--linkopt=-bar", "--noexperimental_linkopts_in_user_link_flags");
-
-    scratch.file("x/BUILD", "cc_binary(name = 'foo', srcs = ['a.cc'], linkopts = ['-foo'])");
-    scratch.file("x/a.cc");
-
-    ConfiguredTarget testTarget = getConfiguredTarget("//x:foo");
-    CcToolchainVariables testVariables =
-        getLinkBuildVariables(testTarget, LinkTargetType.EXECUTABLE);
-
-    ImmutableList<String> userLinkFlags =
-        CcToolchainVariables.toStringList(
-            testVariables, LinkBuildVariables.USER_LINK_FLAGS.getVariableName());
-    assertThat(userLinkFlags).contains("-foo");
-    assertThat(userLinkFlags).doesNotContain("-bar");
-
-    ImmutableList<String> legacyLinkFlags =
-        CcToolchainVariables.toStringList(
-            testVariables, LinkBuildVariables.LEGACY_LINK_FLAGS.getVariableName());
-    assertThat(legacyLinkFlags).doesNotContain("-foo");
-    assertThat(legacyLinkFlags).contains("-bar");
-  }
-
-  @Test
   public void testUserLinkFlagsWithLinkoptOption() throws Exception {
-    useConfiguration("--linkopt=-bar", "--experimental_linkopts_in_user_link_flags");
+    useConfiguration("--linkopt=-bar");
 
     scratch.file("x/BUILD", "cc_binary(name = 'foo', srcs = ['a.cc'], linkopts = ['-foo'])");
     scratch.file("x/a.cc");
@@ -408,11 +512,5 @@ public class LinkBuildVariablesTest extends LinkBuildVariablesTestCase {
         CcToolchainVariables.toStringList(
             testVariables, LinkBuildVariables.USER_LINK_FLAGS.getVariableName());
     assertThat(userLinkFlags).containsAllOf("-foo", "-bar").inOrder();
-
-    ImmutableList<String> legacyLinkFlags =
-        CcToolchainVariables.toStringList(
-            testVariables, LinkBuildVariables.LEGACY_LINK_FLAGS.getVariableName());
-    assertThat(legacyLinkFlags).doesNotContain("-foo");
-    assertThat(legacyLinkFlags).doesNotContain("-bar");
   }
 }

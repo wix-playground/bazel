@@ -61,7 +61,7 @@ function test_output_filter_cc() {
   # "test warning filter for C compilation"
   local -r pkg=$FUNCNAME
 
-  if is_windows; then
+  if $is_windows; then
     local -r copts=\"/W3\"
   else
     local -r copts=""
@@ -292,8 +292,7 @@ EOF
   expect_log "To kill -9 a hummingbird"
 }
 
-# TODO(mstaib): enable test after deprecation warnings work in bazel
-function disabled_test_filters_deprecated_targets() {
+function test_filters_deprecated_targets() {
   local -r pkg=$FUNCNAME
   init_test "test that deprecated target warnings are filtered"
 
@@ -309,12 +308,12 @@ EOF
 
   bazel build --nobuild //$pkg/relativity &> $TEST_log || fail "Expected success"
   expect_log_once "WARNING:.*target '//$pkg/relativity:relativity' depends on \
-deprecated target '//$pkg/ether:ether': Disproven."
+deprecated target '//$pkg/ether:ether': Disproven"
 
   bazel build --nobuild --output_filter="^//pizza" \
       //$pkg/relativity &> $TEST_log || fail "Expected success"
   expect_not_log "WARNING:.*target '//$pkg/relativity:relativity' depends on \
-deprecated target '//$pkg/ether:ether': Disproven."
+deprecated target '//$pkg/ether:ether': Disproven"
 }
 
 run_suite "Warning Filter tests"

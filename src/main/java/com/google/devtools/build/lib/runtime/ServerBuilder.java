@@ -18,8 +18,6 @@ import com.google.common.base.Function;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.devtools.build.lib.buildeventstream.BuildEventArtifactUploaderFactory;
-import com.google.devtools.build.lib.buildeventstream.BuildEventArtifactUploaderFactoryMap;
 import com.google.devtools.build.lib.packages.AttributeContainer;
 import com.google.devtools.build.lib.packages.PackageFactory;
 import com.google.devtools.build.lib.packages.RuleClass;
@@ -47,6 +45,8 @@ public final class ServerBuilder {
       ImmutableList.builder();
   private final BuildEventArtifactUploaderFactoryMap.Builder buildEventArtifactUploaderFactories =
       new BuildEventArtifactUploaderFactoryMap.Builder();
+  private final ImmutableMap.Builder<String, AuthHeadersProvider> authHeadersProvidersMap =
+      ImmutableMap.builder();
 
   @VisibleForTesting
   public ServerBuilder() {}
@@ -182,5 +182,20 @@ public final class ServerBuilder {
       BuildEventArtifactUploaderFactory uploaderFactory, String name) {
     buildEventArtifactUploaderFactories.add(name, uploaderFactory);
     return this;
+  }
+
+  /**
+   * Register a provider of authentication headers that blaze modules can use. See {@link
+   * AuthHeadersProvider} for more details.
+   */
+  public ServerBuilder addAuthHeadersProvider(
+      String name, AuthHeadersProvider authHeadersProvider) {
+    authHeadersProvidersMap.put(name, authHeadersProvider);
+    return this;
+  }
+
+  /** Returns a map of all registered {@link AuthHeadersProvider}s. */
+  public ImmutableMap<String, AuthHeadersProvider> getAuthHeadersProvidersMap() {
+    return authHeadersProvidersMap.build();
   }
 }

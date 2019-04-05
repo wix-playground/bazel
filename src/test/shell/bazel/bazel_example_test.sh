@@ -66,7 +66,7 @@ function test_java_test() {
   local java_native_main=//examples/java-native/src/main/java/com/example/myproject
 
   assert_build "-- //examples/java-native/... -${java_native_main}:hello-error-prone"
-  JAVA_VERSION="1.$(bazel query  --output=build '@bazel_tools//tools/jdk:toolchain' | grep source_version | cut -d '"' -f 2)"
+  JAVA_VERSION="1.$(bazel query  --output=build '@bazel_tools//tools/jdk:remote_toolchain' | grep source_version | cut -d '"' -f 2)"
   assert_test_ok "${java_native_tests}:hello"
   assert_test_ok "${java_native_tests}:custom"
   assert_test_fails "${java_native_tests}:fail"
@@ -97,13 +97,13 @@ function test_genrule_and_genquery() {
 }
 
 function test_native_python() {
-  assert_build //examples/py_native:bin --python2_path=python
-  assert_test_ok //examples/py_native:test --python2_path=python
-  assert_test_fails //examples/py_native:fail --python2_path=python
+  assert_build //examples/py_native:bin
+  assert_test_ok //examples/py_native:test
+  assert_test_fails //examples/py_native:fail
 }
 
 function test_native_python_with_zip() {
-  assert_build //examples/py_native:bin --python2_path=python --build_python_zip
+  assert_build //examples/py_native:bin --build_python_zip
   # run the python package directly
   ./bazel-bin/examples/py_native/bin >& $TEST_log \
     || fail "//examples/py_native:bin execution failed"
@@ -112,8 +112,8 @@ function test_native_python_with_zip() {
   python ./bazel-bin/examples/py_native/bin >& $TEST_log \
     || fail "//examples/py_native:bin execution failed"
   expect_log "Fib(5) == 8"
-  assert_test_ok //examples/py_native:test --python2_path=python --build_python_zip
-  assert_test_fails //examples/py_native:fail --python2_path=python --build_python_zip
+  assert_test_ok //examples/py_native:test --build_python_zip
+  assert_test_fails //examples/py_native:fail --build_python_zip
 }
 
 function test_shell() {

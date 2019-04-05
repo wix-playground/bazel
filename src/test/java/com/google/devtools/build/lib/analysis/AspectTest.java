@@ -437,7 +437,10 @@ public class AspectTest extends AnalysisTestCase {
 
       @Override
       public ConfiguredAspect create(
-          ConfiguredTargetAndData ctadBase, RuleContext ruleContext, AspectParameters parameters)
+          ConfiguredTargetAndData ctadBase,
+          RuleContext ruleContext,
+          AspectParameters parameters,
+          String toolsRepository)
           throws InterruptedException, ActionConflictException {
         Object lateBoundPrereq = ruleContext.getPrerequisite(":late", TARGET);
         return new ConfiguredAspect.Builder(this, parameters, ruleContext)
@@ -490,7 +493,7 @@ public class AspectTest extends AnalysisTestCase {
                                     .aspect(AspectThatRegistersAction.INSTANCE))
                             .add(
                                 attr(":action_listener", LABEL_LIST)
-                                    .cfg(HostTransition.INSTANCE)
+                                    .cfg(HostTransition.createFactory())
                                     .value(ACTION_LISTENER)));
 
     public static class AspectThatRegistersAction extends NativeAspectClass
@@ -507,7 +510,10 @@ public class AspectTest extends AnalysisTestCase {
 
       @Override
       public ConfiguredAspect create(
-          ConfiguredTargetAndData ctadBase, RuleContext ruleContext, AspectParameters parameters)
+          ConfiguredTargetAndData ctadBase,
+          RuleContext ruleContext,
+          AspectParameters parameters,
+          String toolsRepository)
           throws InterruptedException, ActionConflictException {
         ruleContext.registerAction(new NullAction(ruleContext.createOutputArtifact()));
         return new ConfiguredAspect.Builder(this, parameters, ruleContext).build();

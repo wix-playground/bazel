@@ -40,6 +40,7 @@ public interface RepositoryModuleApi {
         @Param(
             name = "implementation",
             type = BaseFunction.class,
+            legacyNamed = true,
             doc =
                 "the function implementing this rule, has to have exactly one parameter: "
                     + "<code><a href=\"repository_ctx.html\">repository_ctx</a></code>. The function "
@@ -72,19 +73,31 @@ public interface RepositoryModuleApi {
             type = SkylarkList.class,
             generic1 = String.class,
             defaultValue = "[]",
-            doc = "Provides a list of environment variable that this repository rule depends on. If"
-                + " an environment variable in that list change, the repository will be refetched.",
+            doc =
+                "Provides a list of environment variable that this repository rule depends on. If "
+                    + "an environment variable in that list change, the repository will be "
+                    + "refetched.",
+            named = true,
+            positional = false),
+        @Param(
+            name = "doc",
+            type = String.class,
+            defaultValue = "''",
+            doc =
+                "A description of the repository rule that can be extracted by documentation "
+                    + "generating tools.",
             named = true,
             positional = false)
       },
       useAst = true,
       useEnvironment = true)
-    public BaseFunction repositoryRule(
-        BaseFunction implementation,
-        Object attrs,
-        Boolean local,
-        SkylarkList<String> environ,
-        FuncallExpression ast,
-        Environment env)
-        throws EvalException;
+  public BaseFunction repositoryRule(
+      BaseFunction implementation,
+      Object attrs,
+      Boolean local,
+      SkylarkList<String> environ,
+      String doc,
+      FuncallExpression ast,
+      Environment env)
+      throws EvalException;
 }

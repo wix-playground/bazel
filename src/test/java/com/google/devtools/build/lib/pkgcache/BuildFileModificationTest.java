@@ -15,6 +15,7 @@ package com.google.devtools.build.lib.pkgcache;
 
 import static com.google.common.truth.Truth.assertThat;
 
+import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -27,9 +28,11 @@ import com.google.devtools.build.lib.analysis.util.DefaultBuildOptionsForTesting
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
 import com.google.devtools.build.lib.packages.NoSuchPackageException;
 import com.google.devtools.build.lib.packages.Package;
-import com.google.devtools.build.lib.packages.SkylarkSemanticsOptions;
+import com.google.devtools.build.lib.packages.StarlarkSemanticsOptions;
+import com.google.devtools.build.lib.rules.repository.RepositoryDelegatorFunction;
 import com.google.devtools.build.lib.skyframe.BazelSkyframeExecutorConstants;
 import com.google.devtools.build.lib.skyframe.DiffAwareness;
+import com.google.devtools.build.lib.skyframe.PrecomputedValue;
 import com.google.devtools.build.lib.skyframe.SequencedSkyframeExecutor;
 import com.google.devtools.build.lib.skyframe.SkyValueDirtinessChecker;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
@@ -42,6 +45,7 @@ import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.ModifiedFileSet;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.Root;
+import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 import com.google.devtools.common.options.OptionsParser;
 import java.nio.charset.StandardCharsets;
@@ -82,7 +86,9 @@ public class BuildFileModificationTest extends FoundationTestCase {
             analysisMock.getProductName());
     skyframeExecutor =
         SequencedSkyframeExecutor.create(
-            analysisMock.getPackageFactoryBuilderForTesting(directories).build(ruleClassProvider),
+            analysisMock
+                .getPackageFactoryBuilderForTesting(directories)
+                .build(ruleClassProvider, fileSystem),
             fileSystem,
             directories,
             actionKeyContext,
@@ -97,18 +103,21 @@ public class BuildFileModificationTest extends FoundationTestCase {
             BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY,
             BazelSkyframeExecutorConstants.ACTION_ON_IO_EXCEPTION_READING_BUILD_FILE,
             DefaultBuildOptionsForTesting.getDefaultBuildOptionsForTest(ruleClassProvider));
+    skyframeExecutor.injectExtraPrecomputedValues(
+        ImmutableList.of(
+            PrecomputedValue.injected(
+                RepositoryDelegatorFunction.RESOLVED_FILE_INSTEAD_OF_WORKSPACE,
+                Optional.<RootedPath>absent())));
     TestConstants.processSkyframeExecutorForTesting(skyframeExecutor);
-    OptionsParser parser = OptionsParser.newOptionsParser(
-        PackageCacheOptions.class, SkylarkSemanticsOptions.class);
-    analysisMock.getInvocationPolicyEnforcer().enforce(parser);
+    OptionsParser parser =
+        OptionsParser.newOptionsParser(PackageCacheOptions.class, StarlarkSemanticsOptions.class);
     setUpSkyframe(
         parser.getOptions(PackageCacheOptions.class),
-        parser.getOptions(SkylarkSemanticsOptions.class));
+        parser.getOptions(StarlarkSemanticsOptions.class));
   }
 
   private void setUpSkyframe(
-      PackageCacheOptions packageCacheOptions,
-      SkylarkSemanticsOptions skylarkSemanticsOptions) {
+      PackageCacheOptions packageCacheOptions, StarlarkSemanticsOptions starlarkSemanticsOptions) {
     PathPackageLocator pkgLocator =
         PathPackageLocator.create(
             null,
@@ -122,8 +131,7 @@ public class BuildFileModificationTest extends FoundationTestCase {
     skyframeExecutor.preparePackageLoading(
         pkgLocator,
         packageCacheOptions,
-        skylarkSemanticsOptions,
-        analysisMock.getDefaultsPackageContent(),
+        starlarkSemanticsOptions,
         UUID.randomUUID(),
         ImmutableMap.<String, String>of(),
         new TimestampGranularityMonitor(clock));

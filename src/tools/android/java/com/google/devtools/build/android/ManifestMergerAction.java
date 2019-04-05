@@ -207,8 +207,8 @@ public class ManifestMergerAction {
       Path manifest = options.manifest;
       if (manifest == null) {
         // No primary manifest was passed. Generate a dummy primary.
-        manifest = tmp.resolve("dummy_AndroidManifest.xml");
-        AndroidResourceProcessor.writeDummyManifestForAapt(manifest, options.customPackage);
+
+        manifest = AndroidManifest.asEmpty().writeDummyManifestForAapt(tmp, options.customPackage);
       }
 
       mergedManifest =
@@ -228,10 +228,13 @@ public class ManifestMergerAction {
         Files.copy(manifest, options.manifestOutput, StandardCopyOption.REPLACE_EXISTING);
       }
     } catch (AndroidManifestProcessor.ManifestProcessingException e) {
-      System.exit(1);
+      // We special case ManifestProcessingExceptions here to indicate that this is
+      // caused by a build error, not an Bazel-internal error.
+      logger.log(SEVERE, "Error during merging manifests", e);
+      System.exit(1); // Don't duplicate the error to the user or bubble up the exception.
     } catch (Exception e) {
       logger.log(SEVERE, "Error during merging manifests", e);
-      throw e;
+      throw e; // This is a proper internal exception, so we bubble it up.
     }
   }
 }

@@ -21,11 +21,12 @@ import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
+import com.google.devtools.build.lib.analysis.platform.ToolchainInfo;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
-import com.google.devtools.build.lib.packages.Info;
 import com.google.devtools.build.lib.packages.SkylarkProvider.SkylarkKey;
+import com.google.devtools.build.lib.packages.StructImpl;
 import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider.OutputJar;
 import com.google.devtools.build.lib.syntax.SkylarkList;
 import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
@@ -40,111 +41,207 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-/**
- * Tests Skylark API for Java rules.
- */
+/** Tests Skylark API for Java rules. */
 @RunWith(JUnit4.class)
 public class JavaSkylarkApiTest extends BuildViewTestCase {
-  private static final String HOST_JAVA_RUNTIME_LABEL = TestConstants.TOOLS_REPOSITORY
-      + "//tools/jdk:current_host_java_runtime";
+  private static final String HOST_JAVA_RUNTIME_LABEL =
+      TestConstants.TOOLS_REPOSITORY + "//tools/jdk:current_host_java_runtime";
 
   @Test
-  public void testJavaRuntimeProviderJavaExecutableAbsolute() throws Exception {
-    scratch.file("a/BUILD",
+  public void testJavaRuntimeProviderJavaAbsolute() throws Exception {
+    scratch.file(
+        "a/BUILD",
         "load(':rule.bzl', 'jrule')",
-        "java_runtime(name='jvm', srcs=[], java_home='/foo/bar/')",
+        "load('"
+            + TestConstants.TOOLS_REPOSITORY
+            + "//tools/jdk:java_toolchain_alias.bzl', 'java_runtime_alias')",
+        "java_runtime(name='jvm', srcs=[], java_home='/foo/bar')",
         "java_runtime_alias(name='alias')",
-        "jrule(name='r')");
+        "jrule(name='r')",
+        "constraint_value(",
+        "    name = 'constraint',",
+        "    constraint_setting = '" + TestConstants.PLATFORM_BASE + "/java/constraints:runtime',",
+        ")",
+        "toolchain(",
+        "    name = 'java_runtime_toolchain',",
+        "    toolchain = ':jvm',",
+        "    toolchain_type = '"
+            + TestConstants.TOOLS_REPOSITORY
+            + "//tools/jdk:runtime_toolchain_type',",
+        "    target_compatible_with = [':constraint'],",
+        ")",
+        "platform(",
+        "    name = 'platform',",
+        "    constraint_values = [':constraint'],",
+        ")");
 
     scratch.file(
         "a/rule.bzl",
         "def _impl(ctx):",
         "  provider = ctx.attr._java_runtime[java_common.JavaRuntimeInfo]",
         "  return struct(",
-        "    java_executable = provider.java_executable_exec_path,",
-        "    java_runfiles = provider.java_executable_runfiles_path,",
-        ")",
+        "    java_home_exec_path = provider.java_home,",
+        "    java_executable_exec_path = provider.java_executable_exec_path,",
+        "    java_home_runfiles_path = provider.java_home_runfiles_path,",
+        "    java_executable_runfiles_path = provider.java_executable_runfiles_path,",
+        "  )",
         "jrule = rule(_impl, attrs = { '_java_runtime': attr.label(default=Label('//a:alias'))})");
 
-    useConfiguration("--javabase=//a:jvm");
+    useConfiguration(
+        "--javabase=//a:jvm", "--extra_toolchains=//a:all", "--platforms=//a:platform");
     ConfiguredTarget ct = getConfiguredTarget("//a:r");
-    @SuppressWarnings("unchecked") PathFragment javaExecutable =
-        (PathFragment) ct.get("java_executable");
-    assertThat(javaExecutable.getPathString()).startsWith("/foo/bar/bin/java");
-    @SuppressWarnings("unchecked") PathFragment javaRunfiles =
-        (PathFragment) ct.get("java_runfiles");
-    assertThat(javaRunfiles.getPathString()).startsWith("/foo/bar/bin/java");
+    @SuppressWarnings("unchecked")
+    PathFragment javaHomeExecPath = (PathFragment) ct.get("java_home_exec_path");
+    assertThat(javaHomeExecPath.getPathString()).isEqualTo("/foo/bar");
+    @SuppressWarnings("unchecked")
+    PathFragment javaExecutableExecPath = (PathFragment) ct.get("java_executable_exec_path");
+    assertThat(javaExecutableExecPath.getPathString()).startsWith("/foo/bar/bin/java");
+    @SuppressWarnings("unchecked")
+    PathFragment javaHomeRunfilesPath = (PathFragment) ct.get("java_home_runfiles_path");
+    assertThat(javaHomeRunfilesPath.getPathString()).isEqualTo("/foo/bar");
+    @SuppressWarnings("unchecked")
+    PathFragment javaExecutableRunfiles = (PathFragment) ct.get("java_executable_runfiles_path");
+    assertThat(javaExecutableRunfiles.getPathString()).startsWith("/foo/bar/bin/java");
   }
 
   @Test
-  public void testJavaRuntimeProviderJavaExecutableHermetic() throws Exception {
-    scratch.file("a/BUILD",
+  public void testJavaRuntimeProviderJavaHermetic() throws Exception {
+    scratch.file(
+        "a/BUILD",
         "load(':rule.bzl', 'jrule')",
+        "load('"
+            + TestConstants.TOOLS_REPOSITORY
+            + "//tools/jdk:java_toolchain_alias.bzl', 'java_runtime_alias')",
         "java_runtime(name='jvm', srcs=[], java_home='foo/bar')",
         "java_runtime_alias(name='alias')",
-        "jrule(name='r')");
+        "jrule(name='r')",
+        "constraint_value(",
+        "    name = 'constraint',",
+        "    constraint_setting = '" + TestConstants.PLATFORM_BASE + "/java/constraints:runtime',",
+        ")",
+        "toolchain(",
+        "    name = 'java_runtime_toolchain',",
+        "    toolchain = ':jvm',",
+        "    toolchain_type = '"
+            + TestConstants.TOOLS_REPOSITORY
+            + "//tools/jdk:runtime_toolchain_type',",
+        "    target_compatible_with = [':constraint'],",
+        ")",
+        "platform(",
+        "    name = 'platform',",
+        "    constraint_values = [':constraint'],",
+        ")");
 
     scratch.file(
         "a/rule.bzl",
         "def _impl(ctx):",
         "  provider = ctx.attr._java_runtime[java_common.JavaRuntimeInfo]",
         "  return struct(",
-        "    java_executable = provider.java_executable_exec_path,",
-        "    java_runfiles = provider.java_executable_runfiles_path,",
-        ")",
+        "    java_home_exec_path = provider.java_home,",
+        "    java_executable_exec_path = provider.java_executable_exec_path,",
+        "    java_home_runfiles_path = provider.java_home_runfiles_path,",
+        "    java_executable_runfiles_path = provider.java_executable_runfiles_path,",
+        "  )",
         "jrule = rule(_impl, attrs = { '_java_runtime': attr.label(default=Label('//a:alias'))})");
 
-    useConfiguration("--javabase=//a:jvm");
+    useConfiguration(
+        "--javabase=//a:jvm", "--extra_toolchains=//a:all", "--platforms=//a:platform");
     ConfiguredTarget ct = getConfiguredTarget("//a:r");
-    @SuppressWarnings("unchecked") PathFragment javaExecutable =
-        (PathFragment) ct.get("java_executable");
-    assertThat(javaExecutable.getPathString()).startsWith("a/foo/bar/bin/java");
-    @SuppressWarnings("unchecked") PathFragment javaRunfiles =
-        (PathFragment) ct.get("java_runfiles");
-    assertThat(javaRunfiles.getPathString()).startsWith("a/foo/bar/bin/java");
+    @SuppressWarnings("unchecked")
+    PathFragment javaHomeExecPath = (PathFragment) ct.get("java_home_exec_path");
+    assertThat(javaHomeExecPath.getPathString()).isEqualTo("a/foo/bar");
+    @SuppressWarnings("unchecked")
+    PathFragment javaExecutableExecPath = (PathFragment) ct.get("java_executable_exec_path");
+    assertThat(javaExecutableExecPath.getPathString()).startsWith("a/foo/bar/bin/java");
+    @SuppressWarnings("unchecked")
+    PathFragment javaHomeRunfilesPath = (PathFragment) ct.get("java_home_runfiles_path");
+    assertThat(javaHomeRunfilesPath.getPathString()).isEqualTo("a/foo/bar");
+    @SuppressWarnings("unchecked")
+    PathFragment javaExecutableRunfiles = (PathFragment) ct.get("java_executable_runfiles_path");
+    assertThat(javaExecutableRunfiles.getPathString()).startsWith("a/foo/bar/bin/java");
   }
 
   @Test
-  public void testJavaRuntimeProviderJavaHome() throws Exception {
-    scratch.file("a/BUILD",
+  public void testJavaRuntimeProviderJavaGenerated() throws Exception {
+    scratch.file(
+        "a/BUILD",
         "load(':rule.bzl', 'jrule')",
-        "java_runtime(name='jvm', srcs=[], java_home='/foo/bar/')",
+        "load('"
+            + TestConstants.TOOLS_REPOSITORY
+            + "//tools/jdk:java_toolchain_alias.bzl', 'java_runtime_alias')",
+        "genrule(name='gen', cmd='', outs=['foo/bar/bin/java'])",
+        "java_runtime(name='jvm', srcs=[], java='foo/bar/bin/java')",
         "java_runtime_alias(name='alias')",
-        "jrule(name='r')");
+        "jrule(name='r')",
+        "constraint_value(",
+        "    name = 'constraint',",
+        "    constraint_setting = '" + TestConstants.PLATFORM_BASE + "/java/constraints:runtime',",
+        ")",
+        "toolchain(",
+        "    name = 'java_runtime_toolchain',",
+        "    toolchain = ':jvm',",
+        "    toolchain_type = '"
+            + TestConstants.TOOLS_REPOSITORY
+            + "//tools/jdk:runtime_toolchain_type',",
+        "    target_compatible_with = [':constraint'],",
+        ")",
+        "platform(",
+        "    name = 'platform',",
+        "    constraint_values = [':constraint'],",
+        ")");
 
     scratch.file(
         "a/rule.bzl",
         "def _impl(ctx):",
         "  provider = ctx.attr._java_runtime[java_common.JavaRuntimeInfo]",
         "  return struct(",
-        "    java_home = provider.java_home",
-        ")",
+        "    java_home_exec_path = provider.java_home,",
+        "    java_executable_exec_path = provider.java_executable_exec_path,",
+        "    java_home_runfiles_path = provider.java_home_runfiles_path,",
+        "    java_executable_runfiles_path = provider.java_executable_runfiles_path,",
+        "  )",
         "jrule = rule(_impl, attrs = { '_java_runtime': attr.label(default=Label('//a:alias'))})");
 
-    useConfiguration("--javabase=//a:jvm");
+    useConfiguration(
+        "--javabase=//a:jvm", "--extra_toolchains=//a:all", "--platforms=//a:platform");
+    // TODO(b/129637690): the runtime shouldn't be resolved in the host config
+    ConfiguredTarget genrule = getHostConfiguredTarget("//a:gen");
     ConfiguredTarget ct = getConfiguredTarget("//a:r");
-    @SuppressWarnings("unchecked") PathFragment javaHome =
-        (PathFragment) ct.get("java_home");
-    assertThat(javaHome.getPathString()).isEqualTo("/foo/bar");
+    @SuppressWarnings("unchecked")
+    PathFragment javaHomeExecPath = (PathFragment) ct.get("java_home_exec_path");
+    assertThat(javaHomeExecPath.getPathString())
+        .isEqualTo(getGenfilesArtifact("foo/bar", genrule).getExecPathString());
+    @SuppressWarnings("unchecked")
+    PathFragment javaExecutableExecPath = (PathFragment) ct.get("java_executable_exec_path");
+    assertThat(javaExecutableExecPath.getPathString())
+        .startsWith(getGenfilesArtifact("foo/bar/bin/java", genrule).getExecPathString());
+    @SuppressWarnings("unchecked")
+    PathFragment javaHomeRunfilesPath = (PathFragment) ct.get("java_home_runfiles_path");
+    assertThat(javaHomeRunfilesPath.getPathString()).isEqualTo("a/foo/bar");
+    @SuppressWarnings("unchecked")
+    PathFragment javaExecutableRunfiles = (PathFragment) ct.get("java_executable_runfiles_path");
+    assertThat(javaExecutableRunfiles.getPathString()).startsWith("a/foo/bar/bin/java");
   }
 
   @Test
   public void testInvalidHostJavabase() throws Exception {
     writeBuildFileForJavaToolchain();
 
-    scratch.file("a/BUILD",
+    scratch.file(
+        "a/BUILD",
         "load(':rule.bzl', 'jrule')",
         "filegroup(name='fg')",
         "jrule(name='r', srcs=['S.java'])");
 
-    scratch.file("a/rule.bzl",
+    scratch.file(
+        "a/rule.bzl",
         "def _impl(ctx):",
         "  output_jar = ctx.actions.declare_file('lib' + ctx.label.name + '.jar')",
         "  java_common.compile(",
         "    ctx,",
         "    source_files = ctx.files.srcs,",
         "    output = output_jar,",
-        "    java_toolchain = ctx.attr._java_toolchain,",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
         "    host_javabase = ctx.attr._host_javabase",
         "  )",
         "  return struct()",
@@ -162,7 +259,7 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
 
     reporter.removeHandler(failFastHandler);
     getConfiguredTarget("//a:r");
-    assertContainsEvent("must point to a Java runtime");
+    assertContainsEvent("expected value of type 'JavaRuntimeInfo' for parameter 'host_javabase'");
   }
 
   @Test
@@ -194,10 +291,11 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "my_rule = rule(impl, attrs = { 'dep' : attr.label() })");
 
     ConfiguredTarget configuredTarget = getConfiguredTarget("//java/test:my");
-    Info info =
-        configuredTarget.get(
-            new SkylarkKey(
-                Label.parseAbsolute("//java/test:extension.bzl", ImmutableMap.of()), "result"));
+    StructImpl info =
+        (StructImpl)
+            configuredTarget.get(
+                new SkylarkKey(
+                    Label.parseAbsolute("//java/test:extension.bzl", ImmutableMap.of()), "result"));
 
     SkylarkNestedSet transitiveRuntimeJars =
         ((SkylarkNestedSet) info.getValue("transitive_runtime_jars"));
@@ -212,7 +310,8 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         .containsExactly("libdep.jar");
     assertThat(artifactFilesNames(transitiveCompileTimeJars.toCollection(Artifact.class)))
         .containsExactly("libdep-hjar.jar");
-    assertThat(transitiveCompileTimeJars.toCollection()).isEqualTo(compileJars.toCollection());
+    assertThat(transitiveCompileTimeJars.toCollection())
+        .containsExactlyElementsIn(compileJars.toCollection());
     assertThat(artifactFilesNames(fullCompileJars.toCollection(Artifact.class)))
         .containsExactly("libdep.jar");
     assertThat(artifactFilesNames(sourceJars)).containsExactly("libdep-src.jar");
@@ -264,13 +363,11 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "    ctx,",
         "    source_files = ctx.files.srcs,",
         "    output = output_jar,",
-        "    javac_opts = java_common.default_javac_opts(",
-        "        ctx, java_toolchain_attr = '_java_toolchain'),",
         "    deps = [],",
         "    sourcepath = ctx.files.sourcepath,",
         "    strict_deps = 'ERROR',",
-        "    java_toolchain = ctx.attr._java_toolchain,",
-        "    host_javabase = ctx.attr._host_javabase",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo]",
         "  )",
         "  return struct(",
         "    files = depset([output_jar]),",
@@ -292,10 +389,11 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         ")");
 
     ConfiguredTarget configuredTarget = getConfiguredTarget("//java/test:my");
-    Info info =
-        configuredTarget.get(
-            new SkylarkKey(
-                Label.parseAbsolute("//java/test:extension.bzl", ImmutableMap.of()), "result"));
+    StructImpl info =
+        (StructImpl)
+            configuredTarget.get(
+                new SkylarkKey(
+                    Label.parseAbsolute("//java/test:extension.bzl", ImmutableMap.of()), "result"));
 
     JavaRuleOutputJarsProvider outputs = ((JavaRuleOutputJarsProvider) info.getValue("outputs"));
     assertThat(outputs.getOutputJars()).hasSize(1);
@@ -330,8 +428,8 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "    exports = [e[JavaInfo] for e in ctx.attr.exports],",
         "    plugins = [p[JavaInfo] for p in ctx.attr.plugins],",
         "    output = output_jar,",
-        "    java_toolchain = ctx.attr._java_toolchain,",
-        "    host_javabase = ctx.attr._host_javabase",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo]",
         "  )",
         "java_custom_library = rule(",
         "  implementation = _impl,",
@@ -379,11 +477,10 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "    ctx,",
         "    source_files = ctx.files.srcs,",
         "    output = output_jar,",
-        "    javac_opts = java_common.default_javac_opts(",
-        "        ctx, java_toolchain_attr = '_java_toolchain'),",
         "    deps = deps,",
-        "    java_toolchain = ctx.attr._java_toolchain,",
-        "    host_javabase = ctx.attr._host_javabase",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo],",
+        "    javac_opts = ['-XDone -XDtwo'],",
         "  )",
         "  return struct(",
         "    files = depset([output_jar] + compilation_provider.source_jars),",
@@ -408,11 +505,13 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
     ConfiguredTarget configuredTarget = getConfiguredTarget("//java/test:custom");
     JavaInfo info = configuredTarget.get(JavaInfo.PROVIDER);
     JavaCompilationInfoProvider compilationInfo = info.getCompilationInfoProvider();
-    assertThat(prettyArtifactNames(compilationInfo.getCompilationClasspath().toList())).
-        containsExactly("java/test/libdep-hjar.jar");
+    assertThat(prettyArtifactNames(compilationInfo.getCompilationClasspath().toList()))
+        .containsExactly("java/test/libdep-hjar.jar");
 
-    assertThat(prettyArtifactNames(compilationInfo.getRuntimeClasspath().toList())).
-        containsExactly("java/test/libdep.jar", "java/test/libcustom.jar");
+    assertThat(prettyArtifactNames(compilationInfo.getRuntimeClasspath().toList()))
+        .containsExactly("java/test/libdep.jar", "java/test/libcustom.jar");
+
+    assertThat(compilationInfo.getJavacOpts()).contains("-XDone");
   }
 
   @Test
@@ -439,11 +538,9 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "    ctx,",
         "    source_files = ctx.files.srcs,",
         "    output = output_jar,",
-        "    javac_opts = java_common.default_javac_opts(",
-        "        ctx, java_toolchain_attr = '_java_toolchain'),",
         "    deps = deps,",
-        "    java_toolchain = ctx.attr._java_toolchain,",
-        "    host_javabase = ctx.attr._host_javabase",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo]",
         "  )",
         "  return struct(",
         "    files = depset([output_jar] + compilation_provider.source_jars),",
@@ -473,7 +570,7 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
     assertThat(artifactFilesNames(transitiveSourceJars))
         .containsExactly("libdep-src.jar", "libcustom-src.jar");
 
-   assertThat(getGeneratingAction(configuredTarget, "java/test/libcustom-src.jar")).isNotNull();
+    assertThat(getGeneratingAction(configuredTarget, "java/test/libcustom-src.jar")).isNotNull();
   }
 
   @Test
@@ -501,21 +598,17 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "    ctx,",
         "    source_files = ctx.files.srcs,",
         "    output = output_jar,",
-        "    javac_opts = java_common.default_javac_opts(",
-        "        ctx, java_toolchain_attr = '_java_toolchain'),",
         "    deps = deps,",
-        "    java_toolchain = ctx.attr._java_toolchain,",
-        "    host_javabase = ctx.attr._host_javabase",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo]",
         "  )",
         "  other_compilation_provider = java_common.compile(",
         "    ctx,",
         "    source_files = ctx.files.srcs,",
         "    output = other_output_jar,",
-        "    javac_opts = java_common.default_javac_opts(",
-        "        ctx, java_toolchain_attr = '_java_toolchain'),",
         "    deps = deps,",
-        "    java_toolchain = ctx.attr._java_toolchain,",
-        "    host_javabase = ctx.attr._host_javabase",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo]",
         "  )",
         "  result_provider = java_common.merge([compilation_provider, other_compilation_provider])",
         "  return struct(",
@@ -542,8 +635,8 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
     JavaInfo info = configuredTarget.get(JavaInfo.PROVIDER);
     SkylarkList<Artifact> sourceJars = info.getSourceJars();
     NestedSet<Artifact> transitiveSourceJars = info.getTransitiveSourceJars();
-    assertThat(artifactFilesNames(sourceJars)).containsExactly(
-        "amazing-src.jar", "wonderful-src.jar");
+    assertThat(artifactFilesNames(sourceJars))
+        .containsExactly("amazing-src.jar", "wonderful-src.jar");
     assertThat(artifactFilesNames(transitiveSourceJars))
         .containsExactly("libdep-src.jar", "amazing-src.jar", "wonderful-src.jar");
   }
@@ -566,10 +659,8 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "    ctx,",
         "    source_jars = ctx.files.srcs,",
         "    output = output_jar,",
-        "    javac_opts = java_common.default_javac_opts(",
-        "        ctx, java_toolchain_attr = '_java_toolchain'),",
-        "    java_toolchain = ctx.attr._java_toolchain,",
-        "    host_javabase = ctx.attr._host_javabase",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo]",
         "  )",
         "  return struct(",
         "    files = depset([output_jar]),",
@@ -592,12 +683,12 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
     ConfiguredTarget configuredTarget = getConfiguredTarget("//java/test:custom");
     JavaInfo info = configuredTarget.get(JavaInfo.PROVIDER);
     SkylarkList<Artifact> sourceJars = info.getSourceJars();
-    assertThat(artifactFilesNames(sourceJars)).containsExactly("myjar-src.jar");
+    assertThat(artifactFilesNames(sourceJars)).containsExactly("libcustom-src.jar");
     JavaRuleOutputJarsProvider outputJars = info.getOutputJars();
     assertThat(outputJars.getOutputJars()).hasSize(1);
     OutputJar outputJar = outputJars.getOutputJars().get(0);
     assertThat((outputJar.getClassJar().getFilename())).isEqualTo("libcustom.jar");
-    assertThat((outputJar.getSrcJar().getFilename())).isEqualTo("myjar-src.jar");
+    assertThat(outputJar.getSrcJar().getFilename()).isEqualTo("libcustom-src.jar");
     assertThat((outputJar.getIJar().getFilename())).isEqualTo("libcustom-hjar.jar");
     assertThat(outputJars.getJdeps().getFilename()).isEqualTo("libcustom.jdeps");
   }
@@ -605,7 +696,6 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
   @Test
   public void testJavaCommonCompileWithOnlyOneSourceJarWithIncompatibleFlag() throws Exception {
     writeBuildFileForJavaToolchain();
-    setSkylarkSemanticsOptions("--incompatible_generate_javacommon_source_jar=true");
     scratch.file(
         "java/test/BUILD",
         "load(':custom_rule.bzl', 'java_custom_library')",
@@ -621,10 +711,8 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "    ctx,",
         "    source_jars = ctx.files.srcs,",
         "    output = output_jar,",
-        "    javac_opts = java_common.default_javac_opts(",
-        "        ctx, java_toolchain_attr = '_java_toolchain'),",
-        "    java_toolchain = ctx.attr._java_toolchain,",
-        "    host_javabase = ctx.attr._host_javabase",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo]",
         "  )",
         "  return struct(",
         "    files = depset([output_jar]),",
@@ -658,6 +746,60 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
   }
 
   @Test
+  public void testJavaCommonCompileCustomSourceJar() throws Exception {
+    writeBuildFileForJavaToolchain();
+    scratch.file(
+        "java/test/BUILD",
+        "load(':custom_rule.bzl', 'java_custom_library')",
+        "java_custom_library(",
+        "  name = 'custom',",
+        "  srcs = ['myjar-src.jar'],",
+        ")");
+    scratch.file(
+        "java/test/custom_rule.bzl",
+        "def _impl(ctx):",
+        "  output_jar = ctx.actions.declare_file('lib' + ctx.label.name + '.jar')",
+        "  output_source_jar = ctx.actions.declare_file('lib' + ctx.label.name + '-mysrc.jar')",
+        "  compilation_provider = java_common.compile(",
+        "    ctx,",
+        "    source_jars = ctx.files.srcs,",
+        "    output = output_jar,",
+        "    output_source_jar = output_source_jar,",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo]",
+        "  )",
+        "  return struct(",
+        "    files = depset([output_source_jar]),",
+        "    providers = [compilation_provider]",
+        "  )",
+        "java_custom_library = rule(",
+        "  implementation = _impl,",
+        "  outputs = {",
+        "    'my_output': 'lib%{name}.jar'",
+        "  },",
+        "  attrs = {",
+        "    'srcs': attr.label_list(allow_files=['.jar']),",
+        "    '_java_toolchain': attr.label(default = Label('//java/com/google/test:toolchain')),",
+        "    '_host_javabase': attr.label(",
+        "        default = Label('" + HOST_JAVA_RUNTIME_LABEL + "'))",
+        "  },",
+        "  fragments = ['java']",
+        ")");
+
+    ConfiguredTarget configuredTarget = getConfiguredTarget("//java/test:custom");
+    JavaInfo info = configuredTarget.get(JavaInfo.PROVIDER);
+    SkylarkList<Artifact> sourceJars = info.getSourceJars();
+    assertThat(artifactFilesNames(sourceJars)).containsExactly("libcustom-mysrc.jar");
+    JavaRuleOutputJarsProvider outputJars = info.getOutputJars();
+    assertThat(outputJars.getOutputJars()).hasSize(1);
+    OutputJar outputJar = outputJars.getOutputJars().get(0);
+    assertThat(outputJar.getClassJar().getFilename()).isEqualTo("libcustom.jar");
+    assertThat(outputJar.getSrcJar().getFilename()).isEqualTo("libcustom-mysrc.jar");
+    assertThat(outputJar.getIJar().getFilename()).isEqualTo("libcustom-hjar.jar");
+    assertThat(outputJars.getJdeps().getFilename()).isEqualTo("libcustom.jdeps");
+  }
+
+  @Test
   public void testJavaCommonCompileWithNoSources() throws Exception {
     writeBuildFileForJavaToolchain();
     scratch.file(
@@ -673,10 +815,8 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "  compilation_provider = java_common.compile(",
         "    ctx,",
         "    output = output_jar,",
-        "    javac_opts = java_common.default_javac_opts(",
-        "        ctx, java_toolchain_attr = '_java_toolchain'),",
-        "    java_toolchain = ctx.attr._java_toolchain,",
-        "    host_javabase = ctx.attr._host_javabase",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo]",
         "  )",
         "  return struct(",
         "    files = depset([output_jar]),",
@@ -697,8 +837,61 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
     try {
       getConfiguredTarget("//java/test:custom");
     } catch (AssertionError e) {
-      assertThat(e.getMessage())
-          .contains("source_jars, sources and exports cannot be simultaneous empty");
+      assertThat(e)
+          .hasMessageThat()
+          .contains(
+              "source_jars, sources, exports and exported_plugins cannot be simultaneously empty");
+    }
+  }
+
+  @Test
+  public void testJavaCommonCompileWithOnlyExportedPlugins() throws Exception {
+    writeBuildFileForJavaToolchain();
+    scratch.file(
+        "java/test/BUILD",
+        "load(':custom_rule.bzl', 'java_custom_library')",
+        "java_library(name = 'plugin_dep',",
+        "    srcs = [ 'ProcessorDep.java'])",
+        "java_plugin(name = 'plugin',",
+        "    srcs = ['AnnotationProcessor.java'],",
+        "    processor_class = 'com.google.process.stuff',",
+        "    deps = [ ':plugin_dep' ])",
+        "java_custom_library(",
+        "  name = 'custom',",
+        "  exported_plugins = [':plugin'],",
+        ")");
+    scratch.file(
+        "java/test/custom_rule.bzl",
+        "def _impl(ctx):",
+        "  output_jar = ctx.actions.declare_file('lib' + ctx.label.name + '.jar')",
+        "  compilation_provider = java_common.compile(",
+        "    ctx,",
+        "    output = output_jar,",
+        "    exported_plugins = [p[JavaInfo] for p in ctx.attr.exported_plugins],",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo]",
+        "  )",
+        "  return [DefaultInfo(files=depset([output_jar])), compilation_provider]",
+        "java_custom_library = rule(",
+        "  implementation = _impl,",
+        "  outputs = {",
+        "    'my_output': 'lib%{name}.jar'",
+        "  },",
+        "  attrs = {",
+        "    'exported_plugins': attr.label_list(),",
+        "    '_java_toolchain': attr.label(default = Label('//java/com/google/test:toolchain')),",
+        "    '_host_javabase': attr.label(",
+        "        default = Label('" + HOST_JAVA_RUNTIME_LABEL + "'))",
+        "  },",
+        "  fragments = ['java']",
+        ")");
+    try {
+      getConfiguredTarget("//java/test:custom");
+    } catch (AssertionError e) {
+      assertThat(e)
+          .hasMessageThat()
+          .contains(
+              "source_jars, sources, exports and exported_plugins cannot be simultaneously empty");
     }
   }
 
@@ -771,10 +964,11 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "my_rule = rule(impl, attrs = { 'dep' : attr.label() })");
 
     ConfiguredTarget configuredTarget = getConfiguredTarget("//java/test:my");
-    Info info =
-        configuredTarget.get(
-            new SkylarkKey(
-                Label.parseAbsolute("//java/test:extension.bzl", ImmutableMap.of()), "result"));
+    StructImpl info =
+        (StructImpl)
+            configuredTarget.get(
+                new SkylarkKey(
+                    Label.parseAbsolute("//java/test:extension.bzl", ImmutableMap.of()), "result"));
 
     SkylarkNestedSet sourceJars = ((SkylarkNestedSet) info.getValue("source_jars"));
     SkylarkNestedSet transitiveDeps = ((SkylarkNestedSet) info.getValue("transitive_deps"));
@@ -815,9 +1009,9 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
   }
 
   /**
-   * Tests that JavaInfo's java_annotation_processing looks as expected with a target that's
-   * assumed to use annotation processing itself and has a dep and an export that likewise use
-   * annotation processing.
+   * Tests that JavaInfo's java_annotation_processing looks as expected with a target that's assumed
+   * to use annotation processing itself and has a dep and an export that likewise use annotation
+   * processing.
    */
   private void testAnnotationProcessingInfoIsSkylarkAccessible(
       String toBeProcessedRuleName, String extraLoad) throws Exception {
@@ -837,43 +1031,44 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "          )]",
         "my_rule = rule(impl, attrs = { 'dep' : attr.label() })");
     scratch.file(
-      "java/test/BUILD",
-      "load(':extension.bzl', 'my_rule')",
-      "java_library(name = 'plugin_dep',",
-      "    srcs = [ 'ProcessorDep.java'])",
-      "java_plugin(name = 'plugin',",
-      "    srcs = ['AnnotationProcessor.java'],",
-      "    processor_class = 'com.google.process.stuff',",
-      "    deps = [ ':plugin_dep' ])",
-      extraLoad,
-      toBeProcessedRuleName + "(",
-      "    name = 'to_be_processed',",
-      "    plugins = [':plugin'],",
-      "    srcs = ['ToBeProcessed.java'],",
-      "    deps = [':dep'],",
-      "    exports = [':export'],",
-      ")",
-      "java_library(",
-      "  name = 'dep',",
-      "  srcs = ['Dep.java'],",
-      "  plugins = [':plugin']",
-      ")",
-      "java_library(",
-      "  name = 'export',",
-      "  srcs = ['Export.java'],",
-      "  plugins = [':plugin']",
-      ")",
-      "my_rule(name = 'my', dep = ':to_be_processed')");
+        "java/test/BUILD",
+        "load(':extension.bzl', 'my_rule')",
+        "java_library(name = 'plugin_dep',",
+        "    srcs = [ 'ProcessorDep.java'])",
+        "java_plugin(name = 'plugin',",
+        "    srcs = ['AnnotationProcessor.java'],",
+        "    processor_class = 'com.google.process.stuff',",
+        "    deps = [ ':plugin_dep' ])",
+        extraLoad,
+        toBeProcessedRuleName + "(",
+        "    name = 'to_be_processed',",
+        "    plugins = [':plugin'],",
+        "    srcs = ['ToBeProcessed.java'],",
+        "    deps = [':dep'],",
+        "    exports = [':export'],",
+        ")",
+        "java_library(",
+        "  name = 'dep',",
+        "  srcs = ['Dep.java'],",
+        "  plugins = [':plugin']",
+        ")",
+        "java_library(",
+        "  name = 'export',",
+        "  srcs = ['Export.java'],",
+        "  plugins = [':plugin']",
+        ")",
+        "my_rule(name = 'my', dep = ':to_be_processed')");
 
     // Assert that java_annotation_processing for :to_be_processed looks as expected:
     // the target itself uses :plugin as the processor, and transitive information includes
     // the target's own as well as :dep's and :export's annotation processing outputs, since those
     // two targets also use annotation processing.
     ConfiguredTarget configuredTarget = getConfiguredTarget("//java/test:my");
-    Info info =
-        configuredTarget.get(
-            new SkylarkKey(
-                Label.parseAbsolute("//java/test:extension.bzl", ImmutableMap.of()), "result"));
+    StructImpl info =
+        (StructImpl)
+            configuredTarget.get(
+                new SkylarkKey(
+                    Label.parseAbsolute("//java/test:extension.bzl", ImmutableMap.of()), "result"));
 
     assertThat(info.getValue("enabled")).isEqualTo(Boolean.TRUE);
     assertThat(info.getValue("class_jar")).isNotNull();
@@ -930,10 +1125,11 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
     ConfiguredTarget javaLibraryTarget = getConfiguredTarget("//java/test:jl");
 
     // Extract out the information from skylark rule
-    Info info =
-        myConfiguredTarget.get(
-            new SkylarkKey(
-                Label.parseAbsolute("//java/test:extension.bzl", ImmutableMap.of()), "result"));
+    StructImpl info =
+        (StructImpl)
+            myConfiguredTarget.get(
+                new SkylarkKey(
+                    Label.parseAbsolute("//java/test:extension.bzl", ImmutableMap.of()), "result"));
 
     SkylarkNestedSet rawMyCompileJars = (SkylarkNestedSet) (info.getValue("compile_jars"));
     SkylarkNestedSet rawMyTransitiveRuntimeJars =
@@ -980,11 +1176,8 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
     ConfiguredTarget myConfiguredTarget = getConfiguredTarget("//java/test:my");
     ConfiguredTarget javaLibraryTarget = getConfiguredTarget("//java/test:jl");
 
-    assertThat(myConfiguredTarget.get("java")).isSameAs(
-        javaLibraryTarget.get("java")
-    );
+    assertThat(myConfiguredTarget.get("java")).isSameAs(javaLibraryTarget.get("java"));
   }
-
 
   @Test
   public void javaProviderFieldsAreCorrectAfterCreatingProvider() throws Exception {
@@ -1147,7 +1340,8 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "})");
     scratch.file("foo/liba.jar");
     scratch.file("foo/libb.jar");
-    scratch.file("foo/BUILD",
+    scratch.file(
+        "foo/BUILD",
         "load(':extension.bzl', 'my_rule')",
         "java_library(name = 'java_dep',",
         "    srcs = ['A.java'])",
@@ -1155,8 +1349,7 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "    compile_time_jars = ['liba.jar'],",
         "    runtime_jars = ['libb.jar'],",
         "    deps = [':java_dep']",
-        ")"
-    );
+        ")");
     ConfiguredTarget target = getConfiguredTarget("//foo:myrule");
     JavaCompilationArgsProvider provider =
         JavaInfo.getProvider(JavaCompilationArgsProvider.class, target);
@@ -1184,7 +1377,8 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "})");
     scratch.file("foo/liba.jar");
     scratch.file("foo/libb.jar");
-    scratch.file("foo/BUILD",
+    scratch.file(
+        "foo/BUILD",
         "load(':extension.bzl', 'my_rule')",
         "my_rule(name = 'myrule',",
         "    transitive_compile_time_jars = ['liba.jar'],",
@@ -1193,8 +1387,7 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "java_library(name = 'java_lib',",
         "    srcs = ['C.java'],",
         "    deps = [':myrule']",
-        ")"
-    );
+        ")");
     ConfiguredTarget target = getConfiguredTarget("//foo:java_lib");
     JavaCompilationArgsProvider provider =
         JavaInfo.getProvider(JavaCompilationArgsProvider.class, target);
@@ -1225,7 +1418,7 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
     SkylarkKey myProviderKey =
         new SkylarkKey(
             Label.parseAbsolute("//foo:extension.bzl", ImmutableMap.of()), "my_provider");
-    Info declaredProvider = myRuleTarget.get(myProviderKey);
+    StructImpl declaredProvider = (StructImpl) myRuleTarget.get(myProviderKey);
     Object javaProvider = declaredProvider.getValue("p");
     assertThat(javaProvider).isInstanceOf(JavaInfo.class);
     assertThat(javaLibraryTarget.get(JavaInfo.PROVIDER)).isEqualTo(javaProvider);
@@ -1374,12 +1567,13 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "my_rule(name = 'my_skylark_rule', dep = ':my_java_lib_a')");
     assertNoEvents();
     ConfiguredTarget myRuleTarget = getConfiguredTarget("//foo:my_skylark_rule");
-    Info info =
-        myRuleTarget.get(
-            new SkylarkKey(
-                Label.parseAbsolute("//foo:extension.bzl", ImmutableMap.of()), "result"));
-    @SuppressWarnings("unchecked") SkylarkList<Artifact> sourceJars =
-        (SkylarkList<Artifact>) (info.getValue("source_jars"));
+    StructImpl info =
+        (StructImpl)
+            myRuleTarget.get(
+                new SkylarkKey(
+                    Label.parseAbsolute("//foo:extension.bzl", ImmutableMap.of()), "result"));
+    @SuppressWarnings("unchecked")
+    SkylarkList<Artifact> sourceJars = (SkylarkList<Artifact>) (info.getValue("source_jars"));
     assertThat(prettyArtifactNames(sourceJars)).containsExactly("foo/libmy_java_lib_a-src.jar");
 
     assertThat(prettyArtifactNames(sourceJars)).doesNotContain("foo/libmy_java_lib_b-src.jar");
@@ -1403,10 +1597,11 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "my_rule(name = 'my_skylark_rule', dep = ':my_java_lib_a')");
     assertNoEvents();
     ConfiguredTarget myRuleTarget = getConfiguredTarget("//foo:my_skylark_rule");
-    Info info =
-        myRuleTarget.get(
-            new SkylarkKey(
-                Label.parseAbsolute("//foo:extension.bzl", ImmutableMap.of()), "result"));
+    StructImpl info =
+        (StructImpl)
+            myRuleTarget.get(
+                new SkylarkKey(
+                    Label.parseAbsolute("//foo:extension.bzl", ImmutableMap.of()), "result"));
 
     @SuppressWarnings("unchecked")
     SkylarkNestedSet sourceJars = (SkylarkNestedSet) info.getValue("property");
@@ -1436,10 +1631,11 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "my_rule(name = 'my_skylark_rule', dep = ':my_java_lib_a')");
     assertNoEvents();
     ConfiguredTarget myRuleTarget = getConfiguredTarget("//foo:my_skylark_rule");
-    Info info =
-        myRuleTarget.get(
-            new SkylarkKey(
-                Label.parseAbsolute("//foo:extension.bzl", ImmutableMap.of()), "result"));
+    StructImpl info =
+        (StructImpl)
+            myRuleTarget.get(
+                new SkylarkKey(
+                    Label.parseAbsolute("//foo:extension.bzl", ImmutableMap.of()), "result"));
 
     @SuppressWarnings("unchecked")
     SkylarkNestedSet sourceJars = (SkylarkNestedSet) info.getValue("property");
@@ -1469,10 +1665,11 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "my_rule(name = 'my_skylark_rule', dep = ':my_java_lib_a')");
     assertNoEvents();
     ConfiguredTarget myRuleTarget = getConfiguredTarget("//foo:my_skylark_rule");
-    Info info =
-        myRuleTarget.get(
-            new SkylarkKey(
-                Label.parseAbsolute("//foo:extension.bzl", ImmutableMap.of()), "result"));
+    StructImpl info =
+        (StructImpl)
+            myRuleTarget.get(
+                new SkylarkKey(
+                    Label.parseAbsolute("//foo:extension.bzl", ImmutableMap.of()), "result"));
 
     @SuppressWarnings("unchecked")
     SkylarkNestedSet sourceJars = (SkylarkNestedSet) info.getValue("property");
@@ -1481,7 +1678,6 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         .containsExactly(
             "foo/libmy_java_lib_a.jar", "foo/libmy_java_lib_b.jar", "foo/libmy_java_lib_c.jar");
   }
-
 
   @Test
   public void testJavaInfoGetTransitiveExports() throws Exception {
@@ -1503,18 +1699,18 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "my_rule(name = 'my_skylark_rule', dep = ':my_java_lib_a')");
     assertNoEvents();
     ConfiguredTarget myRuleTarget = getConfiguredTarget("//foo:my_skylark_rule");
-    Info info =
-        myRuleTarget.get(
-            new SkylarkKey(
-                Label.parseAbsolute("//foo:extension.bzl", ImmutableMap.of()), "result"));
+    StructImpl info =
+        (StructImpl)
+            myRuleTarget.get(
+                new SkylarkKey(
+                    Label.parseAbsolute("//foo:extension.bzl", ImmutableMap.of()), "result"));
 
-    @SuppressWarnings("unchecked") SkylarkNestedSet exports =
-        (SkylarkNestedSet) (info.getValue("property"));
+    @SuppressWarnings("unchecked")
+    SkylarkNestedSet exports = (SkylarkNestedSet) (info.getValue("property"));
 
     assertThat(exports.getSet(Label.class))
         .containsExactly(Label.parseAbsolute("//foo:my_java_lib_b", ImmutableMap.of()));
   }
-
 
   @Test
   public void testJavaInfoGetGenJarsProvider() throws Exception {
@@ -1533,10 +1729,11 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "my_rule(name = 'my_skylark_rule', dep = ':my_java_lib_a')");
     assertNoEvents();
     ConfiguredTarget myRuleTarget = getConfiguredTarget("//foo:my_skylark_rule");
-    Info info =
-        myRuleTarget.get(
-            new SkylarkKey(
-                Label.parseAbsolute("//foo:extension.bzl", ImmutableMap.of()), "result"));
+    StructImpl info =
+        (StructImpl)
+            myRuleTarget.get(
+                new SkylarkKey(
+                    Label.parseAbsolute("//foo:extension.bzl", ImmutableMap.of()), "result"));
 
     JavaGenJarsProvider javaGenJarsProvider = (JavaGenJarsProvider) info.getValue("property");
 
@@ -1545,7 +1742,6 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
     assertThat(javaGenJarsProvider.getGenSourceJar().getFilename())
         .isEqualTo("libmy_java_lib_a-gensrc.jar");
   }
-
 
   @Test
   public void javaInfoGetCompilationInfoProvider() throws Exception {
@@ -1563,10 +1759,11 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "my_rule(name = 'my_skylark_rule', dep = ':my_java_lib_a')");
     assertNoEvents();
     ConfiguredTarget myRuleTarget = getConfiguredTarget("//foo:my_skylark_rule");
-    Info info =
-        myRuleTarget.get(
-            new SkylarkKey(
-                Label.parseAbsolute("//foo:extension.bzl", ImmutableMap.of()), "result"));
+    StructImpl info =
+        (StructImpl)
+            myRuleTarget.get(
+                new SkylarkKey(
+                    Label.parseAbsolute("//foo:extension.bzl", ImmutableMap.of()), "result"));
 
     JavaCompilationInfoProvider javaCompilationInfoProvider =
         (JavaCompilationInfoProvider) info.getValue("property");
@@ -1601,12 +1798,10 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "    ctx,",
         "    source_files = ctx.files.srcs,",
         "    output = output_jar,",
-        "    javac_opts = java_common.default_javac_opts(",
-        "        ctx, java_toolchain_attr = '_java_toolchain'),",
         "    neverlink = ctx.attr.neverlink,",
         "    deps = deps,",
-        "    java_toolchain = ctx.attr._java_toolchain,",
-        "    host_javabase = ctx.attr._host_javabase",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo]",
         "  )",
         "  return struct(",
         "    files = depset([output_jar]),",
@@ -1654,15 +1849,13 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "    'strict_deps': attr.bool()",
         "  },",
         "  implementation = _impl",
-        ")"
-    );
+        ")");
     scratch.file(
         "foo/BUILD",
         "load(':custom_library.bzl', 'custom_library')",
         "custom_library(name = 'custom', deps = [':a'], strict_deps = True)",
         "java_library(name = 'a', srcs = ['java/A.java'], deps = [':b'])",
-        "java_library(name = 'b', srcs = ['java/B.java'])"
-    );
+        "java_library(name = 'b', srcs = ['java/B.java'])");
 
     ConfiguredTarget myRuleTarget = getConfiguredTarget("//foo:custom");
     JavaCompilationArgsProvider javaCompilationArgsProvider =
@@ -1687,15 +1880,13 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "    'strict_deps': attr.bool()",
         "  },",
         "  implementation = _impl",
-        ")"
-    );
+        ")");
     scratch.file(
         "foo/BUILD",
         "load(':custom_library.bzl', 'custom_library')",
         "custom_library(name = 'custom', deps = [':a'], strict_deps = False)",
         "java_library(name = 'a', srcs = ['java/A.java'], deps = [':b'])",
-        "java_library(name = 'b', srcs = ['java/B.java'])"
-    );
+        "java_library(name = 'b', srcs = ['java/B.java'])");
 
     ConfiguredTarget myRuleTarget = getConfiguredTarget("//foo:custom");
     JavaCompilationArgsProvider javaCompilationArgsProvider =
@@ -1707,24 +1898,20 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
   @Test
   public void strictJavaDepsFlagExposed_default() throws Exception {
     scratch.file(
-      "foo/rule.bzl",
-      "result = provider()",
-      "def _impl(ctx):",
-      "  return [result(strict_java_deps=ctx.fragments.java.strict_java_deps)]",
-      "myrule = rule(",
-      "  implementation=_impl,",
-      "  fragments = ['java']",
-      ")"
-    );
-    scratch.file(
-        "foo/BUILD",
-        "load(':rule.bzl', 'myrule')",
-        "myrule(name='myrule')"
-    );
+        "foo/rule.bzl",
+        "result = provider()",
+        "def _impl(ctx):",
+        "  return [result(strict_java_deps=ctx.fragments.java.strict_java_deps)]",
+        "myrule = rule(",
+        "  implementation=_impl,",
+        "  fragments = ['java']",
+        ")");
+    scratch.file("foo/BUILD", "load(':rule.bzl', 'myrule')", "myrule(name='myrule')");
     ConfiguredTarget configuredTarget = getConfiguredTarget("//foo:myrule");
-    Info info =
-        configuredTarget.get(
-            new SkylarkKey(Label.parseAbsolute("//foo:rule.bzl", ImmutableMap.of()), "result"));
+    StructImpl info =
+        (StructImpl)
+            configuredTarget.get(
+                new SkylarkKey(Label.parseAbsolute("//foo:rule.bzl", ImmutableMap.of()), "result"));
     assertThat(((String) info.getValue("strict_java_deps"))).isEqualTo("default");
   }
 
@@ -1738,18 +1925,14 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "myrule = rule(",
         "  implementation=_impl,",
         "  fragments = ['java']",
-        ")"
-    );
-    scratch.file(
-        "foo/BUILD",
-        "load(':rule.bzl', 'myrule')",
-        "myrule(name='myrule')"
-    );
+        ")");
+    scratch.file("foo/BUILD", "load(':rule.bzl', 'myrule')", "myrule(name='myrule')");
     useConfiguration("--strict_java_deps=ERROR");
     ConfiguredTarget configuredTarget = getConfiguredTarget("//foo:myrule");
-    Info info =
-        configuredTarget.get(
-            new SkylarkKey(Label.parseAbsolute("//foo:rule.bzl", ImmutableMap.of()), "result"));
+    StructImpl info =
+        (StructImpl)
+            configuredTarget.get(
+                new SkylarkKey(Label.parseAbsolute("//foo:rule.bzl", ImmutableMap.of()), "result"));
     assertThat(((String) info.getValue("strict_java_deps"))).isEqualTo("error");
   }
 
@@ -1760,25 +1943,35 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "foo/rule.bzl",
         "result = provider()",
         "def _impl(ctx):",
-        "  return [result(java_toolchain_label=ctx.attr._java_toolchain.label)]",
+        "  return [result(java_toolchain_label=ctx.attr._java_toolchain)]",
         "myrule = rule(",
         "  implementation=_impl,",
         "  fragments = ['java'],",
         "  attrs = { '_java_toolchain': attr.label(default=Label('//foo:alias')) }",
-        ")"
-    );
+        ")");
     scratch.file(
         "foo/BUILD",
         "load(':rule.bzl', 'myrule')",
+        "load('"
+            + TestConstants.TOOLS_REPOSITORY
+            + "//tools/jdk:java_toolchain_alias.bzl', 'java_toolchain_alias')",
         "java_toolchain_alias(name='alias')",
-        "myrule(name='myrule')"
-    );
+        "myrule(name='myrule')");
     ConfiguredTarget configuredTarget = getConfiguredTarget("//foo:myrule");
-    Info info =
-        configuredTarget.get(
-            new SkylarkKey(Label.parseAbsolute("//foo:rule.bzl", ImmutableMap.of()), "result"));
-    Label javaToolchainLabel = ((Label) info.getValue("java_toolchain_label"));
-    assertThat(javaToolchainLabel.toString()).endsWith("jdk:toolchain");
+    StructImpl info =
+        (StructImpl)
+            configuredTarget.get(
+                new SkylarkKey(Label.parseAbsolute("//foo:rule.bzl", ImmutableMap.of()), "result"));
+    Label javaToolchainLabel =
+        ((JavaToolchainProvider)
+                ((ConfiguredTarget) info.getValue("java_toolchain_label"))
+                    .get(ToolchainInfo.PROVIDER))
+            .getToolchainLabel();
+    assertThat(
+            javaToolchainLabel.toString().endsWith("jdk:remote_toolchain")
+                || javaToolchainLabel.toString().endsWith("jdk:toolchain"))
+        .named(javaToolchainLabel.toString())
+        .isTrue();
   }
 
   @Test
@@ -1788,25 +1981,34 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "foo/rule.bzl",
         "result = provider()",
         "def _impl(ctx):",
-        "  return [result(java_toolchain_label=ctx.attr._java_toolchain.label)]",
+        "  return [result(java_toolchain_label=ctx.attr._java_toolchain)]",
         "myrule = rule(",
         "  implementation=_impl,",
         "  fragments = ['java'],",
         "  attrs = { '_java_toolchain': attr.label(default=Label('//foo:alias')) }",
-        ")"
-    );
+        ")");
     scratch.file(
         "foo/BUILD",
         "load(':rule.bzl', 'myrule')",
+        "load('"
+            + TestConstants.TOOLS_REPOSITORY
+            + "//tools/jdk:java_toolchain_alias.bzl', 'java_toolchain_alias')",
         "java_toolchain_alias(name='alias')",
-        "myrule(name='myrule')"
-    );
-    useConfiguration("--java_toolchain=//java/com/google/test:toolchain");
+        "myrule(name='myrule')");
+    useConfiguration(
+        "--java_toolchain=//java/com/google/test:toolchain",
+        "--extra_toolchains=//java/com/google/test:all",
+        "--platforms=//java/com/google/test:platform");
     ConfiguredTarget configuredTarget = getConfiguredTarget("//foo:myrule");
-    Info info =
-        configuredTarget.get(
-            new SkylarkKey(Label.parseAbsolute("//foo:rule.bzl", ImmutableMap.of()), "result"));
-    Label javaToolchainLabel = ((Label) info.getValue("java_toolchain_label"));
+    StructImpl info =
+        (StructImpl)
+            configuredTarget.get(
+                new SkylarkKey(Label.parseAbsolute("//foo:rule.bzl", ImmutableMap.of()), "result"));
+    Label javaToolchainLabel =
+        ((JavaToolchainProvider)
+                ((ConfiguredTarget) info.getValue("java_toolchain_label"))
+                    .get(ToolchainInfo.PROVIDER))
+            .getToolchainLabel();
     assertThat(javaToolchainLabel.toString()).isEqualTo("//java/com/google/test:toolchain");
   }
 
@@ -1829,12 +2031,43 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
     checkError(
         "java/test",
         "custom",
-        "create_provider is deprecated and cannot be used when "
-            + "--incompatible_disallow_legacy_javainfo is set. ",
+        "java_common.create_provider is deprecated and cannot be used when "
+            + "--incompatible_disallow_legacy_javainfo is set.",
         "load(':custom_rule.bzl', 'java_custom_library')",
         "java_custom_library(",
         "  name = 'custom',",
         ")");
+  }
+
+  @Test
+  public void testIncompatibleDisallowLegacyJavaInfoWithFlag() throws Exception {
+    setSkylarkSemanticsOptions("--incompatible_disallow_legacy_javainfo");
+    setSkylarkSemanticsOptions(
+        "--experimental_java_common_create_provider_enabled_packages=java/test");
+    scratch.file(
+        "java/test/custom_rule.bzl",
+        "def _impl(ctx):",
+        "  jar = ctx.file.jar",
+        "  java_common.create_provider(",
+        "      compile_time_jars = [jar],",
+        "      transitive_compile_time_jars = [jar],",
+        "      runtime_jars = [jar],",
+        "      use_ijar = False,",
+        "  )",
+        "java_custom_library = rule(",
+        "  implementation = _impl,",
+        "  attrs = {",
+        "    'jar': attr.label(allow_files = True, single_file = True),",
+        "  }",
+        ")");
+    scratch.file(
+        "java/test/BUILD",
+        "load(':custom_rule.bzl', 'java_custom_library')",
+        "java_custom_library(",
+        "  name = 'custom',",
+        "  jar = 'lib.jar'",
+        ")");
+    assertThat(getConfiguredTarget("//java/test:custom")).isNotNull();
   }
 
   private static boolean javaCompilationArgsHaveTheSameParent(
@@ -1858,8 +2091,8 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
     Iterator<Artifact> iterator = artifacts.iterator();
     Iterator<Artifact> otherIterator = otherArtifacts.iterator();
     while (iterator.hasNext() && otherIterator.hasNext()) {
-      Artifact artifact = (Artifact) iterator.next();
-      Artifact otherArtifact = (Artifact) otherIterator.next();
+      Artifact artifact = iterator.next();
+      Artifact otherArtifact = otherIterator.next();
       if (!artifact
           .getPath()
           .getParentDirectory()
@@ -1898,8 +2131,8 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "    source_files = ctx.files.srcs,",
         "    output = output_jar,",
         "    exports = exports,",
-        "    java_toolchain = ctx.attr._java_toolchain,",
-        "    host_javabase = ctx.attr._host_javabase",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo]",
         "  )",
         "  return struct(",
         "    files = depset([output_jar]),",
@@ -1941,8 +2174,8 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "    ctx,",
         "    source_files = ctx.files.srcs,",
         "    output = output_jar,",
-        "    java_toolchain = ctx.attr._java_toolchain,",
-        "    host_javabase = ctx.attr._host_javabase",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo]",
         "  )",
         "  return struct(",
         "    providers = [compilation_provider]",
@@ -1983,8 +2216,8 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "    source_files = ctx.files.srcs,",
         "    output = output_jar,",
         "    deps = deps,",
-        "    java_toolchain = ctx.attr._java_toolchain,",
-        "    host_javabase = ctx.attr._host_javabase",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo]",
         "  )",
         "  return struct(",
         "    providers = [compilation_provider]",
@@ -2029,8 +2262,8 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
         "    source_files = ctx.files.srcs,",
         "    output = output_jar,",
         "    exports = exports,",
-        "    java_toolchain = ctx.attr._java_toolchain,",
-        "    host_javabase = ctx.attr._host_javabase",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo]",
         "  )",
         "  return struct(",
         "    providers = [compilation_provider]",
@@ -2063,5 +2296,243 @@ public class JavaSkylarkApiTest extends BuildViewTestCase {
     OutputJar output = outputs.getOutputJars().get(0);
     assertThat(output.getClassJar().getFilename()).isEqualTo("libc.jar");
     assertThat(output.getIJar()).isNull();
+  }
+
+  @Test
+  public void testDisallowLegacyJavaProvider() throws Exception {
+    setSkylarkSemanticsOptions("--incompatible_disallow_legacy_java_provider");
+    scratch.file(
+        "foo/custom_rule.bzl",
+        "def _impl(ctx):",
+        "  ctx.attr.java_lib.java.source_jars",
+        "java_custom_library = rule(",
+        "  implementation = _impl,",
+        "  attrs = {",
+        "    'java_lib': attr.label(),",
+        "   },",
+        ")");
+
+    scratch.file(
+        "foo/BUILD",
+        "load(':custom_rule.bzl', 'java_custom_library')",
+        "java_library(name = 'java_lib', srcs = ['java/A.java'])",
+        "java_custom_library(name = 'custom_lib', java_lib = ':java_lib')");
+    checkError(
+        "//foo:custom_lib",
+        "The .java provider is deprecated and cannot be used "
+            + "when --incompatible_disallow_legacy_java_provider is set.");
+  }
+
+  @Test
+  public void testConfiguredTargetHostJavabase() throws Exception {
+    writeBuildFileForJavaToolchain();
+
+    scratch.file(
+        "a/BUILD",
+        "load(':rule.bzl', 'jrule')",
+        "java_runtime(name='jvm', srcs=[], java_home='/foo/bar')",
+        "jrule(name='r', srcs=['S.java'])");
+
+    scratch.file(
+        "a/rule.bzl",
+        "def _impl(ctx):",
+        "  output_jar = ctx.actions.declare_file('lib' + ctx.label.name + '.jar')",
+        "  java_common.compile(",
+        "    ctx,",
+        "    source_files = ctx.files.srcs,",
+        "    output = output_jar,",
+        "    java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo],",
+        "    host_javabase = ctx.attr._host_javabase",
+        "  )",
+        "  return struct()",
+        "jrule = rule(",
+        "  implementation = _impl,",
+        "  outputs = {",
+        "    'my_output': 'lib%{name}.jar'",
+        "  },",
+        "  attrs = {",
+        "    'srcs': attr.label_list(allow_files=['.java']),",
+        "    '_java_toolchain': attr.label(default = Label('//java/com/google/test:toolchain')),",
+        "    '_host_javabase': attr.label(default = Label('//a:jvm'))",
+        "  },",
+        "  fragments = ['java'])");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//a:r");
+    assertContainsEvent("expected value of type 'JavaRuntimeInfo' for parameter 'host_javabase'");
+  }
+
+  @Test
+  public void testConfiguredTargetToolchain() throws Exception {
+    writeBuildFileForJavaToolchain();
+
+    scratch.file(
+        "a/BUILD",
+        "load(':rule.bzl', 'jrule')",
+        "java_runtime(name='jvm', srcs=[], java_home='/foo/bar')",
+        "jrule(name='r', srcs=['S.java'])");
+
+    scratch.file(
+        "a/rule.bzl",
+        "def _impl(ctx):",
+        "  output_jar = ctx.actions.declare_file('lib' + ctx.label.name + '.jar')",
+        "  java_common.compile(",
+        "    ctx,",
+        "    source_files = ctx.files.srcs,",
+        "    output = output_jar,",
+        "    java_toolchain = ctx.attr._java_toolchain,",
+        "    host_javabase = ctx.attr._host_javabase[java_common.JavaRuntimeInfo]",
+        "  )",
+        "  return struct()",
+        "jrule = rule(",
+        "  implementation = _impl,",
+        "  outputs = {",
+        "    'my_output': 'lib%{name}.jar'",
+        "  },",
+        "  attrs = {",
+        "    'srcs': attr.label_list(allow_files=['.java']),",
+        "    '_java_toolchain': attr.label(default = Label('//java/com/google/test:toolchain')),",
+        "    '_host_javabase': attr.label(default = Label('//a:jvm'))",
+        "  },",
+        "  fragments = ['java'])");
+
+    reporter.removeHandler(failFastHandler);
+    getConfiguredTarget("//a:r");
+    assertContainsEvent(
+        "expected value of type 'JavaToolchainSkylarkApiProvider' for parameter 'java_toolchain'");
+  }
+
+  @Test
+  public void defaultJavacOpts() throws Exception {
+    writeBuildFileForJavaToolchain();
+    scratch.file(
+        "a/rule.bzl",
+        "def _impl(ctx):",
+        "  return struct(",
+        "    javac_opts = java_common.default_javac_opts(",
+        "        java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo])",
+        "    )",
+        "get_javac_opts = rule(",
+        "  _impl,",
+        "  attrs = {",
+        "    '_java_toolchain': attr.label(default = Label('//java/com/google/test:toolchain')),",
+        "  }",
+        ");");
+
+    scratch.file("a/BUILD", "load(':rule.bzl', 'get_javac_opts')", "get_javac_opts(name='r')");
+
+    ConfiguredTarget r = getConfiguredTarget("//a:r");
+    @SuppressWarnings("unchecked") // Use an extra variable in order to suppress the warning.
+    SkylarkList<String> javacopts = (SkylarkList<String>) r.get("javac_opts");
+    assertThat(String.join(" ", javacopts)).contains("-source 6 -target 6");
+  }
+
+  @Test
+  public void defaultJavacOpts_toolchainProvider() throws Exception {
+    writeBuildFileForJavaToolchain();
+    scratch.file(
+        "a/rule.bzl",
+        "def _impl(ctx):",
+        "  return struct(",
+        "    javac_opts = java_common.default_javac_opts(",
+        "        java_toolchain = ctx.attr._java_toolchain[java_common.JavaToolchainInfo])",
+        "    )",
+        "get_javac_opts = rule(",
+        "  _impl,",
+        "  attrs = {",
+        "    '_java_toolchain': attr.label(default = Label('//java/com/google/test:toolchain')),",
+        "  }",
+        ");");
+
+    scratch.file("a/BUILD", "load(':rule.bzl', 'get_javac_opts')", "get_javac_opts(name='r')");
+
+    ConfiguredTarget r = getConfiguredTarget("//a:r");
+    @SuppressWarnings("unchecked") // Use an extra variable in order to suppress the warning.
+    SkylarkList<String> javacopts = (SkylarkList<String>) r.get("javac_opts");
+    assertThat(String.join(" ", javacopts)).contains("-source 6 -target 6");
+  }
+
+  private boolean toolchainResolutionEnabled() throws Exception {
+    scratch.file(
+        "a/rule.bzl",
+        "def _impl(ctx):",
+        "  toolchain_resolution_enabled ="
+            + " java_common.is_java_toolchain_resolution_enabled_do_not_use(",
+        "      ctx = ctx)",
+        "  return struct(",
+        "    toolchain_resolution_enabled = toolchain_resolution_enabled)",
+        "toolchain_resolution_enabled = rule(",
+        "  _impl,",
+        ");");
+
+    scratch.file(
+        "a/BUILD",
+        "load(':rule.bzl', 'toolchain_resolution_enabled')",
+        "toolchain_resolution_enabled(name='r')");
+
+    ConfiguredTarget r = getConfiguredTarget("//a:r");
+    @SuppressWarnings("unchecked") // Use an extra variable in order to suppress the warning.
+    boolean toolchainResolutionEnabled = (boolean) r.get("toolchain_resolution_enabled");
+    return toolchainResolutionEnabled;
+  }
+
+  @Test
+  public void testIsToolchainResolutionEnabled_disabled() throws Exception {
+    useConfiguration("--incompatible_use_toolchain_resolution_for_java_rules=false");
+
+    assertThat(toolchainResolutionEnabled()).isFalse();
+  }
+
+  @Test
+  public void testIsToolchainResolutionEnabled_enabled() throws Exception {
+    useConfiguration("--incompatible_use_toolchain_resolution_for_java_rules");
+
+    assertThat(toolchainResolutionEnabled()).isTrue();
+  }
+
+  @Test
+  public void testJavaRuntimeProviderFiles() throws Exception {
+    scratch.file("a/a.txt", "hello");
+    scratch.file(
+        "a/BUILD",
+        "load(':rule.bzl', 'jrule')",
+        "load('"
+            + TestConstants.TOOLS_REPOSITORY
+            + "//tools/jdk:java_toolchain_alias.bzl', 'java_runtime_alias')",
+        "java_runtime(name='jvm', srcs=['a.txt'], java_home='foo/bar')",
+        "java_runtime_alias(name='alias')",
+        "jrule(name='r')",
+        "constraint_value(",
+        "    name = 'constraint',",
+        "    constraint_setting = '" + TestConstants.PLATFORM_BASE + "/java/constraints:runtime',",
+        ")",
+        "toolchain(",
+        "    name = 'java_runtime_toolchain',",
+        "    toolchain = ':jvm',",
+        "    toolchain_type = '"
+            + TestConstants.TOOLS_REPOSITORY
+            + "//tools/jdk:runtime_toolchain_type',",
+        "    target_compatible_with = [':constraint'],",
+        ")",
+        "platform(",
+        "    name = 'platform',",
+        "    constraint_values = [':constraint'],",
+        ")");
+
+    scratch.file(
+        "a/rule.bzl",
+        "def _impl(ctx):",
+        "  provider = ctx.attr._java_runtime[java_common.JavaRuntimeInfo]",
+        "  return struct(",
+        "    files = provider.files,",
+        "  )",
+        "jrule = rule(_impl, attrs = { '_java_runtime': attr.label(default=Label('//a:alias'))})");
+
+    useConfiguration(
+        "--javabase=//a:jvm", "--extra_toolchains=//a:all", "--platforms=//a:platform");
+    ConfiguredTarget ct = getConfiguredTarget("//a:r");
+    @SuppressWarnings("unchecked")
+    SkylarkNestedSet files = (SkylarkNestedSet) ct.get("files");
+    assertThat(prettyArtifactNames(files.toCollection(Artifact.class))).containsExactly("a/a.txt");
   }
 }

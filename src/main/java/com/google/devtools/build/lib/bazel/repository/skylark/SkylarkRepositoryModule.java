@@ -25,9 +25,11 @@ import com.google.devtools.build.lib.analysis.skylark.SkylarkAttr.Descriptor;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.packages.AttributeValueSource;
+import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.packages.Package.NameConflictException;
 import com.google.devtools.build.lib.packages.PackageFactory;
 import com.google.devtools.build.lib.packages.PackageFactory.PackageContext;
+import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
 import com.google.devtools.build.lib.packages.RuleFactory.InvalidRuleException;
@@ -36,11 +38,16 @@ import com.google.devtools.build.lib.packages.WorkspaceFactoryHelper;
 import com.google.devtools.build.lib.skylarkbuildapi.repository.RepositoryModuleApi;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkPrinter;
 import com.google.devtools.build.lib.syntax.BaseFunction;
+import com.google.devtools.build.lib.syntax.DebugFrame;
+import com.google.devtools.build.lib.syntax.DotExpression;
 import com.google.devtools.build.lib.syntax.EvalException;
+import com.google.devtools.build.lib.syntax.Expression;
 import com.google.devtools.build.lib.syntax.FuncallExpression;
 import com.google.devtools.build.lib.syntax.FunctionSignature;
+import com.google.devtools.build.lib.syntax.Identifier;
 import com.google.devtools.build.lib.syntax.Runtime;
 import com.google.devtools.build.lib.syntax.SkylarkList;
+import com.google.devtools.build.lib.syntax.SkylarkUtils;
 import java.util.Map;
 
 /**
@@ -55,10 +62,11 @@ public class SkylarkRepositoryModule implements RepositoryModuleApi {
       Object attrs,
       Boolean local,
       SkylarkList<String> environ,
+      String doc,
       FuncallExpression ast,
       com.google.devtools.build.lib.syntax.Environment funcallEnv)
       throws EvalException {
-    funcallEnv.checkLoadingOrWorkspacePhase("repository_rule", ast.getLocation());
+    SkylarkUtils.checkLoadingOrWorkspacePhase(funcallEnv, "repository_rule", ast.getLocation());
     // We'll set the name later, pass the empty string for now.
     RuleClass.Builder builder = new RuleClass.Builder("", RuleClassType.WORKSPACE, true);
 
@@ -79,8 +87,7 @@ public class SkylarkRepositoryModule implements RepositoryModuleApi {
     }
     builder.setConfiguredTargetFunction(implementation);
     builder.setRuleDefinitionEnvironmentLabelAndHashCode(
-        funcallEnv.getGlobals().getTransitiveLabel(),
-        funcallEnv.getTransitiveContentHashCode());
+        funcallEnv.getGlobals().getLabel(), funcallEnv.getTransitiveContentHashCode());
     builder.setWorkspaceOnly();
     return new RepositoryRuleFunction(builder);
   }
@@ -110,9 +117,9 @@ public class SkylarkRepositoryModule implements RepositoryModuleApi {
     @Override
     public void repr(SkylarkPrinter printer) {
       if (exportedName == null) {
-        printer.append("<anonymous skylark repository rule>");
+        printer.append("<anonymous starlark repository rule>");
       } else {
-        printer.append("<skylark repository rule " + extensionLabel + "%" + exportedName + ">");
+        printer.append("<starlark repository rule " + extensionLabel + "%" + exportedName + ">");
       }
     }
 
@@ -121,21 +128,55 @@ public class SkylarkRepositoryModule implements RepositoryModuleApi {
         Object[] args, FuncallExpression ast, com.google.devtools.build.lib.syntax.Environment env)
         throws EvalException, InterruptedException {
       String ruleClassName = null;
-      // If the function ever got exported, we take the name it was exported to.
+      Expression function = ast.getFunction();
+      // If the function ever got exported (the common case), we take the name
+      // it was exprted to. Only in the not intended case of calling an unexported
+      // repository function through an exported macro, we fall back, for lack of
+      // alternatives, to the name in the local context.
+      // TODO(b/111199163): we probably should disallow the use of non-exported
+      // repository rules anyway.
       if (isExported()) {
         ruleClassName = exportedName;
+      } else if (function instanceof Identifier) {
+        ruleClassName = ((Identifier) function).getName();
+      } else if (function instanceof DotExpression) {
+        ruleClassName = ((DotExpression) function).getField().getName();
       } else {
-        throw new EvalException(ast.getLocation(),
-            "Use of unexported repository rule; this repository rule class has not been exported"
-            + "by a Skylark file");
+        // TODO: Remove the wrong assumption that a  "function name" always exists and is relevant
+        throw new IllegalStateException("Function is not an identifier or method call");
       }
       try {
         RuleClass ruleClass = builder.build(ruleClassName, ruleClassName);
         PackageContext context = PackageFactory.getContext(env, ast.getLocation());
+        Package.Builder packageBuilder = context.getBuilder();
+
         @SuppressWarnings("unchecked")
         Map<String, Object> attributeValues = (Map<String, Object>) args[0];
-        return WorkspaceFactoryHelper.createAndAddRepositoryRule(
-            context.getBuilder(), ruleClass, null, attributeValues, ast);
+        String externalRepoName = (String) attributeValues.get("name");
+
+        StringBuilder callStack =
+            new StringBuilder("Call stack for the definition of repository '")
+                .append(externalRepoName)
+                .append("':");
+        for (DebugFrame frame : env.listFrames(ast.getLocation())) {
+          callStack.append("\n - ").append(frame.location().toString());
+        }
+
+        WorkspaceFactoryHelper.addMainRepoEntry(
+            packageBuilder, externalRepoName, env.getSemantics());
+
+        WorkspaceFactoryHelper.addRepoMappings(
+            packageBuilder, attributeValues, externalRepoName, ast.getLocation());
+
+        Rule rule =
+            WorkspaceFactoryHelper.createAndAddRepositoryRule(
+                context.getBuilder(),
+                ruleClass,
+                null,
+                WorkspaceFactoryHelper.getFinalKwargs(attributeValues),
+                ast,
+                callStack.toString());
+        return rule;
       } catch (InvalidRuleException | NameConflictException | LabelSyntaxException e) {
         throw new EvalException(ast.getLocation(), e.getMessage());
       }

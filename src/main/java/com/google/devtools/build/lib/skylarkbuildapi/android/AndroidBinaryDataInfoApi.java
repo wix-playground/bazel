@@ -13,7 +13,9 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skylarkbuildapi.android;
 
+import com.google.devtools.build.lib.skylarkbuildapi.FileApi;
 import com.google.devtools.build.lib.skylarkbuildapi.StructApi;
+import com.google.devtools.build.lib.skylarkinterface.SkylarkCallable;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkModule;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkModuleCategory;
 
@@ -23,6 +25,28 @@ import com.google.devtools.build.lib.skylarkinterface.SkylarkModuleCategory;
 @SkylarkModule(
     name = "AndroidBinaryData",
     doc =
-        "Information about Android resource, asset, and manifest information specific to binaries",
+        "Do not use this module. It is intended for migration purposes only. If you depend on it, "
+            + "you will be broken when it is removed."
+            + "Information about Android resource, asset, and manifest information specific to "
+            + "binaries",
+    documented = false,
     category = SkylarkModuleCategory.PROVIDER)
-public interface AndroidBinaryDataInfoApi extends StructApi {}
+public interface AndroidBinaryDataInfoApi<FileT extends FileApi> extends StructApi {
+
+  /** The name of the provider for this info object. */
+  String NAME = "AndroidBinaryData";
+
+  @SkylarkCallable(
+      name = "resource_apk",
+      structField = true,
+      doc = "The resource apk.",
+      documented = false)
+  FileT getApk();
+
+  @SkylarkCallable(
+      name = "resource_proguard_config",
+      structField = true,
+      doc = "Proguard config generated for the resources.",
+      documented = false)
+  FileT getResourceProguardConfig();
+}

@@ -15,6 +15,7 @@ package com.google.devtools.build.lib.analysis.util;
 
 import static org.junit.Assert.fail;
 
+import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSortedSet;
@@ -33,7 +34,7 @@ import com.google.devtools.build.lib.analysis.config.InvalidConfigurationExcepti
 import com.google.devtools.build.lib.clock.BlazeClock;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.packages.PackageFactory;
-import com.google.devtools.build.lib.packages.SkylarkSemanticsOptions;
+import com.google.devtools.build.lib.packages.StarlarkSemanticsOptions;
 import com.google.devtools.build.lib.packages.util.MockToolsConfig;
 import com.google.devtools.build.lib.pkgcache.PackageCacheOptions;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
@@ -49,8 +50,8 @@ import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
+import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.common.options.Converters;
-import com.google.devtools.common.options.InvocationPolicyEnforcer;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
@@ -96,6 +97,7 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
   public final void initializeSkyframeExecutor() throws Exception {
     workspace = rootDirectory;
     analysisMock = getAnalysisMock();
+
     ConfiguredRuleClassProvider ruleClassProvider = analysisMock.createRuleClassProvider();
     PathPackageLocator pkgLocator =
         new PathPackageLocator(
@@ -109,12 +111,27 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
             rootDirectory,
             /* defaultSystemJavabase= */ null,
             analysisMock.getProductName());
+
+    mockToolsConfig = new MockToolsConfig(rootDirectory);
+    mockToolsConfig.create("/bazel_tools_workspace/WORKSPACE", "workspace(name = 'bazel_tools')");
+    mockToolsConfig.create("/bazel_tools_workspace/tools/build_defs/repo/BUILD");
+    mockToolsConfig.create(
+        "/bazel_tools_workspace/tools/build_defs/repo/http.bzl",
+        "def http_archive(**kwargs):",
+        "  pass",
+        "",
+        "def http_file(**kwargs):",
+        "  pass");
+
+    analysisMock.setupMockClient(mockToolsConfig);
+    analysisMock.setupMockWorkspaceFiles(directories.getEmbeddedBinariesRoot());
+
     pkgFactory =
         analysisMock
             .getPackageFactoryBuilderForTesting(directories)
-            .build(ruleClassProvider);
+            .build(ruleClassProvider, fileSystem);
     AnalysisTestUtil.DummyWorkspaceStatusActionFactory workspaceStatusActionFactory =
-        new AnalysisTestUtil.DummyWorkspaceStatusActionFactory(directories);
+        new AnalysisTestUtil.DummyWorkspaceStatusActionFactory();
     skyframeExecutor =
         SequencedSkyframeExecutor.create(
             pkgFactory,
@@ -136,6 +153,12 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
     skyframeExecutor.injectExtraPrecomputedValues(
         ImmutableList.of(
             PrecomputedValue.injected(
+                RepositoryDelegatorFunction.RESOLVED_FILE_INSTEAD_OF_WORKSPACE,
+                Optional.<RootedPath>absent()),
+            PrecomputedValue.injected(
+                RepositoryDelegatorFunction.RESOLVED_FILE_INSTEAD_OF_WORKSPACE,
+                Optional.<RootedPath>absent()),
+            PrecomputedValue.injected(
                 RepositoryDelegatorFunction.REPOSITORY_OVERRIDES,
                 ImmutableMap.<RepositoryName, PathFragment>of()),
             PrecomputedValue.injected(
@@ -147,9 +170,7 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
     skyframeExecutor.preparePackageLoading(
         pkgLocator,
         packageCacheOptions,
-        Options.getDefaults(SkylarkSemanticsOptions.class),
-        ruleClassProvider.getDefaultsPackageContent(
-            analysisMock.getInvocationPolicyEnforcer().getInvocationPolicy()),
+        Options.getDefaults(StarlarkSemanticsOptions.class),
         UUID.randomUUID(),
         ImmutableMap.<String, String>of(),
         new TimestampGranularityMonitor(BlazeClock.instance()));
@@ -182,16 +203,13 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
         .addAll(buildOptionClasses)
         .add(TestOptions.class)
         .build());
+    parser.parse(TestConstants.PRODUCT_SPECIFIC_FLAGS);
     parser.parse(args);
-
-    InvocationPolicyEnforcer optionsPolicyEnforcer = analysisMock.getInvocationPolicyEnforcer();
-    optionsPolicyEnforcer.enforce(parser);
 
     ImmutableSortedSet<String> multiCpu = ImmutableSortedSet.copyOf(
         parser.getOptions(TestOptions.class).multiCpus);
 
-    skyframeExecutor.handleDiffs(reporter);
-    skyframeExecutor.setConfigurationFragmentFactories(configurationFragmentFactories);
+    skyframeExecutor.handleDiffsForTesting(reporter);
     BuildConfigurationCollection collection = skyframeExecutor.createConfigurations(
         reporter, BuildOptions.of(buildOptionClasses, parser), multiCpu, false);
     return collection;

@@ -94,8 +94,11 @@ public final class Runtime {
     }
   }
 
-  @SkylarkSignature(name = "<unbound>", returnType = UnboundMarker.class, documented = false,
-      doc = "Marker for unbound values in cases where neither Skylark None nor Java null can do.")
+  @SkylarkSignature(
+      name = "<unbound>",
+      returnType = UnboundMarker.class,
+      documented = false,
+      doc = "Marker for unbound values in cases where neither Starlark None nor Java null can do.")
   public static final UnboundMarker UNBOUND = new UnboundMarker();
 
   @SkylarkSignature(name = "None", returnType = NoneType.class,
@@ -164,6 +167,11 @@ public final class Runtime {
   /**
    * A registry of builtins, including both global builtins and builtins that are under some
    * namespace.
+   *
+   * <p>The registry contains Starlark universal builtins (None, len, etc), core build-language
+   * functions (depset, select, glob, etc), members of the native module (FilesetEntry,
+   * local_repository, vardef, ...), but not the native rules (cc_library, etc) nor other built-ins
+   * (CcCompilationInfo, java_common.JavaRuntimeInfo, etc).
    *
    * <p>Concurrency model: This object is thread-safe. Read accesses are always allowed, while write
    * accesses are only allowed before this object has been frozen ({@link #freeze}). Prior to
@@ -321,7 +329,13 @@ public final class Runtime {
    */
   private static final BuiltinRegistry builtins = new BuiltinRegistry();
 
-  /** Retrieve the static instance containing information on all known Skylark builtins. */
+  /**
+   * Retrieve the static instance containing information on all known Skylark builtins.
+   *
+   * @deprecated do not use a static singleton registry -- instead set up the Skylark environment
+   *     with 'global' objects
+   */
+  @Deprecated
   public static BuiltinRegistry getBuiltinRegistry() {
     return builtins;
   }

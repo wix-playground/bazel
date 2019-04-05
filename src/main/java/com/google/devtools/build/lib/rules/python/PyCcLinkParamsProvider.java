@@ -13,13 +13,10 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.python;
 
-import com.google.common.base.Function;
-import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.packages.NativeInfo;
 import com.google.devtools.build.lib.packages.NativeProvider;
-import com.google.devtools.build.lib.rules.cpp.AbstractCcLinkParamsStore;
-import com.google.devtools.build.lib.rules.cpp.CcLinkingInfo;
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkCallable;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkModule;
@@ -38,21 +35,15 @@ public final class PyCcLinkParamsProvider extends NativeInfo {
       new NativeProvider<PyCcLinkParamsProvider>(
           PyCcLinkParamsProvider.class, "PyCcLinkParamsProvider") {};
 
-  private final CcLinkingInfo ccLinkingInfo;
+  private final CcInfo ccInfo;
 
-  public PyCcLinkParamsProvider(CcLinkingInfo ccLinkingInfo) {
+  public PyCcLinkParamsProvider(CcInfo ccInfo) {
     super(PROVIDER);
-    this.ccLinkingInfo = ccLinkingInfo;
+    this.ccInfo = CcInfo.builder().setCcLinkingContext(ccInfo.getCcLinkingContext()).build();
   }
 
-  @SkylarkCallable(name = "cc_linking_info", doc = "", documented = false)
-  public CcLinkingInfo getCcLinkingInfo() {
-    return ccLinkingInfo;
+  @SkylarkCallable(name = "cc_info", doc = "", structField = true, documented = false)
+  public CcInfo getCcInfo() {
+    return ccInfo;
   }
-
-  public static final Function<TransitiveInfoCollection, AbstractCcLinkParamsStore> TO_LINK_PARAMS =
-      input -> {
-        PyCcLinkParamsProvider provider = input.get(PyCcLinkParamsProvider.PROVIDER);
-        return provider == null ? null : provider.getCcLinkingInfo().getCcLinkParamsStore();
-      };
 }

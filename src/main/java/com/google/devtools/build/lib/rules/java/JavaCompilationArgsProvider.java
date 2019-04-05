@@ -14,8 +14,6 @@
 
 package com.google.devtools.build.lib.rules.java;
 
-import static com.google.common.collect.Iterables.getOnlyElement;
-
 import com.google.auto.value.AutoValue;
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.actions.Artifact;
@@ -29,6 +27,7 @@ import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.util.FileType;
 import java.util.Collection;
+import java.util.Iterator;
 
 /** A collection of recursively collected Java build information. */
 @AutoValue
@@ -101,14 +100,12 @@ public abstract class JavaCompilationArgsProvider implements TransitiveInfoProvi
   public abstract NestedSet<Artifact> getInstrumentationMetadata();
 
   /**
-   * Returns non-recursively collected Java dependency artifacts for
-   * computing a restricted classpath when building this target (called when
-   * strict_java_deps = 1).
+   * Returns non-recursively collected Java dependency artifacts for computing a restricted
+   * classpath when building this target (called when strict_java_deps = 1).
    *
-   * <p>Note that dependency artifacts are needed only when non-recursive
-   * compilation args do not provide a safe super-set of dependencies.
-   * Non-strict targets such as proto_library, always collecting their
-   * transitive closure of deps, do not need to provide dependency artifacts.
+   * <p>Note that dependency artifacts are needed only when non-recursive compilation args do not
+   * provide a safe super-set of dependencies. Non-strict targets such as proto_library, always
+   * collecting their transitive closure of deps, do not need to provide dependency artifacts.
    */
   public abstract NestedSet<Artifact> getCompileTimeJavaDependencyArtifacts();
 
@@ -199,15 +196,20 @@ public abstract class JavaCompilationArgsProvider implements TransitiveInfoProvi
    * <p>This is moralley equivalent to an exports-only {@code java_import} rule that forwards some
    * dependencies.
    */
-  public static JavaCompilationArgsProvider merge(
-      Collection<JavaCompilationArgsProvider> providers) {
-    if (providers.size() == 1) {
-      return getOnlyElement(providers);
+  public static JavaCompilationArgsProvider merge(Iterable<JavaCompilationArgsProvider> providers) {
+    Iterator<JavaCompilationArgsProvider> it = providers.iterator();
+    if (!it.hasNext()) {
+      return EMPTY;
+    }
+    JavaCompilationArgsProvider first = it.next();
+    if (!it.hasNext()) {
+      return first;
     }
     Builder javaCompilationArgs = builder();
-    for (JavaCompilationArgsProvider provider : providers) {
-      javaCompilationArgs.addExports(provider);
-    }
+    javaCompilationArgs.addExports(first);
+    do {
+      javaCompilationArgs.addExports(it.next());
+    } while (it.hasNext());
     return javaCompilationArgs.build();
   }
 

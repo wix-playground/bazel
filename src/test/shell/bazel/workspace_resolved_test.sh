@@ -54,9 +54,7 @@ EOF
   bazel clean --expunge
   bazel build --experimental_repository_resolved_file=../repo.bzl @ext//... \
       || fail "Expected success"
-  # some of the file systems on our test machines are really slow to
-  # notice the creation of a file---even after the call to sync(1).
-  bazel shutdown; sync; sleep 10
+  bazel shutdown
 
   # Verify that bazel can read the generated repo.bzl file and that it contains
   # the expected information
@@ -92,6 +90,8 @@ EOF
 
 test_git_return_value() {
   EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
   export GIT_CONFIG_NOSYSTEM=YES
 
   mkdir extgit
@@ -117,10 +117,10 @@ new_git_repository(
   build_file_content="exports_files([\"hello.txt\"])",
 )
 EOF
-  bazel sync --experimental_repository_resolved_file=../repo.bzl
-  # some of the file systems on our test machines are really slow to
-  # notice the creation of a file---even after the call to sync(1).
-  bazel shutdown; sync; sleep 10
+
+
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
+  bazel shutdown
 
   cd ..
   echo; cat repo.bzl; echo
@@ -168,6 +168,8 @@ EOF
 
 test_git_follow_branch() {
   EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
   export GIT_CONFIG_NOSYSTEM=YES
 
   mkdir extgit
@@ -199,7 +201,7 @@ genrule(
   cmd = "cp $< $@",
 )
 EOF
-  bazel sync --experimental_repository_resolved_file=../repo.bzl
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
   bazel build :out
   grep "CHANGED" `bazel info bazel-genfiles`/out.txt  \
        && fail "Unexpected content in out.txt" || :
@@ -215,11 +217,11 @@ EOF
 
   # First verify that `bazel sync` sees the new commit (we don't record it).
   cd branchcheckout
-  bazel sync
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir
   bazel build :out
   grep "CHANGED" `bazel info bazel-genfiles`/out.txt  \
        || fail "sync did not update the external repository"
-  bazel shutdown; sync; sleep 10
+  bazel shutdown
   cd ..
   echo
 
@@ -258,6 +260,8 @@ EOF
 
 test_sync_follows_git_branch() {
   EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
   export GIT_CONFIG_NOSYSTEM=YES
 
   rm -f gitdir
@@ -306,14 +310,49 @@ EOF
    git commit --author="A U Thor <author@example.com>" -m 'stable commit')
 
   # Verify that sync followed by build gets the correct version
-  (cd followbranch && bazel sync && bazel build :out \
+  (cd followbranch && bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir && bazel build :out \
        && cat `bazel info bazel-genfiles`/out.txt > "${TEST_log}")
   expect_log 'CHANGED'
   expect_not_log 'Hello Stable World'
 }
 
+test_http_return_value() {
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
+  mkdir -p a
+  touch a/WORKSPACE
+  touch a/BUILD
+  touch a/f.txt
+
+  zip a.zip a/*
+  expected_sha256="$(sha256sum "${EXTREPODIR}/a.zip" | head -c 64)"
+  rm -rf a
+
+  # http_archive rule doesn't specify the sha256 attribute
+  mkdir -p main
+  cat > main/WORKSPACE <<EOF
+workspace(name = "main")
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_archive(
+  name="a",
+  strip_prefix="a",
+  urls=["file://${EXTREPODIR}/a.zip"],
+)
+EOF
+  touch main/BUILD
+
+  cd main
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir \
+      --experimental_repository_resolved_file=../repo.bzl
+
+  grep ${expected_sha256} ../repo.bzl || fail "didn't return commit"
+}
 
 test_sync_calls_all() {
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
   mkdir sync_calls_all && cd sync_calls_all
   rm -rf fetchrepo
   mkdir fetchrepo
@@ -345,10 +384,8 @@ trivial_rule(name = "d", comment = other)
 EOF
 
   bazel clean --expunge
-  bazel sync --experimental_repository_resolved_file=../repo.bzl
-  # some of the file systems on our test machines are really slow to
-  # notice the creation of a file---even after the call to sync(1).
-  bazel shutdown; sync; sleep 10
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
+  bazel shutdown
 
   cd ..
   echo; cat repo.bzl; echo
@@ -370,6 +407,9 @@ EOF
 }
 
 test_sync_call_invalidates() {
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
   mkdir sync_call_invalidates && cd sync_call_invalidates
   rm -rf fetchrepo
   mkdir fetchrepo
@@ -400,10 +440,8 @@ EOF
 
   bazel build @a//... @b//...
   echo; echo sync run; echo
-  bazel sync --experimental_repository_resolved_file=../repo.bzl
-  # some of the file systems on our test machines are really slow to
-  # notice the creation of a file---even after the call to sync(1).
-  bazel shutdown; sync; sleep 10
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
+  bazel shutdown
 
   cd ..
   echo; cat repo.bzl; echo
@@ -425,6 +463,9 @@ EOF
 }
 
 test_sync_load_errors_reported() {
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
   rm -rf fetchrepo
   mkdir fetchrepo
   cd fetchrepo
@@ -433,11 +474,16 @@ load("//does/not:exist.bzl", "randomfunction")
 
 radomfunction(name="foo")
 EOF
-  bazel sync > "${TEST_log}" 2>&1 && fail "Expected failure" || :
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir > "${TEST_log}" 2>&1 && fail "Expected failure" || :
   expect_log '//does/not:exist.bzl'
 }
 
-test_sync_debug_and_errors_printed() {
+test_sync_reporting() {
+  # Verify that debug and error messages in starlark functions are reported.
+  # Also verify that the fact that the repository is fetched is reported as well.
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
   rm -rf fetchrepo
   mkdir fetchrepo
   cd fetchrepo
@@ -457,12 +503,16 @@ load("//:rule.bzl", "broken_rule")
 
 broken_rule(name = "broken")
 EOF
-  bazel sync > "${TEST_log}" 2>&1 && fail "expected failure" || :
+  bazel sync --curses=yes --experimental_ui_actions_shown=100 --distdir=${EXTREPODIR}/test_WORKSPACE/distdir > "${TEST_log}" 2>&1 && fail "expected failure" || :
+  expect_log 'Fetching @broken'
   expect_log "DEBUG-message"
   expect_log "Failure-message"
 }
 
 test_indirect_call() {
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
   rm -rf fetchrepo
   mkdir fetchrepo
   cd fetchrepo
@@ -486,8 +536,8 @@ load("//:indirect.bzl", "call")
 
 call(trivial_rule, name="foo")
 EOF
-  bazel sync --experimental_repository_resolved_file=../repo.bzl
-  bazel shutdown; sync; sleep 10
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
+  bazel shutdown
 
   cd ..
   echo; cat repo.bzl; echo
@@ -509,8 +559,156 @@ EOF
   expect_not_log 'fn_name'
 }
 
+test_resolved_file_reading() {
+  # Verify that the option to read a resolved file instead of the WORKSPACE
+  # file works as expected.
+  EXTREPODIR=`pwd`
+  export GIT_CONFIG_NOSYSTEM=YES
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
+  mkdir extgit
+  (cd extgit && git init \
+       && git config user.email 'me@example.com' \
+       && git config user.name 'E X Ample' )
+  echo Hello World > extgit/hello.txt
+  (cd extgit
+   git add .
+   git commit --author="A U Thor <author@example.com>" -m 'initial commit'
+   git tag mytag)
+
+  mkdir main
+  cd main
+  cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
+new_git_repository(
+  name="ext",
+  remote="file://${EXTREPODIR}/extgit/.git",
+  branch="master",
+  build_file_content="exports_files([\"hello.txt\"])",
+)
+EOF
+  cat > BUILD <<'EOF'
+genrule(
+  name = "out",
+  outs = ["out.txt"],
+  srcs = ["@ext//:hello.txt"],
+  cmd = "cp $< $@",
+)
+EOF
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=resolved.bzl
+  echo; cat resolved.bzl; echo
+
+  bazel clean --expunge
+  echo 'Do not use any more' > WORKSPACE
+  bazel build \
+        --experimental_resolved_file_instead_of_workspace=`pwd`/resolved.bzl \
+        :out || fail "Expected success with resolved file replacing WORKSPACE"
+  rm WORKSPACE && touch WORKSPACE # bazel info needs a valid WORKSPACE
+  grep 'Hello World' `bazel info bazel-genfiles`/out.txt \
+      || fail "Did not find the expected output"
+}
+
+test_label_resolved_value() {
+  # Verify that label arguments in a repository rule end up in the resolved
+  # file in a parsable form.
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+  mkdir ext
+  echo Hello World > ext/file.txt
+  zip ext.zip ext/*
+
+  mkdir main
+  cd main
+  cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_archive(
+  name="ext",
+  strip_prefix="ext",
+  urls=["file://${EXTREPODIR}/ext.zip"],
+  build_file="@//:exit.BUILD",
+)
+EOF
+  echo 'exports_files(["file.txt"])' > exit.BUILD
+  cat > BUILD <<'EOF'
+genrule(
+  name = "local",
+  outs = ["local.txt"],
+  srcs = ["@ext//:file.txt"],
+  cmd = "cp $< $@",
+)
+EOF
+
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=resolved.bzl
+  rm WORKSPACE; touch WORKSPACE
+  echo; cat resolved.bzl; echo
+
+  bazel build --experimental_resolved_file_instead_of_workspace=resolved.bzl \
+        //:local || fail "Expected success"
+  grep World `bazel info bazel-genfiles`/local.txt \
+      || fail "target not built correctly"
+}
+
+test_resolved_file_not_remembered() {
+  # Verify that the --experimental_resolved_file_instead_of_workspace option
+  # does not leak into a subsequent sync
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
+  export GIT_CONFIG_NOSYSTEM=YES
+
+  rm -f gitdir
+  mkdir gitdir
+  (cd gitdir && git init \
+       && git config user.email 'me@example.com' \
+       && git config user.name 'E X Ample' )
+  echo Hello Stable World > gitdir/hello.txt
+  (cd gitdir
+   git checkout -b stable
+   git add .
+   git commit --author="A U Thor <author@example.com>" -m 'stable commit')
+
+  # The project follows the stable branch of the git repository
+  mkdir followbranch
+  cat > followbranch/WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
+new_git_repository(
+  name="ext",
+  remote="file://${EXTREPODIR}/gitdir/.git",
+  branch="stable",
+  build_file_content="exports_files([\"hello.txt\"])",
+)
+EOF
+  cat > followbranch/BUILD <<'EOF'
+genrule(
+  name = "out",
+  outs = ["out.txt"],
+  srcs = ["@ext//:hello.txt"],
+  cmd = "cp $< $@",
+)
+EOF
+  (cd followbranch \
+    && bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=resolved.bzl)
+  # New upstream commits on the branch followed
+  echo CHANGED > gitdir/hello.txt
+  (cd gitdir
+   git checkout stable
+   git add .
+   git commit --author="A U Thor <author@example.com>" -m 'stable commit')
+
+  cd followbranch
+  bazel build --experimental_resolved_file_instead_of_workspace=resolved.bzl :out
+  cat `bazel info bazel-genfiles`/out.txt > "${TEST_log}"
+  expect_log 'Hello Stable World'
+  expect_not_log 'CHANGED'
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=resolved.bzl
+  bazel build --experimental_resolved_file_instead_of_workspace=resolved.bzl :out
+  cat `bazel info bazel-genfiles`/out.txt > "${TEST_log}"
+  expect_log 'CHANGED'
+  expect_not_log 'Hello Stable World'
+}
+
 create_sample_repository() {
-  # Create, in the current direcotry, a repository that creates an external
+  # Create, in the current directory, a repository that creates an external
   # repository `foo` containing
   # - file with fixed data, generated by ctx.file,
   # - a BUILD file linked from the main repository
@@ -542,13 +740,15 @@ test_hash_included_and_reproducible() {
   # the hash is invariant under
   # - change of the working directory, and
   # - and current time.
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
 
   rm -rf fetchrepoA
   mkdir fetchrepoA
   cd fetchrepoA
   create_sample_repository
-  bazel sync --experimental_repository_resolved_file=../repo.bzl
-  bazel shutdown; sync; sleep 10
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
+  bazel shutdown
 
   cd ..
   echo; cat repo.bzl; echo
@@ -577,8 +777,8 @@ EOF
   mkdir fetchrepoB
   cd fetchrepoB
   create_sample_repository
-  bazel sync --experimental_repository_resolved_file=../repo.bzl
-  bazel shutdown; sync; sleep 10
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=../repo.bzl
+  bazel shutdown
 
   cd ..
   echo; cat repo.bzl; echo
@@ -589,6 +789,8 @@ EOF
 }
 
 test_non_reproducibility_detected() {
+    EXTREPODIR=`pwd`
+    tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
     # Verify that a non-reproducible rule is detected by hash verification
     mkdir repo
     cd repo
@@ -608,12 +810,263 @@ load("//:rule.bzl", "time_rule")
 time_rule(name="timestamprepo")
 EOF
 
-    bazel sync --experimental_repository_resolved_file=resolved.bzl
-    sync; sleep 10
-    bazel sync --experimental_repository_hash_file=`pwd`/resolved.bzl \
+    bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_resolved_file=resolved.bzl
+    bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir --experimental_repository_hash_file=`pwd`/resolved.bzl \
           --experimental_verify_repository_rules='//:rule.bzl%time_rule' \
           > "${TEST_log}" 2>&1 && fail "expected failure" || :
     expect_log "timestamprepo.*hash"
+}
+
+test_chain_resolved() {
+  # Verify that a cahin of dependencies in external repositories is reflected
+  # in the resolved file in such a way, that the resolved file can be used.
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
+  mkdir rulerepo
+  cat > rulerepo/rule.bzl <<'EOF'
+def _rule_impl(ctx):
+  ctx.file("data.txt", "Hello World")
+  ctx.file("BUILD", "exports_files(['data.txt'])")
+
+trivial_rule = repository_rule(
+  implementation = _rule_impl,
+  attrs = {},
+)
+EOF
+  touch rulerepo/BUILD
+  zip rule.zip rulerepo/*
+  rm -rf rulerepo
+
+  cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_archive(
+  name="rulerepo",
+  strip_prefix="rulerepo",
+  urls=["file://${EXTREPODIR}/rule.zip"],
+)
+load("@rulerepo//:rule.bzl", "trivial_rule")
+trivial_rule(name="a")
+EOF
+  cat > BUILD <<'EOF'
+genrule(
+  name = "local",
+  srcs =  ["@a//:data.txt"],
+  outs = ["local.txt"],
+  cmd = "cp $< $@",
+)
+EOF
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir \
+        --experimental_repository_resolved_file=resolved.bzl
+  bazel clean --expunge
+  echo; cat resolved.bzl; echo
+
+  bazel build --experimental_resolved_file_instead_of_workspace=resolved.bzl \
+        //:local || fail "Expected success"
+}
+
+test_usage_order_respected() {
+   # Verify that if one rules uses a file from another (without any load
+   # statement between), then still the resolved file is such that it can
+   # be used as a workspace replacement.
+   EXTREPODIR=`pwd`
+   tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
+   mkdir datarepo
+   echo 'Pure data' > datarepo/data.txt
+   zip datarepo.zip datarepo/*
+   rm -rf datarepo
+
+   mkdir metadatarepo
+   echo 'exports_files(["data.txt"])' > metadatarepo/datarepo.BUILD
+   touch metadatarepo/BUILD
+   zip metadatarepo.zip metadatarepo/*
+   rm -rf metadatarepo
+
+   mkdir main
+   cd main
+   cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_archive(
+  name="datarepo",
+  strip_prefix="datarepo",
+  urls=["file://${EXTREPODIR}/datarepo.zip"],
+  build_file="@metadatarepo//:datarepo.BUILD",
+)
+http_archive(
+  name="metadatarepo",
+  strip_prefix="metadatarepo",
+  urls=["file://${EXTREPODIR}/metadatarepo.zip"],
+)
+EOF
+  cat > BUILD <<'EOF'
+genrule(
+  name = "local",
+  srcs =  ["@datarepo//:data.txt"],
+  outs = ["local.txt"],
+  cmd = "cp $< $@",
+)
+EOF
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir \
+     --experimental_repository_resolved_file=resolved.bzl
+  bazel clean --expunge
+  echo; cat resolved.bzl; echo
+
+
+  bazel build --experimental_resolved_file_instead_of_workspace=resolved.bzl \
+        //:local || fail "Expected success"
+}
+
+test_order_reproducible() {
+  # Verify that the order of repositories in the resolved file is reproducible
+  # and does not depend on the parameters or timing of the actual rules.
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
+  mkdir main
+  cd main
+
+  cat > rule.bzl <<'EOF'
+def _impl(ctx):
+  ctx.execute(["/bin/sh", "-c", "sleep %s" % (ctx.attr.sleep,)])
+  ctx.file("data", "some test data")
+  ctx.file("BUILD", "exports_files(['data'])")
+
+sleep_rule = repository_rule(
+  implementation = _impl,
+  attrs = {"sleep": attr.int()},
+)
+EOF
+  cat > BUILD <<'EOF'
+load("//:repo.bzl", "resolved")
+
+genrule(
+  name = "order",
+  outs = ["order.txt"],
+  cmd = ("echo '%s' > $@" %
+    ([entry["original_attributes"]["name"] for entry in resolved],)),
+)
+EOF
+  cat > WORKSPACE <<'EOF'
+load("//:rule.bzl", "sleep_rule")
+
+sleep_rule(name="a", sleep=1)
+sleep_rule(name="c", sleep=3)
+sleep_rule(name="b", sleep=5)
+EOF
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir \
+        --experimental_repository_resolved_file=repo.bzl
+  bazel build //:order
+  cp `bazel info bazel-genfiles`/order.txt order-first.txt
+  bazel clean --expunge
+
+  cat > WORKSPACE <<'EOF'
+load("//:rule.bzl", "sleep_rule")
+
+sleep_rule(name="a", sleep=5)
+sleep_rule(name="c", sleep=3)
+sleep_rule(name="b", sleep=1)
+EOF
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir \
+        --experimental_repository_resolved_file=repo.bzl
+  bazel build //:order
+  cp `bazel info bazel-genfiles`/order.txt order-second.txt
+
+  echo; cat order-first.txt; echo; cat order-second.txt; echo
+
+  diff order-first.txt order-second.txt \
+      || fail "expected order to be reproducible"
+}
+
+test_non_starlarkrepo() {
+  # Verify that entries in the WORKSPACE that are not starlark repositoires
+  # are correctly reported in the resolved file.
+  EXTREPODIR=`pwd`
+  tar xvf ${TEST_SRCDIR}/test_WORKSPACE_files/archives.tar
+
+  mkdir local
+  touch local/WORKSPACE
+  echo Hello World > local/data.txt
+  echo 'exports_files(["data.txt"])' > local/BUILD
+
+  mkdir newlocal
+  echo Pure data > newlocal/data.txt
+
+  mkdir main
+  cd main
+  mkdir target_to_be_bound
+  echo More data > target_to_be_bound/data.txt
+  echo 'exports_files(["data.txt"])' > target_to_be_bound/BUILD
+  cat > WORKSPACE <<'EOF'
+local_repository(name="thisislocal", path="../local")
+new_local_repository(name="newlocal", path="../newlocal",
+                     build_file_content='exports_files(["data.txt"])')
+bind(name="bound", actual="//target_to_be_bound:data.txt")
+EOF
+  cat > BUILD <<'EOF'
+genrule(
+  name = "it",
+  srcs = ["@thisislocal//:data.txt", "@newlocal//:data.txt",
+          "//external:bound"],
+  outs = ["it.txt"],
+  cmd = "cat $(SRCS) > $@",
+)
+EOF
+
+  bazel build //:it || fail "Expected success"
+
+  bazel sync --distdir=${EXTREPODIR}/test_WORKSPACE/distdir \
+        --experimental_repository_resolved_file=resolved.bzl
+  echo > WORKSPACE # remove workspace, only work from the resolved file
+  bazel clean --expunge
+  echo; cat resolved.bzl; echo
+  bazel build --experimental_resolved_file_instead_of_workspace=resolved.bzl \
+        //:it || fail "Expected success"
+}
+
+test_hidden_symbols() {
+  # Verify that the resolved file can be used for building, even if it
+  # legitimately contains a private symbol
+  mkdir main
+  cd main
+  cat > BUILD <<'EOF'
+genrule(
+  name = "it",
+  srcs = ["@foo//:data.txt"],
+  outs = ["it.txt"],
+  cmd = "cp $< $@",
+)
+EOF
+
+  cat > repo.bzl <<'EOF'
+_THE_DATA="42"
+
+def _data_impl(ctx):
+  ctx.file("BUILD", "exports_files(['data.txt'])")
+  ctx.file("data.txt", ctx.attr.data)
+
+_repo = repository_rule(
+  implementation = _data_impl,
+  attrs = { "data" : attr.string() },
+)
+
+def data_repo(name):
+  _repo(name=name, data=_THE_DATA)
+
+EOF
+  cat > WORKSPACE <<'EOF'
+load("//:repo.bzl", "data_repo")
+
+data_repo("foo")
+EOF
+
+  bazel build --experimental_repository_resolved_file=resolved.bzl //:it
+  echo > WORKSPACE # remove workspace, only work from the resolved file
+  bazel clean --expunge
+  echo; cat resolved.bzl; echo
+
+  bazel build --experimental_resolved_file_instead_of_workspace=resolved.bzl \
+        //:it || fail "Expected success"
 }
 
 run_suite "workspace_resolved_test tests"

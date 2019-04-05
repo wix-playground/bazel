@@ -25,12 +25,14 @@ import static org.junit.Assert.fail;
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
+import com.google.devtools.build.lib.analysis.config.transitions.SplitTransition;
+import com.google.devtools.build.lib.analysis.config.transitions.TransitionFactory;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.analysis.util.MockRule;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.packages.Attribute.LabelLateBoundDefault;
-import com.google.devtools.build.lib.packages.AttributeMap;
+import com.google.devtools.build.lib.packages.AttributeTransitionData;
 import com.google.devtools.build.lib.packages.NoSuchTargetException;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.testutil.TestRuleClassProvider;
@@ -267,20 +269,27 @@ public class CircularDependencyTest extends BuildViewTestCase {
                   .mandatory()
                   .allowedFileTypes()
                   .cfg(
-                      (AttributeMap map) ->
-                          (BuildOptions options) -> {
-                            String define = map.get("define", STRING);
+                      new TransitionFactory<AttributeTransitionData>() {
+                        @Override
+                        public SplitTransition create(AttributeTransitionData data) {
+                          return (BuildOptions options) -> {
+                            String define = data.attributes().get("define", STRING);
                             BuildOptions newOptions = options.clone();
                             BuildConfiguration.Options optionsFragment =
                                 newOptions.get(BuildConfiguration.Options.class);
                             optionsFragment.commandLineBuildVariables =
-                                optionsFragment
-                                    .commandLineBuildVariables
-                                    .stream()
+                                optionsFragment.commandLineBuildVariables.stream()
                                     .filter((pair) -> !pair.getKey().equals(define))
                                     .collect(toImmutableList());
                             return ImmutableList.of(newOptions);
-                          }));
+                          };
+                        }
+
+                        @Override
+                        public boolean isSplit() {
+                          return true;
+                        }
+                      }));
 
   @Override
   protected ConfiguredRuleClassProvider getRuleClassProvider() {

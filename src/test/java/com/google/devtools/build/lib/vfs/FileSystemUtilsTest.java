@@ -18,7 +18,6 @@ import static com.google.devtools.build.lib.vfs.FileSystemUtils.appendWithoutExt
 import static com.google.devtools.build.lib.vfs.FileSystemUtils.commonAncestor;
 import static com.google.devtools.build.lib.vfs.FileSystemUtils.copyFile;
 import static com.google.devtools.build.lib.vfs.FileSystemUtils.copyTool;
-import static com.google.devtools.build.lib.vfs.FileSystemUtils.deleteTree;
 import static com.google.devtools.build.lib.vfs.FileSystemUtils.moveFile;
 import static com.google.devtools.build.lib.vfs.FileSystemUtils.relativePath;
 import static com.google.devtools.build.lib.vfs.FileSystemUtils.removeExtension;
@@ -33,6 +32,7 @@ import com.google.common.base.Predicates;
 import com.google.common.collect.Lists;
 import com.google.devtools.build.lib.testutil.BlazeTestUtils;
 import com.google.devtools.build.lib.testutil.ManualClock;
+import com.google.devtools.build.lib.vfs.FileSystemUtils.MoveResult;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -363,7 +363,7 @@ public class FileSystemUtilsTest {
 
     Path moveTarget = file2;
 
-    moveFile(originalFile, moveTarget);
+    assertThat(moveFile(originalFile, moveTarget)).isEqualTo(MoveResult.FILE_MOVED);
 
     assertThat(FileSystemUtils.readContent(moveTarget)).isEqualTo(content);
     assertThat(originalFile.exists()).isFalse();
@@ -390,14 +390,14 @@ public class FileSystemUtilsTest {
 
     FileSystemUtils.writeContent(source, UTF_8, "hello, world");
     source.setLastModifiedTime(142);
-    FileSystemUtils.moveFile(source, target);
+    assertThat(FileSystemUtils.moveFile(source, target)).isEqualTo(MoveResult.FILE_COPIED);
     assertThat(source.exists(Symlinks.NOFOLLOW)).isFalse();
     assertThat(target.isFile(Symlinks.NOFOLLOW)).isTrue();
     assertThat(FileSystemUtils.readContent(target, UTF_8)).isEqualTo("hello, world");
     assertThat(target.getLastModifiedTime()).isEqualTo(142);
 
     source.createSymbolicLink(PathFragment.create("link-target"));
-    FileSystemUtils.moveFile(source, target);
+    assertThat(FileSystemUtils.moveFile(source, target)).isEqualTo(MoveResult.FILE_COPIED);
     assertThat(source.exists(Symlinks.NOFOLLOW)).isFalse();
     assertThat(target.isSymbolicLink()).isTrue();
     assertThat(target.readSymbolicLink()).isEqualTo(PathFragment.create("link-target"));
@@ -466,8 +466,12 @@ public class FileSystemUtilsTest {
       copyFile(originalFile, aDir);
       fail();
     } catch (IOException ex) {
-      assertThat(ex).hasMessage(
-          "error copying file: couldn't delete destination: " + aDir + " (Directory not empty)");
+      assertThat(ex)
+          .hasMessageThat()
+          .isEqualTo(
+              "error copying file: couldn't delete destination: "
+                  + aDir
+                  + " (Directory not empty)");
     }
   }
 
@@ -514,7 +518,9 @@ public class FileSystemUtilsTest {
       FileSystemUtils.copyTreesBelow(topDir, aDir, Symlinks.FOLLOW);
       fail("Should not be able to copy a directory to a subdir");
     } catch (IllegalArgumentException expected) {
-      assertThat(expected).hasMessage("/top-dir/a-dir is a subdirectory of /top-dir");
+      assertThat(expected)
+          .hasMessageThat()
+          .isEqualTo("/top-dir/a-dir is a subdirectory of /top-dir");
     }
   }
 
@@ -525,7 +531,7 @@ public class FileSystemUtilsTest {
       FileSystemUtils.copyTreesBelow(file1, aDir, Symlinks.FOLLOW);
       fail("Should not be able to copy a file with copyDirectory method");
     } catch (IOException expected) {
-      assertThat(expected).hasMessage("/top-dir/file-1 (Not a directory)");
+      assertThat(expected).hasMessageThat().isEqualTo("/top-dir/file-1 (Not a directory)");
     }
   }
 
@@ -539,7 +545,7 @@ public class FileSystemUtilsTest {
       FileSystemUtils.copyTreesBelow(copyDir, file4, Symlinks.FOLLOW);
       fail("Should not be able to copy a directory to a file");
     } catch (IOException expected) {
-      assertThat(expected).hasMessage("/file-4 (Not a directory)");
+      assertThat(expected).hasMessageThat().isEqualTo("/file-4 (Not a directory)");
     }
   }
 
@@ -552,7 +558,9 @@ public class FileSystemUtilsTest {
       FileSystemUtils.copyTreesBelow(unexistingDir, aDir, Symlinks.FOLLOW);
       fail("Should not be able to copy from an unexisting path");
     } catch (FileNotFoundException expected) {
-      assertThat(expected).hasMessage("/unexisting-dir (No such file or directory)");
+      assertThat(expected)
+          .hasMessageThat()
+          .isEqualTo("/unexisting-dir (No such file or directory)");
     }
   }
 
@@ -643,56 +651,6 @@ public class FileSystemUtilsTest {
 
     paths = traverseTree(linkedDir, Predicates.alwaysTrue());
     assertThat(paths).containsExactly(fileSystem.getPath("/linked-dir/file"));
-  }
-
-  @Test
-  public void testDeleteTreeCommandDeletesTree() throws IOException {
-    createTestDirectoryTree();
-    Path toDelete = topDir;
-    deleteTree(toDelete);
-
-    assertThat(file4.exists()).isTrue();
-    assertThat(topDir.exists()).isFalse();
-    assertThat(file1.exists()).isFalse();
-    assertThat(file2.exists()).isFalse();
-    assertThat(aDir.exists()).isFalse();
-    assertThat(file3.exists()).isFalse();
-  }
-
-  @Test
-  public void testDeleteTreeCommandsDeletesUnreadableDirectories() throws IOException {
-    createTestDirectoryTree();
-    Path toDelete = topDir;
-
-    try {
-      aDir.setReadable(false);
-    } catch (UnsupportedOperationException e) {
-      // For file systems that do not support setting readable attribute to
-      // false, this test is simply skipped.
-
-      return;
-    }
-
-    deleteTree(toDelete);
-    assertThat(topDir.exists()).isFalse();
-    assertThat(aDir.exists()).isFalse();
-  }
-
-  @Test
-  public void testDeleteTreeCommandDoesNotFollowLinksOut() throws IOException {
-    createTestDirectoryTree();
-    Path toDelete = topDir;
-    Path outboundLink = fileSystem.getPath("/top-dir/outbound-link");
-    outboundLink.createSymbolicLink(file4);
-
-    deleteTree(toDelete);
-
-    assertThat(file4.exists()).isTrue();
-    assertThat(topDir.exists()).isFalse();
-    assertThat(file1.exists()).isFalse();
-    assertThat(file2.exists()).isFalse();
-    assertThat(aDir.exists()).isFalse();
-    assertThat(file3.exists()).isFalse();
   }
 
   @Test

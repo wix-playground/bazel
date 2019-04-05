@@ -20,6 +20,7 @@ import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.platform.ConstraintSettingInfo;
 import com.google.devtools.build.lib.analysis.platform.ConstraintValueInfo;
 import com.google.devtools.build.lib.analysis.platform.DeclaredToolchainInfo;
+import com.google.devtools.build.lib.analysis.platform.ToolchainTypeInfo;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import org.junit.Before;
 import org.junit.Test;
@@ -74,18 +75,17 @@ public class ToolchainTest extends BuildViewTestCase {
 
     DeclaredToolchainInfo provider = target.getProvider(DeclaredToolchainInfo.class);
     assertThat(provider).isNotNull();
-    assertThat(provider.toolchainType()).isEqualTo(makeLabel("//toolchain:demo_toolchain"));
+    assertThat(provider.toolchainType())
+        .isEqualTo(ToolchainTypeInfo.create(makeLabel("//toolchain:demo_toolchain")));
 
-    assertThat(provider.execConstraints())
-        .containsExactly(
-            ConstraintValueInfo.create(
-                ConstraintSettingInfo.create(makeLabel("//constraint:basic")),
-                makeLabel("//constraint:foo")));
-    assertThat(provider.targetConstraints())
-        .containsExactly(
-            ConstraintValueInfo.create(
-                ConstraintSettingInfo.create(makeLabel("//constraint:basic")),
-                makeLabel("//constraint:bar")));
+    ConstraintSettingInfo basicConstraintSetting =
+        ConstraintSettingInfo.create(makeLabel("//constraint:basic"));
+    assertThat(provider.execConstraints().get(basicConstraintSetting))
+        .isEqualTo(
+            ConstraintValueInfo.create(basicConstraintSetting, makeLabel("//constraint:foo")));
+    assertThat(provider.targetConstraints().get(basicConstraintSetting))
+        .isEqualTo(
+            ConstraintValueInfo.create(basicConstraintSetting, makeLabel("//constraint:bar")));
 
     assertThat(provider.toolchainLabel()).isEqualTo(makeLabel("//toolchain:toolchain_def1"));
   }

@@ -32,11 +32,11 @@ import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Artifact.SpecialArtifact;
 import com.google.devtools.build.lib.actions.Artifact.SpecialArtifactType;
 import com.google.devtools.build.lib.actions.Artifact.TreeFileArtifact;
+import com.google.devtools.build.lib.actions.ArtifactFileMetadata;
 import com.google.devtools.build.lib.actions.ArtifactRoot;
 import com.google.devtools.build.lib.actions.ArtifactSkyKey;
 import com.google.devtools.build.lib.actions.BasicActionLookupValue;
 import com.google.devtools.build.lib.actions.FileArtifactValue;
-import com.google.devtools.build.lib.actions.FileValue;
 import com.google.devtools.build.lib.actions.MissingInputFileException;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.actions.cache.DigestUtils;
@@ -46,6 +46,7 @@ import com.google.devtools.build.lib.vfs.FileStatus;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.skyframe.EvaluationContext;
 import com.google.devtools.build.skyframe.EvaluationResult;
 import com.google.devtools.build.skyframe.MemoizingEvaluator;
 import com.google.devtools.build.skyframe.SkyFunction;
@@ -55,9 +56,14 @@ import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -105,7 +111,8 @@ public class TreeArtifactMetadataTest extends ArtifactFunctionTestCase {
     // breaking changes.
     Map<String, FileArtifactValue> digestBuilder = new HashMap<>();
     for (PathFragment child : children) {
-      FileArtifactValue subdigest = FileArtifactValue.create(tree.getPath().getRelative(child));
+      FileArtifactValue subdigest =
+          FileArtifactValue.createShareable(tree.getPath().getRelative(child));
       digestBuilder.put(child.getPathString(), subdigest);
     }
     assertThat(DigestUtils.fromMetadata(digestBuilder).getDigestBytesUnsafe())
@@ -121,6 +128,24 @@ public class TreeArtifactMetadataTest extends ArtifactFunctionTestCase {
     assertThat(value.getMetadata().getDigest()).isEqualTo(value.getDigest());
     // Java zero-fills arrays.
     assertThat(value.getDigest()).isEqualTo(new byte[16]);
+  }
+
+  @Test
+  public void testTreeArtifactOrdering() throws Exception {
+    int rangeSize = 100;
+    int attempts = 10;
+    List<PathFragment> children =
+        IntStream.range(0, rangeSize)
+            .mapToObj(i -> PathFragment.create("file" + i))
+            .collect(Collectors.toList());
+
+    for (int i = 0; i < attempts; i++) {
+      Collections.shuffle(children, new Random());
+      Artifact treeArtifact = createTreeArtifact("out");
+      TreeArtifactValue value = evaluateTreeArtifact(treeArtifact, children);
+      assertThat(value.getChildPaths()).containsExactlyElementsIn(children);
+      assertThat(value.getChildPaths()).isOrdered(Comparator.naturalOrder());
+    }
   }
 
   @Test
@@ -181,11 +206,11 @@ public class TreeArtifactMetadataTest extends ArtifactFunctionTestCase {
     setupRoot(
         new CustomInMemoryFs() {
           @Override
-          public FileStatus stat(Path path, boolean followSymlinks) throws IOException {
+          public FileStatus statIfFound(Path path, boolean followSymlinks) throws IOException {
             if (path.getBaseName().equals("one")) {
               throw exception;
             }
-            return super.stat(path, followSymlinks);
+            return super.statIfFound(path, followSymlinks);
           }
         });
     try {
@@ -233,25 +258,28 @@ public class TreeArtifactMetadataTest extends ArtifactFunctionTestCase {
               ALL_OWNER,
               new BasicActionLookupValue(
                   Actions.filterSharedActionsAndThrowActionConflict(
-                      actionKeyContext, ImmutableList.copyOf(actions)))));
+                      actionKeyContext, ImmutableList.copyOf(actions)),
+                  /*nonceVersion=*/ null)));
     }
   }
 
   private <E extends SkyValue> EvaluationResult<E> evaluate(SkyKey... keys)
       throws InterruptedException, ActionConflictException {
     setGeneratingActions();
-    return driver.evaluate(
-        Arrays.asList(keys), /*keepGoing=*/
-        false,
-        SkyframeExecutor.DEFAULT_THREAD_COUNT,
-        NullEventHandler.INSTANCE);
+    EvaluationContext evaluationContext =
+        EvaluationContext.newBuilder()
+            .setKeepGoing(false)
+            .setNumThreads(SkyframeExecutor.DEFAULT_THREAD_COUNT)
+            .setEventHander(NullEventHandler.INSTANCE)
+            .build();
+    return driver.evaluate(Arrays.asList(keys), evaluationContext);
   }
 
   private class TreeArtifactExecutionFunction implements SkyFunction {
     @Override
     public SkyValue compute(SkyKey skyKey, Environment env)
         throws SkyFunctionException, InterruptedException {
-      Map<Artifact, FileValue> fileData = new HashMap<>();
+      Map<Artifact, ArtifactFileMetadata> fileData = new HashMap<>();
       Map<TreeFileArtifact, FileArtifactValue> treeArtifactData = new HashMap<>();
       ActionLookupData actionLookupData = (ActionLookupData) skyKey.argument();
       ActionLookupValue actionLookupValue =
@@ -261,8 +289,8 @@ public class TreeArtifactMetadataTest extends ArtifactFunctionTestCase {
       for (PathFragment subpath : testTreeArtifactContents) {
         try {
           TreeFileArtifact suboutput = ActionInputHelper.treeFileArtifact(output, subpath);
-          FileValue fileValue = ActionMetadataHandler.fileValueFromArtifact(
-              suboutput, null, null);
+          ArtifactFileMetadata fileValue =
+              ActionMetadataHandler.fileMetadataFromArtifact(suboutput, null, null);
           fileData.put(suboutput, fileValue);
           treeArtifactData.put(suboutput, FileArtifactValue.create(suboutput, fileValue));
         } catch (IOException e) {
@@ -278,7 +306,7 @@ public class TreeArtifactMetadataTest extends ArtifactFunctionTestCase {
           ImmutableMap.<Artifact, FileArtifactValue>of(),
           /*outputSymlinks=*/ null,
           /*discoveredModules=*/ null,
-          /*notifyOnActionCacheHitAction=*/ false);
+          /*actionDependsOnBuildId=*/ false);
     }
 
     @Override

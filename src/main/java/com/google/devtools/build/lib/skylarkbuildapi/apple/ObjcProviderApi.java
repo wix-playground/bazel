@@ -16,11 +16,12 @@ package com.google.devtools.build.lib.skylarkbuildapi.apple;
 
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.skylarkbuildapi.FileApi;
-import com.google.devtools.build.lib.skylarkbuildapi.StructApi;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkCallable;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkModule;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkModuleCategory;
+import com.google.devtools.build.lib.skylarkinterface.SkylarkValue;
 import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics.FlagIdentifier;
 
 /**
  * An interface for an info type that provides all compiling and linking information in the
@@ -31,20 +32,22 @@ import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
     category = SkylarkModuleCategory.PROVIDER,
     doc = "A provider for compilation and linking of objc."
 )
-public interface ObjcProviderApi<FileApiT extends FileApi> extends StructApi {
+public interface ObjcProviderApi<FileApiT extends FileApi> extends SkylarkValue {
 
-  @SkylarkCallable(name = "asset_catalog",
+  @SkylarkCallable(
+      name = "asset_catalog",
       structField = true,
-      doc = "<b>Deprecated. Resource-related fields will be migrated to another provider.</b> "
-          + "Asset catalog resource files."
-  )
+      doc =
+          "Asset catalog resource files.",
+      disableWithFlag = FlagIdentifier.INCOMPATIBLE_DISABLE_OBJC_PROVIDER_RESOURCES)
   public NestedSet<FileApiT> assetCatalog();
 
-  @SkylarkCallable(name = "bundle_file",
+  @SkylarkCallable(
+      name = "bundle_file",
       structField = true,
-      doc = "<b>Deprecated. Resource-related fields will be migrated to another provider.</b> "
-          + "Files that are plopped into the final bundle at some arbitrary bundle path."
-  )
+      doc =
+          "Files that are plopped into the final bundle at some arbitrary bundle path.",
+      disableWithFlag = FlagIdentifier.INCOMPATIBLE_DISABLE_OBJC_PROVIDER_RESOURCES)
   public SkylarkNestedSet bundleFile();
 
   @SkylarkCallable(name = "define",
@@ -162,13 +165,13 @@ public interface ObjcProviderApi<FileApiT extends FileApi> extends StructApi {
   )
   public NestedSet<String> linkopt();
 
-  @SkylarkCallable(name = "merge_zip",
+  @SkylarkCallable(
+      name = "merge_zip",
       structField = true,
-      doc = "<b>Deprecated. Resource-related fields will be migrated to another provider.</b> "
-          + "Merge zips to include in the bundle. The entries of these zip files are included in "
-          + "the final bundle with the same path. The entries in the merge zips should not include "
-          + "the bundle root path (e.g. 'Foo.app')."
-  )
+      doc =
+          "Merge zips to include in the bundle. The entries of these zip files are included "
+              + "in the final bundle with the same path. The entries in the merge zips should not "
+              + "include the bundle root path (e.g. 'Foo.app').")
   public NestedSet<FileApiT> mergeZip();
 
   @SkylarkCallable(name = "module_map",
@@ -195,11 +198,12 @@ public interface ObjcProviderApi<FileApiT extends FileApi> extends StructApi {
   )
   public NestedSet<FileApiT> multiArchLinkedBinaries();
 
-  @SkylarkCallable(name = "root_merge_zip",
+  @SkylarkCallable(
+      name = "root_merge_zip",
       structField = true,
-      doc = "<b>Deprecated. Resource-related fields will be migrated to another provider.</b> "
-          + "Merge zips to include in the ipa and outside the bundle root."
-  )
+      doc =
+          "Merge zips to include in the ipa and outside the bundle root.",
+      disableWithFlag = FlagIdentifier.INCOMPATIBLE_DISABLE_OBJC_PROVIDER_RESOURCES)
   public NestedSet<FileApiT> rootMergeZip();
 
   @SkylarkCallable(name = "sdk_dylib",
@@ -227,18 +231,20 @@ public interface ObjcProviderApi<FileApiT extends FileApi> extends StructApi {
   )
   public NestedSet<FileApiT> staticFrameworkFile();
 
-  @SkylarkCallable(name = "storyboard",
+  @SkylarkCallable(
+      name = "storyboard",
       structField = true,
-      doc = "<b>Deprecated. Resource-related fields will be migrated to another provider.</b> "
-          + "Files for storyboard sources."
-  )
+      doc =
+          "Files for storyboard sources.",
+      disableWithFlag = FlagIdentifier.INCOMPATIBLE_DISABLE_OBJC_PROVIDER_RESOURCES)
   public NestedSet<FileApiT> storyboard();
 
-  @SkylarkCallable(name = "strings",
+  @SkylarkCallable(
+      name = "strings",
       structField = true,
-      doc = "<b>Deprecated. Resource-related fields will be migrated to another provider.</b> "
-          + "Files for strings source files."
-  )
+      doc =
+          "Files for strings source files.",
+      disableWithFlag = FlagIdentifier.INCOMPATIBLE_DISABLE_OBJC_PROVIDER_RESOURCES)
   public NestedSet<FileApiT> strings();
 
   @SkylarkCallable(name = "umbrella_header",
@@ -248,34 +254,38 @@ public interface ObjcProviderApi<FileApiT extends FileApi> extends StructApi {
   )
   public NestedSet<FileApiT> umbrellaHeader();
 
-  @SkylarkCallable(name = "weak_sdk_framework",
+  @SkylarkCallable(
+      name = "weak_sdk_framework",
       structField = true,
-      doc = "Names of SDK frameworks to weakly link with. For instance, 'MediaAccessibility'. "
-           + "In difference to regularly linked SDK frameworks, symbols from weakly linked "
-           + "frameworks do not cause an error if they are not present at runtime."
-  )
+      doc =
+          "Names of SDK frameworks to weakly link with. For instance, 'MediaAccessibility'. "
+              + "In difference to regularly linked SDK frameworks, symbols from weakly linked "
+              + "frameworks do not cause an error if they are not present at runtime.")
   public SkylarkNestedSet weakSdkFramework();
 
-  @SkylarkCallable(name = "xcassets_dir",
+  @SkylarkCallable(
+      name = "xcassets_dir",
       structField = true,
-      doc = "<b>Deprecated. Resource-related fields will be migrated to another provider.</b> "
-          + "The set of all unique asset catalog directories (*.xcassets) containing files "
-          + "in 'asset_catalogs'."
-  )
+      doc =
+          "The set of all unique asset catalog directories (*.xcassets) containing files "
+              + "in 'asset_catalogs'.",
+      disableWithFlag = FlagIdentifier.INCOMPATIBLE_DISABLE_OBJC_PROVIDER_RESOURCES)
   public SkylarkNestedSet xcassetsDir();
 
-  @SkylarkCallable(name = "xcdatamodel",
+  @SkylarkCallable(
+      name = "xcdatamodel",
       structField = true,
-      doc = "<b>Deprecated. Resource-related fields will be migrated to another provider.</b> "
-          + "Files that comprise the data models of the final linked binary."
-  )
+      doc =
+          "Files that comprise the data models of the final linked binary.",
+      disableWithFlag = FlagIdentifier.INCOMPATIBLE_DISABLE_OBJC_PROVIDER_RESOURCES)
   public NestedSet<FileApiT> xcdatamodel();
 
-  @SkylarkCallable(name = "xib",
+  @SkylarkCallable(
+      name = "xib",
       structField = true,
-      doc = "<b>Deprecated. Resource-related fields will be migrated to another provider.</b> "
-          + ".xib resource files"
-  )
+      doc =
+          ".xib resource files",
+      disableWithFlag = FlagIdentifier.INCOMPATIBLE_DISABLE_OBJC_PROVIDER_RESOURCES)
   public NestedSet<FileApiT> xib();
 
   @SkylarkCallable(

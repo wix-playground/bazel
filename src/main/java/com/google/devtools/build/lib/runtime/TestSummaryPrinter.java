@@ -27,6 +27,7 @@ import com.google.devtools.build.lib.view.test.TestStatus.TestCase;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 
@@ -36,19 +37,29 @@ import java.util.logging.Level;
 public class TestSummaryPrinter {
 
   /**
+   * Interface for getting the {@link String} to display to the user for a {@link Path}
+   * corresponding to a test output (e.g. test log).
+   */
+  public interface TestLogPathFormatter {
+    String getPathStringToPrint(Path path);
+  }
+
+  /**
    * Print the cached test log to the given printer.
    */
-  public static void printCachedOutput(TestSummary summary,
+  public static void printCachedOutput(
+      TestSummary summary,
       TestOutputFormat testOutput,
-      AnsiTerminalPrinter printer) {
+      AnsiTerminalPrinter printer,
+      TestLogPathFormatter testLogPathFormatter) {
 
     String testName = summary.getLabel().toString();
     List<String> allLogs = new ArrayList<>();
     for (Path path : summary.getFailedLogs()) {
-      allLogs.add(path.getPathString());
+      allLogs.add(testLogPathFormatter.getPathStringToPrint(path));
     }
     for (Path path : summary.getPassedLogs()) {
-      allLogs.add(path.getPathString());
+      allLogs.add(testLogPathFormatter.getPathStringToPrint(path));
     }
     printer.printLn("" + TestSummary.getStatusMode(summary.getStatus()) + summary.getStatus() + ": "
         + Mode.DEFAULT + testName + " (see " + Joiner.on(' ').join(allLogs) + ")");
@@ -91,8 +102,16 @@ public class TestSummaryPrinter {
   public static void print(
       TestSummary summary,
       AnsiTerminalPrinter terminalPrinter,
-      boolean verboseSummary, boolean printFailedTestCases) {
-    print(summary, terminalPrinter, verboseSummary, printFailedTestCases, false);
+      TestLogPathFormatter testLogPathFormatter,
+      boolean verboseSummary,
+      boolean printFailedTestCases) {
+    print(
+        summary,
+        terminalPrinter,
+        testLogPathFormatter,
+        verboseSummary,
+        printFailedTestCases,
+        false);
   }
 
   /**
@@ -102,7 +121,9 @@ public class TestSummaryPrinter {
   public static void print(
       TestSummary summary,
       AnsiTerminalPrinter terminalPrinter,
-      boolean verboseSummary, boolean printFailedTestCases,
+      TestLogPathFormatter testLogPathFormatter,
+      boolean verboseSummary,
+      boolean printFailedTestCases,
       boolean withConfigurationName) {
     BlazeTestStatus status = summary.getStatus();
     // Skip output for tests that failed to build.
@@ -117,8 +138,8 @@ public class TestSummaryPrinter {
     }
     terminalPrinter.print(
         Strings.padEnd(targetName, 78 - message.length(), ' ')
-        + " " + TestSummary.getStatusMode(summary.getStatus()) + message + Mode.DEFAULT
-        + (verboseSummary ? getAttemptSummary(summary) + getTimeSummary(summary) : "") + "\n");
+            + " " + TestSummary.getStatusMode(summary.getStatus()) + message + Mode.DEFAULT
+            + (verboseSummary ? getAttemptSummary(summary) + getTimeSummary(summary) : "") + "\n");
 
     if (printFailedTestCases && summary.getStatus() == BlazeTestStatus.FAILED) {
       if (summary.getFailedTestCasesStatus() == FailedTestCasesStatus.NOT_AVAILABLE) {
@@ -150,11 +171,7 @@ public class TestSummaryPrinter {
 
       for (Path path : summary.getFailedLogs()) {
         if (path.exists()) {
-          // Don't use getPrettyPath() here - we want to print the absolute path,
-          // so that it cut and paste into a different terminal, and we don't
-          // want to use the blaze-bin etc. symbolic links because they could be changed
-          // by a subsequent build with different options.
-          terminalPrinter.print("  " + path.getPathString() + "\n");
+          terminalPrinter.print("  " + testLogPathFormatter.getPathStringToPrint(path) + "\n");
         }
       }
     }
@@ -162,7 +179,7 @@ public class TestSummaryPrinter {
       // Print only non-trivial coverage files.
       try {
         if (path.exists() && path.getFileSize() > 0) {
-          terminalPrinter.print("  " + path.getPathString() + "\n");
+          terminalPrinter.print("  " + testLogPathFormatter.getPathStringToPrint(path) + "\n");
         }
       } catch (IOException e) {
         LoggingUtil.logToRemote(Level.WARNING, "Error while reading coverage data file size",
@@ -204,7 +221,7 @@ public class TestSummaryPrinter {
    */
   static String timeInSec(long time, TimeUnit unit) {
     double ms = TimeUnit.MILLISECONDS.convert(time, unit);
-    return String.format("%.1fs", ms / 1000.0);
+    return String.format(Locale.US, "%.1fs", ms / 1000.0);
   }
 
   static String getAttemptSummary(TestSummary summary) {
@@ -228,7 +245,8 @@ public class TestSummaryPrinter {
     } else if (summary.getNumCached() == summary.totalRuns()) {
       return "(cached) ";
     } else {
-      return String.format("(%d/%d cached) ", summary.getNumCached(), summary.totalRuns());
+      return String.format(
+          Locale.US, "(%d/%d cached) ", summary.getNumCached(), summary.totalRuns());
     }
   }
 
@@ -258,6 +276,7 @@ public class TestSummaryPrinter {
       // distribution of times on the next line.
       String maxTime = timeInSec(max, TimeUnit.MILLISECONDS);
       return String.format(
+          Locale.US,
           " in %s\n  Stats over %d runs: max = %s, min = %s, avg = %s, dev = %s",
           maxTime,
           summary.getTestTimes().size(),

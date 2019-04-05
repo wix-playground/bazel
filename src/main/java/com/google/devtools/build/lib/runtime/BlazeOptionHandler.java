@@ -33,7 +33,7 @@ import com.google.devtools.common.options.OptionPriority.PriorityCategory;
 import com.google.devtools.common.options.OptionValueDescription;
 import com.google.devtools.common.options.OptionsParser;
 import com.google.devtools.common.options.OptionsParsingException;
-import com.google.devtools.common.options.OptionsProvider;
+import com.google.devtools.common.options.OptionsParsingResult;
 import com.google.devtools.common.options.ParsedOptionDescription;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -84,9 +84,11 @@ public final class BlazeOptionHandler {
     this.invocationPolicy = invocationPolicy;
   }
 
-  // Return options as OptionsProvider so the options can't be easily modified after we've
-  // applied the invocation policy.
-  OptionsProvider getOptionsResult() {
+  /**
+   * Return options as {@link OptionsParsingResult} so the options can't be easily modified after
+   * we've applied the invocation policy.
+   */
+  OptionsParsingResult getOptionsResult() {
     return optionsParser;
   }
 
@@ -108,7 +110,10 @@ public final class BlazeOptionHandler {
           Event.error(
               "The '"
                   + commandAnnotation.name()
-                  + "' command is only supported from within a workspace."));
+                  + "' command is only supported from within a workspace"
+                  + " (below a directory having a WORKSPACE file).\n"
+                  + "See documentation at"
+                  + " https://docs.bazel.build/versions/master/build-ref.html#workspace"));
       return ExitCode.COMMAND_LINE_ERROR;
     }
 
@@ -222,6 +227,30 @@ public final class BlazeOptionHandler {
     }
 
     expandConfigOptions(eventHandler, commandToRcArgs);
+  }
+
+  /**
+   * TODO(bazel-team): When we move BuildConfiguration.Options options to be defined in starlark,
+   * make sure they're not passed in here during {@link #getOptionsResult}.
+   */
+  ExitCode parseStarlarkOptions(CommandEnvironment env, ExtendedEventHandler eventHandler) {
+    // For now, restrict starlark options to commands that already build to ensure that loading
+    // will work. We may want to open this up to other commands in the future. The "info"
+    // and "clean" commands have builds=true set in their annotation but don't actually do any
+    // building (b/120041419).
+    if (!commandAnnotation.builds()
+        || commandAnnotation.name().equals("info")
+        || commandAnnotation.name().equals("clean")) {
+      return ExitCode.SUCCESS;
+    }
+    try {
+      StarlarkOptionsParser.newStarlarkOptionsParser(env, optionsParser, runtime)
+          .parse(commandAnnotation, eventHandler);
+    } catch (OptionsParsingException e) {
+      eventHandler.handle(Event.error(e.getMessage()));
+      return ExitCode.COMMAND_LINE_ERROR;
+    }
+    return ExitCode.SUCCESS;
   }
 
   /**

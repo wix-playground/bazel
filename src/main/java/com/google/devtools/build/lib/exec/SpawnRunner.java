@@ -17,9 +17,11 @@ import com.google.devtools.build.lib.actions.ActionInput;
 import com.google.devtools.build.lib.actions.Artifact.ArtifactExpander;
 import com.google.devtools.build.lib.actions.ArtifactPathResolver;
 import com.google.devtools.build.lib.actions.ExecException;
+import com.google.devtools.build.lib.actions.FutureSpawn;
 import com.google.devtools.build.lib.actions.MetadataProvider;
 import com.google.devtools.build.lib.actions.Spawn;
 import com.google.devtools.build.lib.actions.SpawnResult;
+import com.google.devtools.build.lib.actions.cache.MetadataInjector;
 import com.google.devtools.build.lib.util.io.FileOutErr;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.io.IOException;
@@ -140,21 +142,20 @@ public interface SpawnRunner {
      * network file system, and prefetching the files in parallel is a significant performance win.
      * This should only be called by local strategies when local execution is imminent.
      *
-     * <p>Should be called with the equivalent of:
-     * <code>
+     * <p>Should be called with the equivalent of: <code>
      * policy.prefetchInputs(
      *      Iterables.filter(policy.getInputMapping().values(), Predicates.notNull()));
      * </code>
      *
-     * <p>Note in particular that {@link #getInputMapping} may return {@code null} values, but
-     * this method does not accept {@code null} values.
+     * <p>Note in particular that {@link #getInputMapping} may return {@code null} values, but this
+     * method does not accept {@code null} values.
      *
      * <p>The reason why this method requires passing in the inputs is that getInputMapping may be
      * slow to compute, so if the implementation already called it, we don't want to compute it
      * again. I suppose we could require implementations to memoize getInputMapping (but not compute
      * it eagerly), and that may change in the future.
      */
-    void prefetchInputs() throws IOException;
+    void prefetchInputs() throws IOException, InterruptedException;
 
     /**
      * The input file metadata cache for this specific spawn, which can be used to efficiently
@@ -193,10 +194,34 @@ public interface SpawnRunner {
     /** The files to which to write stdout and stderr. */
     FileOutErr getFileOutErr();
 
-    SortedMap<PathFragment, ActionInput> getInputMapping() throws IOException;
+    SortedMap<PathFragment, ActionInput> getInputMapping(boolean expandTreeArtifactsInRunfiles)
+        throws IOException;
 
     /** Reports a progress update to the Spawn strategy. */
     void report(ProgressStatus state, String name);
+
+    /**
+     * Returns a {@link MetadataInjector} that allows a caller to inject metadata about spawn
+     * outputs that are stored remotely.
+     */
+    MetadataInjector getMetadataInjector();
+  }
+
+  /**
+   * Run the given spawn asynchronously. The default implementation is synchronous for migration.
+   *
+   * @param spawn the spawn to run
+   * @param context the spawn execution context
+   * @return the result from running the spawn
+   * @throws InterruptedException if the calling thread was interrupted, or if the runner could not
+   *     lock the output files (see {@link SpawnExecutionContext#lockOutputFiles()})
+   * @throws IOException if something went wrong reading or writing to the local file system
+   * @throws ExecException if the request is malformed
+   */
+  default FutureSpawn execAsync(Spawn spawn, SpawnExecutionContext context)
+      throws InterruptedException, IOException, ExecException {
+    // TODO(ulfjack): Remove this default implementation. [exec-async]
+    return FutureSpawn.immediate(exec(spawn, context));
   }
 
   /**
@@ -212,6 +237,9 @@ public interface SpawnRunner {
    */
   SpawnResult exec(Spawn spawn, SpawnExecutionContext context)
       throws InterruptedException, IOException, ExecException;
+
+  /** Returns whether this SpawnRunner supports executing the given Spawn. */
+  boolean canExec(Spawn spawn);
 
   /* Name of the SpawnRunner. */
   String getName();

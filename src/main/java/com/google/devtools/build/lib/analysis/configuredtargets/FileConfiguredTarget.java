@@ -23,16 +23,17 @@ import com.google.devtools.build.lib.analysis.TransitiveInfoProvider;
 import com.google.devtools.build.lib.analysis.TransitiveInfoProviderMap;
 import com.google.devtools.build.lib.analysis.TransitiveInfoProviderMapBuilder;
 import com.google.devtools.build.lib.analysis.VisibilityProvider;
-import com.google.devtools.build.lib.analysis.test.InstrumentedFilesProvider;
+import com.google.devtools.build.lib.analysis.test.InstrumentedFilesInfo;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
-import com.google.devtools.build.lib.packages.Info;
+import com.google.devtools.build.lib.packages.InfoInterface;
 import com.google.devtools.build.lib.packages.PackageSpecification.PackageGroupContents;
 import com.google.devtools.build.lib.packages.Provider;
 import com.google.devtools.build.lib.skyframe.BuildConfigurationValue;
 import com.google.devtools.build.lib.util.FileType;
+import javax.annotation.Nullable;
 
 /**
  * A ConfiguredTarget for a source FileTarget. (Generated files use a subclass,
@@ -41,17 +42,16 @@ import com.google.devtools.build.lib.util.FileType;
 public abstract class FileConfiguredTarget extends AbstractConfiguredTarget
     implements FileType.HasFileType, LicensesProvider {
 
-  private final Artifact artifact;
   private final TransitiveInfoProviderMap providers;
 
   FileConfiguredTarget(
       Label label,
       BuildConfigurationValue.Key configurationKey,
       NestedSet<PackageGroupContents> visibility,
-      Artifact artifact) {
+      Artifact artifact,
+      @Nullable InstrumentedFilesInfo instrumentedFilesInfo) {
     super(label, configurationKey, visibility);
     NestedSet<Artifact> filesToBuild = NestedSetBuilder.create(Order.STABLE_ORDER, artifact);
-    this.artifact = artifact;
     FileProvider fileProvider = new FileProvider(filesToBuild);
     FilesToRunProvider filesToRunProvider =
         FilesToRunProvider.fromSingleExecutableArtifact(artifact);
@@ -61,15 +61,14 @@ public abstract class FileConfiguredTarget extends AbstractConfiguredTarget
             .put(LicensesProvider.class, this)
             .add(fileProvider)
             .add(filesToRunProvider);
-    if (this instanceof InstrumentedFilesProvider) {
-      builder.put(InstrumentedFilesProvider.class, this);
+
+    if (instrumentedFilesInfo != null) {
+      builder.put(instrumentedFilesInfo);
     }
     this.providers = builder.build();
   }
 
-  public Artifact getArtifact() {
-    return artifact;
-  }
+  public abstract Artifact getArtifact();
 
   /**
    *  Returns the file name of this file target.
@@ -90,12 +89,12 @@ public abstract class FileConfiguredTarget extends AbstractConfiguredTarget
   }
 
   @Override
-  protected Info rawGetSkylarkProvider(Provider.Key providerKey) {
-    return providers.getProvider(providerKey);
+  protected InfoInterface rawGetSkylarkProvider(Provider.Key providerKey) {
+    return providers.get(providerKey);
   }
 
   @Override
   protected Object rawGetSkylarkProvider(String providerKey) {
-    return providers.getProvider(providerKey);
+    return providers.get(providerKey);
   }
 }

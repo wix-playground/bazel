@@ -19,8 +19,10 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.ArtifactPathResolver;
 import com.google.devtools.build.lib.actions.BaseSpawn;
 import com.google.devtools.build.lib.actions.RunfilesSupplier;
+import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.io.IOException;
@@ -74,7 +76,7 @@ public class RunfilesSupplierImpl implements RunfilesSupplier {
   }
 
   @Override
-  public Iterable<Artifact> getArtifacts() {
+  public NestedSet<Artifact> getArtifacts() {
     return runfiles.getAllArtifacts();
   }
 
@@ -84,10 +86,11 @@ public class RunfilesSupplierImpl implements RunfilesSupplier {
   }
 
   @Override
-  public ImmutableMap<PathFragment, Map<PathFragment, Artifact>> getMappings() throws IOException {
+  public ImmutableMap<PathFragment, Map<PathFragment, Artifact>> getMappings(
+      ArtifactPathResolver resolver) throws IOException {
     return ImmutableMap.of(
         runfilesDir,
-        runfiles.getRunfilesInputs(/*eventHandler=*/ null, /*location=*/ null));
+        runfiles.getRunfilesInputs(/*eventHandler=*/ null, /*location=*/ null, resolver));
   }
 
   @Override

@@ -33,16 +33,27 @@ import javax.annotation.Nullable;
  * Configured targets implementing this provider can contribute Android-specific info to IDE to the
  * compilation.
  */
-@SkylarkModule(name = "AndroidIdeInfo", doc = "", documented = false)
+@SkylarkModule(
+    name = "AndroidIdeInfo",
+    doc =
+        "Do not use this module. It is intended for migration purposes only. If you depend on it, "
+            + "you will be broken when it is removed.",
+    documented = false)
 public interface AndroidIdeInfoProviderApi<
         FileT extends FileApi, OutputJarT extends OutputJarApi<FileT>>
     extends StructApi {
 
   /** Name of this info object. */
-  public static String NAME = "AndroidIdeInfo";
+  String NAME = "AndroidIdeInfo";
 
   /** Returns the Java package. */
-  @SkylarkCallable(name = "java_package", structField = true, doc = "", documented = false)
+  @SkylarkCallable(
+      name = "java_package",
+      structField = true,
+      doc = "",
+      documented = false,
+      allowReturnNones = true)
+  @Nullable
   String getJavaPackage();
 
   /** Returns the direct AndroidManifest. */
@@ -161,19 +172,26 @@ public interface AndroidIdeInfoProviderApi<
   ImmutableMap<String, SkylarkNestedSet> getNativeLibsSkylark();
 
   /** The provider implementing this can construct the AndroidIdeInfo provider. */
-  @SkylarkModule(name = "Provider", doc = "", documented = false)
+  @SkylarkModule(
+      name = "Provider",
+      doc =
+          "Do not use this module. It is intended for migration purposes only. If you depend on "
+              + "it, you will be broken when it is removed.",
+      documented = false)
   public interface Provider<FileT extends FileApi, OutputJarT extends OutputJarApi<FileT>>
       extends ProviderApi {
 
     @SkylarkCallable(
         name = NAME,
         doc = "The <code>AndroidIdeInfo</code> constructor.",
+        documented = false,
         parameters = {
           @Param(
               name = "java_package",
               doc = "A string of the Java package.",
               positional = true,
               named = false,
+              noneable = true,
               type = String.class),
           @Param(
               name = "manifest",
@@ -194,6 +212,7 @@ public interface AndroidIdeInfoProviderApi<
               doc = "A string of the idl import root.",
               positional = true,
               named = false,
+              noneable = true,
               type = String.class),
           @Param(
               name = "idl_srcs",
@@ -241,6 +260,7 @@ public interface AndroidIdeInfoProviderApi<
               doc = "An artifact of the Apk containing Android resources.",
               positional = true,
               named = false,
+              noneable = true,
               type = FileApi.class),
           @Param(
               name = "signed_apk",
@@ -276,17 +296,17 @@ public interface AndroidIdeInfoProviderApi<
         selfCall = true)
     @SkylarkConstructor(objectType = AndroidIdeInfoProviderApi.class)
     AndroidIdeInfoProviderApi<FileT, OutputJarT> createInfo(
-        String javaPackage,
+        /*noneable*/ Object javaPackage,
         /*noneable*/ Object manifest,
         /*noneable*/ Object generatedManifest,
-        String idlImportRoot,
+        /*noneable*/ Object idlImportRoot,
         SkylarkList<FileT> idlSrcs,
         SkylarkList<FileT> idlGeneratedJavaFiles,
         /*noneable*/ Object idlSourceJar,
         /*noneable*/ Object idlClassJar,
         boolean definesAndroidResources,
         /*noneable*/ Object resourceJar,
-        FileT resourceApk,
+        /*noneable*/ Object resourceApk,
         /*noneable*/ Object signedApk,
         /*noneable*/ Object aar,
         SkylarkList<FileT> apksUnderTest,

@@ -19,6 +19,11 @@ import static java.util.logging.Level.FINE;
 import static java.util.logging.Level.INFO;
 import static java.util.logging.Level.SEVERE;
 
+import build.bazel.remote.execution.v2.ActionCacheGrpc.ActionCacheImplBase;
+import build.bazel.remote.execution.v2.ActionResult;
+import build.bazel.remote.execution.v2.CapabilitiesGrpc.CapabilitiesImplBase;
+import build.bazel.remote.execution.v2.ContentAddressableStorageGrpc.ContentAddressableStorageImplBase;
+import build.bazel.remote.execution.v2.ExecutionGrpc.ExecutionImplBase;
 import com.google.bytestream.ByteStreamGrpc.ByteStreamImplBase;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -26,14 +31,10 @@ import com.google.common.io.ByteStreams;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningScheduledExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
-import com.google.devtools.build.lib.remote.RemoteOptions;
-import com.google.devtools.build.lib.remote.RemoteRetrier;
-import com.google.devtools.build.lib.remote.Retrier;
 import com.google.devtools.build.lib.remote.SimpleBlobStoreActionCache;
 import com.google.devtools.build.lib.remote.SimpleBlobStoreFactory;
-import com.google.devtools.build.lib.remote.blobstore.ConcurrentMapBlobStore;
-import com.google.devtools.build.lib.remote.blobstore.OnDiskBlobStore;
 import com.google.devtools.build.lib.remote.blobstore.SimpleBlobStore;
+import com.google.devtools.build.lib.remote.options.RemoteOptions;
 import com.google.devtools.build.lib.remote.util.DigestUtil;
 import com.google.devtools.build.lib.remote.util.TracingMetadataUtils;
 import com.google.devtools.build.lib.sandbox.LinuxSandboxUtil;
@@ -52,11 +53,6 @@ import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.common.options.OptionsParser;
 import com.google.devtools.common.options.OptionsParsingException;
-import com.google.devtools.remoteexecution.v1test.ActionCacheGrpc.ActionCacheImplBase;
-import com.google.devtools.remoteexecution.v1test.ActionResult;
-import com.google.devtools.remoteexecution.v1test.ContentAddressableStorageGrpc.ContentAddressableStorageImplBase;
-import com.google.devtools.remoteexecution.v1test.ExecutionGrpc.ExecutionImplBase;
-import com.google.watcher.v1.WatcherGrpc.WatcherImplBase;
 import io.grpc.Server;
 import io.grpc.ServerInterceptor;
 import io.grpc.ServerInterceptors;
@@ -95,8 +91,8 @@ public final class RemoteWorker {
   private final ActionCacheImplBase actionCacheServer;
   private final ByteStreamImplBase bsServer;
   private final ContentAddressableStorageImplBase casServer;
-  private final WatcherImplBase watchServer;
   private final ExecutionImplBase execServer;
+  private final CapabilitiesImplBase capabilitiesServer;
 
   static FileSystem getFileSystem() {
     final DigestHashFunction hashFunction;
@@ -105,7 +101,7 @@ public final class RemoteWorker {
       value = System.getProperty("bazel.DigestFunction", "SHA256");
       hashFunction = new DigestFunctionConverter().convert(value);
     } catch (OptionsParsingException e) {
-      throw new Error("The specified hash function '" + value + "' is not supported.");
+      throw new Error("The specified hash function '" + value + "' is not supported.", e);
     }
     return new JavaIoFileSystem(hashFunction);
   }
@@ -142,14 +138,13 @@ public final class RemoteWorker {
       ConcurrentHashMap<String, ListenableFuture<ActionResult>> operationsCache =
           new ConcurrentHashMap<>();
       FileSystemUtils.createDirectoryAndParents(workPath);
-      watchServer = new WatcherServer(operationsCache);
       execServer =
           new ExecutionServer(
               workPath, sandboxPath, workerOptions, cache, operationsCache, digestUtil);
     } else {
-      watchServer = null;
       execServer = null;
     }
+    this.capabilitiesServer = new CapabilitiesServer(digestUtil, execServer != null);
   }
 
   public Server startServer() throws IOException {
@@ -158,11 +153,11 @@ public final class RemoteWorker {
         NettyServerBuilder.forPort(workerOptions.listenPort)
             .addService(ServerInterceptors.intercept(actionCacheServer, headersInterceptor))
             .addService(ServerInterceptors.intercept(bsServer, headersInterceptor))
-            .addService(ServerInterceptors.intercept(casServer, headersInterceptor));
+            .addService(ServerInterceptors.intercept(casServer, headersInterceptor))
+            .addService(ServerInterceptors.intercept(capabilitiesServer, headersInterceptor));
 
     if (execServer != null) {
       b.addService(ServerInterceptors.intercept(execServer, headersInterceptor));
-      b.addService(ServerInterceptors.intercept(watchServer, headersInterceptor));
     } else {
       logger.info("Execution disabled, only serving cache requests.");
     }
@@ -246,39 +241,26 @@ public final class RemoteWorker {
       return;
     }
 
-    // The instance of SimpleBlobStore used is based on these criteria in order:
-    // 1. If remote cache or local disk cache is specified then use it first.
-    // 2. Finally use a ConcurrentMap to back the blob store.
-    final SimpleBlobStore blobStore;
-    if (usingRemoteCache) {
-      blobStore = SimpleBlobStoreFactory.create(remoteOptions, null, null);
-    } else if (remoteWorkerOptions.casPath != null) {
-      blobStore = new OnDiskBlobStore(fs.getPath(remoteWorkerOptions.casPath));
-    } else {
-      blobStore = new ConcurrentMapBlobStore(new ConcurrentHashMap<>());
-    }
+    Path casPath =
+        remoteWorkerOptions.casPath != null ? fs.getPath(remoteWorkerOptions.casPath) : null;
+    final SimpleBlobStore blobStore = SimpleBlobStoreFactory.create(remoteOptions, casPath);
 
     ListeningScheduledExecutorService retryService =
         MoreExecutors.listeningDecorator(Executors.newScheduledThreadPool(1));
 
-    RemoteRetrier retrier =
-        new RemoteRetrier(
-            remoteOptions,
-            RemoteRetrier.RETRIABLE_GRPC_ERRORS,
-            retryService,
-            Retrier.ALLOW_ALL_CALLS);
     DigestUtil digestUtil = new DigestUtil(fs.getDigestFunction());
     RemoteWorker worker =
         new RemoteWorker(
             fs,
             remoteWorkerOptions,
-            new SimpleBlobStoreActionCache(remoteOptions, blobStore, retrier, digestUtil),
+            new SimpleBlobStoreActionCache(remoteOptions, blobStore, digestUtil),
             sandboxPath,
             digestUtil);
 
     final Server server = worker.startServer();
 
-    EventLoopGroup bossGroup = null, workerGroup = null;
+    EventLoopGroup bossGroup = null;
+    EventLoopGroup workerGroup = null;
     Channel ch = null;
     if (remoteWorkerOptions.httpListenPort != 0) {
       // Configure the server.

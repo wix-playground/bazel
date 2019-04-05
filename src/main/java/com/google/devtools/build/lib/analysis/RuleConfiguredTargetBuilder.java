@@ -25,13 +25,16 @@ import com.google.devtools.build.lib.actions.Actions.GeneratingActions;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget;
+import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.analysis.constraints.ConstraintSemantics;
 import com.google.devtools.build.lib.analysis.constraints.EnvironmentCollection;
 import com.google.devtools.build.lib.analysis.constraints.SupportedEnvironments;
 import com.google.devtools.build.lib.analysis.constraints.SupportedEnvironmentsProvider;
 import com.google.devtools.build.lib.analysis.constraints.SupportedEnvironmentsProvider.RemovedEnvironmentCulprit;
+import com.google.devtools.build.lib.analysis.test.AnalysisTestActionBuilder;
+import com.google.devtools.build.lib.analysis.test.AnalysisTestResultInfo;
 import com.google.devtools.build.lib.analysis.test.ExecutionInfo;
-import com.google.devtools.build.lib.analysis.test.InstrumentedFilesProvider;
+import com.google.devtools.build.lib.analysis.test.InstrumentedFilesInfo;
 import com.google.devtools.build.lib.analysis.test.TestActionBuilder;
 import com.google.devtools.build.lib.analysis.test.TestEnvironmentInfo;
 import com.google.devtools.build.lib.analysis.test.TestProvider;
@@ -41,12 +44,13 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.events.Location;
-import com.google.devtools.build.lib.packages.Info;
+import com.google.devtools.build.lib.packages.InfoInterface;
 import com.google.devtools.build.lib.packages.NativeProvider;
 import com.google.devtools.build.lib.packages.Provider;
 import com.google.devtools.build.lib.packages.TargetUtils;
 import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.syntax.Type;
+import com.google.devtools.build.lib.syntax.Type.LabelClass;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.TreeMap;
@@ -146,16 +150,80 @@ public final class RuleConfiguredTargetBuilder {
       addNativeDeclaredProvider(outputGroupInfo);
     }
 
+    if (ruleContext.getConfiguration().evaluatingForAnalysisTest()) {
+      if (ruleContext.getRule().isAnalysisTest()) {
+        ruleContext.ruleError(
+            String.format(
+                "analysis_test rule '%s' cannot be transitively "
+                    + "depended on by another analysis test rule",
+                ruleContext.getLabel()));
+        return null;
+      }
+      addProvider(new DepCountInfo(transitiveDepCount()));
+    }
+
+    if (ruleContext.getRule().hasAnalysisTestTransition()) {
+      int depCount = transitiveDepCount();
+      if (depCount > ruleContext.getConfiguration().analysisTestingDepsLimit()) {
+        ruleContext.ruleError(
+            String.format(
+                "analysis test rule excedeed maximum dependency edge count. "
+                    + "Count: %s. Limit is %s. This limit is imposed on analysis test rules which "
+                    + "use analysis_test_transition attribute transitions. Exceeding this limit "
+                    + "indicates either the analysis_test has too many dependencies, or the "
+                    + "underlying toolchains may be large. Try decreasing the number of test "
+                    + "dependencies, (Analysis tests should not be very large!) or, if possible, "
+                    + "try not using configuration transitions. If underlying toolchain size is "
+                    + "to blame, it might be worth considering increasing "
+                    + "--analysis_testing_deps_limit. (Beware, however, that large values of "
+                    + "this flag can lead to no safeguards against giant "
+                    + "test suites that can lead to Out Of Memory exceptions in the build server.)",
+                depCount, ruleContext.getConfiguration().analysisTestingDepsLimit()));
+        return null;
+      }
+    }
+
     TransitiveInfoProviderMap providers = providersBuilder.build();
+
+    if (ruleContext.getRule().isAnalysisTest()) {
+      // If the target is an analysis test that returned AnalysisTestResultInfo, register a
+      // test pass/fail action on behalf of the target.
+      AnalysisTestResultInfo testResultInfo =
+          providers.get(AnalysisTestResultInfo.SKYLARK_CONSTRUCTOR);
+
+      if (testResultInfo == null) {
+        ruleContext.ruleError(
+            "rules with analysis_test=true must return an instance of AnalysisTestResultInfo");
+        return null;
+      }
+
+      AnalysisTestActionBuilder.writeAnalysisTestAction(ruleContext, testResultInfo);
+    }
+
     AnalysisEnvironment analysisEnvironment = ruleContext.getAnalysisEnvironment();
-    GeneratingActions generatingActions =
-        Actions.filterSharedActionsAndThrowActionConflict(
-            analysisEnvironment.getActionKeyContext(), analysisEnvironment.getRegisteredActions());
+    GeneratingActions generatingActions = Actions.filterSharedActionsAndThrowActionConflict(
+          analysisEnvironment.getActionKeyContext(), analysisEnvironment.getRegisteredActions());
     return new RuleConfiguredTarget(
         ruleContext,
         providers,
         generatingActions.getActions(),
         generatingActions.getGeneratingActionIndex());
+  }
+
+  private int transitiveDepCount() {
+    int depCount = 0;
+
+    for (String attributeName : ruleContext.attributes().getAttributeNames()) {
+      Type<?> attributeType =
+          ruleContext.attributes().getAttributeDefinition(attributeName).getType();
+      if (attributeType.getLabelClass() == LabelClass.DEPENDENCY) {
+        for (DepCountInfo depCountInfo :
+            ruleContext.getPrerequisites(attributeName, Mode.DONT_CHECK, DepCountInfo.class)) {
+          depCount += depCountInfo.getNumDepEdges() + 1;
+        }
+      }
+    }
+    return depCount;
   }
 
   /**
@@ -206,7 +274,10 @@ public final class RuleConfiguredTargetBuilder {
     }
     TestActionBuilder testActionBuilder =
         new TestActionBuilder(ruleContext)
-            .setInstrumentedFiles(providersBuilder.getProvider(InstrumentedFilesProvider.class));
+            .setInstrumentedFiles(
+                (InstrumentedFilesInfo)
+                    providersBuilder.getProvider(
+                        InstrumentedFilesInfo.SKYLARK_CONSTRUCTOR.getKey()));
 
     TestEnvironmentInfo environmentProvider =
         (TestEnvironmentInfo)
@@ -277,7 +348,8 @@ public final class RuleConfiguredTargetBuilder {
     return this;
   }
 
-  private <T extends TransitiveInfoProvider> void maybeAddSkylarkLegacyProvider(Info value) {
+  private <T extends TransitiveInfoProvider> void maybeAddSkylarkLegacyProvider(
+      InfoInterface value) {
     if (value.getProvider() instanceof NativeProvider.WithLegacySkylarkName) {
       addSkylarkTransitiveInfo(
           ((NativeProvider.WithLegacySkylarkName) value.getProvider()).getSkylarkName(), value);
@@ -300,12 +372,12 @@ public final class RuleConfiguredTargetBuilder {
    * Adds a "declared provider" defined in Skylark to the rule. Use this method for declared
    * providers defined in Skyark.
    *
-   * <p>Has special handling for {@link OutputGroupInfo}: that provider is not added from
-   * Skylark directly, instead its outpuyt groups are added.
+   * <p>Has special handling for {@link OutputGroupInfo}: that provider is not added from Skylark
+   * directly, instead its output groups are added.
    *
-   * <p>Use {@link #addNativeDeclaredProvider(Info)} in definitions of native rules.
+   * <p>Use {@link #addNativeDeclaredProvider(InfoInterface)} in definitions of native rules.
    */
-  public RuleConfiguredTargetBuilder addSkylarkDeclaredProvider(Info provider)
+  public RuleConfiguredTargetBuilder addSkylarkDeclaredProvider(InfoInterface provider)
       throws EvalException {
     Provider constructor = provider.getProvider();
     if (!constructor.isExported()) {
@@ -327,10 +399,10 @@ public final class RuleConfiguredTargetBuilder {
    * Adds "declared providers" defined in native code to the rule. Use this method for declared
    * providers in definitions of native rules.
    *
-   * <p>Use {@link #addSkylarkDeclaredProvider(Info)} for Skylark rule implementations.
+   * <p>Use {@link #addSkylarkDeclaredProvider(InfoInterface)} for Skylark rule implementations.
    */
-  public RuleConfiguredTargetBuilder addNativeDeclaredProviders(Iterable<Info> providers) {
-    for (Info provider : providers) {
+  public RuleConfiguredTargetBuilder addNativeDeclaredProviders(Iterable<InfoInterface> providers) {
+    for (InfoInterface provider : providers) {
       addNativeDeclaredProvider(provider);
     }
     return this;
@@ -340,9 +412,9 @@ public final class RuleConfiguredTargetBuilder {
    * Adds a "declared provider" defined in native code to the rule. Use this method for declared
    * providers in definitions of native rules.
    *
-   * <p>Use {@link #addSkylarkDeclaredProvider(Info)} for Skylark rule implementations.
+   * <p>Use {@link #addSkylarkDeclaredProvider(InfoInterface)} for Skylark rule implementations.
    */
-  public RuleConfiguredTargetBuilder addNativeDeclaredProvider(Info provider) {
+  public RuleConfiguredTargetBuilder addNativeDeclaredProvider(InfoInterface provider) {
     Provider constructor = provider.getProvider();
     Preconditions.checkState(constructor.isExported());
     providersBuilder.put(provider);
@@ -422,5 +494,23 @@ public final class RuleConfiguredTargetBuilder {
       ImmutableSet<ActionAnalysisMetadata> actions) {
     this.actionsWithoutExtraAction = actions;
     return this;
+  }
+
+  /**
+   * Contains a count of transitive dependency edges traversed by the target which propagated this
+   * object.
+   *
+   * <p>This is automatically provided by all targets which are being evaluated in analysis testing.
+   */
+  private static class DepCountInfo implements TransitiveInfoProvider {
+    private final int numDepEdges;
+
+    public DepCountInfo(int numDepEdges) {
+      this.numDepEdges = numDepEdges;
+    }
+
+    public int getNumDepEdges() {
+      return numDepEdges;
+    }
   }
 }

@@ -31,6 +31,7 @@ import com.google.devtools.build.lib.skylarkbuildapi.apple.ObjcProviderApi;
 import com.google.devtools.build.lib.skylarkbuildapi.apple.XcodeConfigProviderApi;
 import com.google.devtools.build.lib.syntax.Environment;
 import com.google.devtools.build.lib.syntax.SkylarkDict;
+import com.google.devtools.build.lib.syntax.SkylarkList;
 import com.google.devtools.build.skydoc.fakebuildapi.FakeProviderApi;
 import com.google.devtools.build.skydoc.fakebuildapi.FakeSkylarkAspect;
 import com.google.devtools.build.skydoc.fakebuildapi.FakeSplitTransitionProvider;
@@ -113,7 +114,10 @@ public class FakeAppleCommon implements AppleCommonApi<
 
   @Override
   public StructApi linkMultiArchBinary(
-      SkylarkRuleContextApi skylarkRuleContext, Environment environment) {
+      SkylarkRuleContextApi skylarkRuleContext,
+      SkylarkList<String> extraLinkopts,
+      SkylarkList<? extends FileApi> extraLinkInputs,
+      Environment environment) {
     return new FakeStructApi();
   }
 
@@ -128,7 +132,7 @@ public class FakeAppleCommon implements AppleCommonApi<
   }
 
   @Override
-  public AppleDynamicFrameworkInfoApi<?, ?> newDynamicFrameworkProvider(FileApi dylibBinary,
+  public AppleDynamicFrameworkInfoApi<?, ?> newDynamicFrameworkProvider(Object dylibBinary,
       ObjcProviderApi<?> depsObjcProvider, Object dynamicFrameworkDirs,
       Object dynamicFrameworkFiles) {
     return new FakeAppleDynamicFrameworkInfo();

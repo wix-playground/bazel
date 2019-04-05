@@ -16,20 +16,18 @@ package com.google.devtools.build.lib.rules.cpp;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableListMultimap;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Maps;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.CompilationMode;
-import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.cmdline.Label;
-import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
+import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.rules.cpp.CppActionConfigs.CppPlatform;
-import com.google.devtools.build.lib.rules.cpp.Link.LinkingMode;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
+import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig;
@@ -37,17 +35,12 @@ import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.CTool
 import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.CToolchain.ArtifactNamePattern;
 import com.google.devtools.build.lib.view.config.crosstool.CrosstoolConfig.ToolPath;
 import com.google.protobuf.Descriptors.FieldDescriptor;
-import com.google.protobuf.TextFormat;
-import com.google.protobuf.TextFormat.ParseException;
-import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import javax.annotation.Nullable;
 
 /**
  * Information describing the C++ compiler derived from the CToolchain proto.
@@ -58,8 +51,6 @@ import javax.annotation.Nullable;
 @AutoCodec
 @Immutable
 public final class CppToolchainInfo {
-  private final CcToolchainConfigInfo ccToolchainConfigInfo;
-  private final PathFragment crosstoolTopPathFragment;
   private final String toolchainIdentifier;
   private final CcToolchainFeatures toolchainFeatures;
 
@@ -76,189 +67,58 @@ public final class CppToolchainInfo {
 
   private final String targetLibc;
   private final String hostSystemName;
-  private final ImmutableList<String> dynamicLibraryLinkFlags;
-  private final ImmutableList<String> legacyLinkOptions;
-  private final ImmutableListMultimap<LinkingMode, String> legacyLinkOptionsFromLinkingMode;
-  private final ImmutableListMultimap<CompilationMode, String> legacyLinkOptionsFromCompilationMode;
-  private final ImmutableList<String> testOnlyLinkFlags;
-  private final ImmutableList<String> ldOptionsForEmbedding;
-  private final ImmutableList<String> objCopyOptionsForEmbedding;
 
   private final Label ccToolchainLabel;
-  private final Label staticRuntimeLibsLabel;
-  private final Label dynamicRuntimeLibsLabel;
   private final String solibDirectory;
   private final String abi;
   private final String targetSystemName;
 
   private final ImmutableMap<String, String> additionalMakeVariables;
-
-  private final ImmutableList<String> crosstoolCompilerFlags;
-  private final ImmutableList<String> crosstoolCxxFlags;
-
-  private final ImmutableListMultimap<CompilationMode, String> cFlagsByCompilationMode;
-  private final ImmutableListMultimap<CompilationMode, String> cxxFlagsByCompilationMode;
-
-  private final ImmutableList<String> unfilteredCompilerFlags;
-
-  private final boolean supportsFission;
-  private final boolean supportsStartEndLib;
-  private final boolean supportsEmbeddedRuntimes;
-  private final boolean supportsDynamicLinker;
-  private final boolean supportsInterfaceSharedObjects;
-  private final boolean supportsGoldLinker;
-  private final boolean toolchainNeedsPic;
+  // TODO(b/65151735): Remove when cc_flags is entirely from features.
+  private final String legacyCcFlagsMakeVariable;
 
   /**
    * Creates a CppToolchainInfo from CROSSTOOL info encapsulated in {@link CcToolchainConfigInfo}.
    */
   public static CppToolchainInfo create(
-      PathFragment crosstoolTopPathFragment,
       Label toolchainLabel,
       CcToolchainConfigInfo ccToolchainConfigInfo,
-      boolean disableLegacyCrosstoolFields,
-      boolean disableCompilationModeFlags,
-      boolean disableLinkingModeFlags)
-      throws InvalidConfigurationException {
+      boolean disableGenruleCcToolchainDependency)
+      throws EvalException {
     ImmutableMap<String, PathFragment> toolPaths =
-        computeToolPaths(ccToolchainConfigInfo, crosstoolTopPathFragment);
+        computeToolPaths(ccToolchainConfigInfo, getToolsDirectory(toolchainLabel));
     PathFragment defaultSysroot =
         CppConfiguration.computeDefaultSysroot(ccToolchainConfigInfo.getBuiltinSysroot());
 
-    ImmutableListMultimap.Builder<LinkingMode, String> linkOptionsFromLinkingModeBuilder =
-        ImmutableListMultimap.builder();
-
-    boolean haveDynamicMode = false;
-    if (!disableLinkingModeFlags) {
-      // If a toolchain supports dynamic libraries at all, there must be at least one
-      // of the following:
-      // - a "DYNAMIC" section in linking_mode_flags (even if no flags are needed)
-      // - a non-empty list in one of the dynamicLibraryLinkerFlag fields
-      // If none of the above contain data, then the toolchain can't do dynamic linking.
-      haveDynamicMode = ccToolchainConfigInfo.hasDynamicLinkingModeFlags();
-      linkOptionsFromLinkingModeBuilder.putAll(
-          LinkingMode.DYNAMIC, ccToolchainConfigInfo.getDynamicLinkingModeFlags());
-      linkOptionsFromLinkingModeBuilder.putAll(
-          LinkingMode.LEGACY_FULLY_STATIC, ccToolchainConfigInfo.getFullyStaticLinkingModeFlags());
-      linkOptionsFromLinkingModeBuilder.putAll(
-          LinkingMode.STATIC, ccToolchainConfigInfo.getMostlyStaticLinkingModeFlags());
-      linkOptionsFromLinkingModeBuilder.putAll(
-          LinkingMode.LEGACY_MOSTLY_STATIC_LIBRARIES,
-          ccToolchainConfigInfo.getMostlyStaticLibrariesLinkingModeFlags());
-    }
-
-    ImmutableListMultimap.Builder<CompilationMode, String> cFlagsBuilder =
-        ImmutableListMultimap.builder();
-    ImmutableListMultimap.Builder<CompilationMode, String> cxxFlagsBuilder =
-        ImmutableListMultimap.builder();
-    ImmutableListMultimap.Builder<CompilationMode, String> linkOptionsFromCompilationModeBuilder =
-        ImmutableListMultimap.builder();
-
-    if (!disableCompilationModeFlags) {
-      cFlagsBuilder.putAll(
-          importCompilationMode(CrosstoolConfig.CompilationMode.OPT),
-          ccToolchainConfigInfo.getOptCompilationModeCompilerFlags());
-      cxxFlagsBuilder.putAll(
-          importCompilationMode(CrosstoolConfig.CompilationMode.OPT),
-          ccToolchainConfigInfo.getOptCompilationModeCxxFlags());
-      linkOptionsFromCompilationModeBuilder.putAll(
-          importCompilationMode(CrosstoolConfig.CompilationMode.OPT),
-          ccToolchainConfigInfo.getOptCompilationModeLinkerFlags());
-      cFlagsBuilder.putAll(
-          importCompilationMode(CrosstoolConfig.CompilationMode.DBG),
-          ccToolchainConfigInfo.getDbgCompilationModeCompilerFlags());
-      cxxFlagsBuilder.putAll(
-          importCompilationMode(CrosstoolConfig.CompilationMode.DBG),
-          ccToolchainConfigInfo.getDbgCompilationModeCxxFlags());
-      linkOptionsFromCompilationModeBuilder.putAll(
-          importCompilationMode(CrosstoolConfig.CompilationMode.DBG),
-          ccToolchainConfigInfo.getDbgCompilationModeLinkerFlags());
-      cFlagsBuilder.putAll(
-          importCompilationMode(CrosstoolConfig.CompilationMode.FASTBUILD),
-          ccToolchainConfigInfo.getFastbuildCompilationModeCompilerFlags());
-      cxxFlagsBuilder.putAll(
-          importCompilationMode(CrosstoolConfig.CompilationMode.FASTBUILD),
-          ccToolchainConfigInfo.getFastbuildCompilationModeCxxFlags());
-      linkOptionsFromCompilationModeBuilder.putAll(
-          importCompilationMode(CrosstoolConfig.CompilationMode.FASTBUILD),
-          ccToolchainConfigInfo.getFastbuildCompilationModeLinkerFlags());
-    }
-
-    try {
-      return new CppToolchainInfo(
-          ccToolchainConfigInfo,
-          crosstoolTopPathFragment,
-          ccToolchainConfigInfo.getToolchainIdentifier(),
-          toolPaths,
-          ccToolchainConfigInfo.getCompiler(),
-          ccToolchainConfigInfo.getAbiLibcVersion(),
-          ccToolchainConfigInfo.getTargetCpu(),
-          ccToolchainConfigInfo.getCcTargetOs(),
-          ccToolchainConfigInfo.getCxxBuiltinIncludeDirectories(),
-          defaultSysroot,
-          // The runtime sysroot should really be set from --grte_top. However, currently libc has
-          // no way to set the sysroot. The CROSSTOOL file does set the runtime sysroot, in the
-          // builtin_sysroot field. This implies that you can not arbitrarily mix and match
-          // Crosstool and libc versions, you must always choose compatible ones.
-          defaultSysroot,
-          ccToolchainConfigInfo.getTargetLibc(),
-          ccToolchainConfigInfo.getHostSystemName(),
-          disableLegacyCrosstoolFields
-              ? ImmutableList.of()
-              : ccToolchainConfigInfo.getDynamicLibraryLinkerFlags(),
-          disableLegacyCrosstoolFields
-              ? ImmutableList.of()
-              : ccToolchainConfigInfo.getLinkerFlags(),
-          linkOptionsFromLinkingModeBuilder.build(),
-          linkOptionsFromCompilationModeBuilder.build(),
-          disableLegacyCrosstoolFields
-              ? ImmutableList.of()
-              : ccToolchainConfigInfo.getTestOnlyLinkerFlags(),
-          ccToolchainConfigInfo.getLdEmbedFlags(),
-          ccToolchainConfigInfo.getObjcopyEmbedFlags(),
-          toolchainLabel,
-          toolchainLabel.getRelativeWithRemapping(
-              !ccToolchainConfigInfo.getStaticRuntimesFilegroup().isEmpty()
-                  ? ccToolchainConfigInfo.getStaticRuntimesFilegroup()
-                  : "static-runtime-libs-" + ccToolchainConfigInfo.getTargetCpu(),
-              ImmutableMap.of()),
-          toolchainLabel.getRelativeWithRemapping(
-              !ccToolchainConfigInfo.getDynamicRuntimesFilegroup().isEmpty()
-                  ? ccToolchainConfigInfo.getDynamicRuntimesFilegroup()
-                  : "dynamic-runtime-libs-" + ccToolchainConfigInfo.getTargetCpu(),
-              ImmutableMap.of()),
-          "_solib_" + ccToolchainConfigInfo.getTargetCpu(),
-          ccToolchainConfigInfo.getAbiVersion(),
-          ccToolchainConfigInfo.getTargetSystemName(),
-          computeAdditionalMakeVariables(ccToolchainConfigInfo),
-          disableLegacyCrosstoolFields
-              ? ImmutableList.of()
-              : ccToolchainConfigInfo.getCompilerFlags(),
-          disableLegacyCrosstoolFields ? ImmutableList.of() : ccToolchainConfigInfo.getCxxFlags(),
-          cFlagsBuilder.build(),
-          cxxFlagsBuilder.build(),
-          disableLegacyCrosstoolFields
-              ? ImmutableList.of()
-              : ccToolchainConfigInfo.getUnfilteredCxxFlags(),
-          ccToolchainConfigInfo.supportsFission(),
-          ccToolchainConfigInfo.supportsStartEndLib(),
-          ccToolchainConfigInfo.supportsEmbeddedRuntimes(),
-          haveDynamicMode || !ccToolchainConfigInfo.getDynamicLibraryLinkerFlags().isEmpty(),
-          ccToolchainConfigInfo.supportsInterfaceSharedObjects(),
-          ccToolchainConfigInfo.supportsGoldLinker(),
-          ccToolchainConfigInfo.needsPic());
-    } catch (LabelSyntaxException e) {
-      // All of the above label.getRelativeWithRemapping() calls are valid labels, and the
-      // crosstool_top was already checked earlier in the process.
-      throw new AssertionError(e);
-    }
+    return new CppToolchainInfo(
+        ccToolchainConfigInfo.getToolchainIdentifier(),
+        new CcToolchainFeatures(ccToolchainConfigInfo, getToolsDirectory(toolchainLabel)),
+        toolPaths,
+        ccToolchainConfigInfo.getCompiler(),
+        ccToolchainConfigInfo.getAbiLibcVersion(),
+        ccToolchainConfigInfo.getTargetCpu(),
+        ccToolchainConfigInfo.getCcTargetOs(),
+        ccToolchainConfigInfo.getCxxBuiltinIncludeDirectories(),
+        defaultSysroot,
+        // The runtime sysroot should really be set from --grte_top. However, currently libc has
+        // no way to set the sysroot. The CROSSTOOL file does set the runtime sysroot, in the
+        // builtin_sysroot field. This implies that you can not arbitrarily mix and match
+        // Crosstool and libc versions, you must always choose compatible ones.
+        defaultSysroot,
+        ccToolchainConfigInfo.getTargetLibc(),
+        ccToolchainConfigInfo.getHostSystemName(),
+        toolchainLabel,
+        "_solib_" + ccToolchainConfigInfo.getTargetCpu(),
+        ccToolchainConfigInfo.getAbiVersion(),
+        ccToolchainConfigInfo.getTargetSystemName(),
+        computeAdditionalMakeVariables(ccToolchainConfigInfo, disableGenruleCcToolchainDependency),
+        computeLegacyCcFlagsMakeVariable(ccToolchainConfigInfo));
   }
 
   @AutoCodec.Instantiator
   CppToolchainInfo(
-      CcToolchainConfigInfo ccToolchainConfigInfo,
-      PathFragment crosstoolTopPathFragment,
       String toolchainIdentifier,
+      CcToolchainFeatures toolchainFeatures,
       ImmutableMap<String, PathFragment> toolPaths,
       String compiler,
       String abiGlibcVersion,
@@ -269,39 +129,16 @@ public final class CppToolchainInfo {
       PathFragment runtimeSysroot,
       String targetLibc,
       String hostSystemName,
-      ImmutableList<String> dynamicLibraryLinkFlags,
-      ImmutableList<String> legacyLinkOptions,
-      ImmutableListMultimap<LinkingMode, String> legacyLinkOptionsFromLinkingMode,
-      ImmutableListMultimap<CompilationMode, String> legacyLinkOptionsFromCompilationMode,
-      ImmutableList<String> testOnlyLinkFlags,
-      ImmutableList<String> ldOptionsForEmbedding,
-      ImmutableList<String> objCopyOptionsForEmbedding,
       Label ccToolchainLabel,
-      Label staticRuntimeLibsLabel,
-      Label dynamicRuntimeLibsLabel,
       String solibDirectory,
       String abi,
       String targetSystemName,
       ImmutableMap<String, String> additionalMakeVariables,
-      ImmutableList<String> crosstoolCompilerFlags,
-      ImmutableList<String> crosstoolCxxFlags,
-      ImmutableListMultimap<CompilationMode, String> cFlagsByCompilationMode,
-      ImmutableListMultimap<CompilationMode, String> cxxFlagsByCompilationMode,
-      ImmutableList<String> unfilteredCompilerFlags,
-      boolean supportsFission,
-      boolean supportsStartEndLib,
-      boolean supportsEmbeddedRuntimes,
-      boolean supportsDynamicLinker,
-      boolean supportsInterfaceSharedObjects,
-      boolean supportsGoldLinker,
-      boolean toolchainNeedsPic)
-      throws InvalidConfigurationException {
-    this.ccToolchainConfigInfo = ccToolchainConfigInfo;
-    this.crosstoolTopPathFragment = crosstoolTopPathFragment;
+      String legacyCcFlagsMakeVariable)
+      throws EvalException {
     this.toolchainIdentifier = toolchainIdentifier;
     // Since this field can be derived from `crosstoolInfo`, it is re-derived instead of serialized.
-    this.toolchainFeatures =
-        new CcToolchainFeatures(ccToolchainConfigInfo, crosstoolTopPathFragment);
+    this.toolchainFeatures = toolchainFeatures;
     this.toolPaths = toolPaths;
     this.compiler = compiler;
     this.abiGlibcVersion = abiGlibcVersion;
@@ -312,36 +149,12 @@ public final class CppToolchainInfo {
     this.runtimeSysroot = runtimeSysroot;
     this.targetLibc = targetLibc;
     this.hostSystemName = hostSystemName;
-    this.dynamicLibraryLinkFlags = dynamicLibraryLinkFlags;
-    this.legacyLinkOptions = legacyLinkOptions;
-    this.legacyLinkOptionsFromLinkingMode = legacyLinkOptionsFromLinkingMode;
-    this.legacyLinkOptionsFromCompilationMode = legacyLinkOptionsFromCompilationMode;
-    this.testOnlyLinkFlags = testOnlyLinkFlags;
-    this.ldOptionsForEmbedding = ldOptionsForEmbedding;
-    this.objCopyOptionsForEmbedding = objCopyOptionsForEmbedding;
     this.ccToolchainLabel = ccToolchainLabel;
-    this.staticRuntimeLibsLabel = staticRuntimeLibsLabel;
-    this.dynamicRuntimeLibsLabel = dynamicRuntimeLibsLabel;
     this.solibDirectory = solibDirectory;
     this.abi = abi;
     this.targetSystemName = targetSystemName;
     this.additionalMakeVariables = additionalMakeVariables;
-    this.crosstoolCompilerFlags = crosstoolCompilerFlags;
-    this.crosstoolCxxFlags = crosstoolCxxFlags;
-    this.cFlagsByCompilationMode = cFlagsByCompilationMode;
-    this.cxxFlagsByCompilationMode = cxxFlagsByCompilationMode;
-    this.unfilteredCompilerFlags = unfilteredCompilerFlags;
-    this.supportsFission = supportsFission;
-    this.supportsStartEndLib = supportsStartEndLib;
-    this.supportsEmbeddedRuntimes = supportsEmbeddedRuntimes;
-    this.supportsDynamicLinker =
-        supportsDynamicLinker
-            || toolchainFeatures
-                .getActivatableNames()
-                .contains(CppRuleClasses.DYNAMIC_LINKING_MODE);
-    this.supportsInterfaceSharedObjects = supportsInterfaceSharedObjects;
-    this.supportsGoldLinker = supportsGoldLinker;
-    this.toolchainNeedsPic = toolchainNeedsPic;
+    this.legacyCcFlagsMakeVariable = legacyCcFlagsMakeVariable;
   }
 
   @VisibleForTesting
@@ -352,7 +165,9 @@ public final class CppToolchainInfo {
   // TODO(bazel-team): Remove this once bazel supports all crosstool flags through
   // feature configuration, and all crosstools have been converted.
   public static CToolchain addLegacyFeatures(
-      CToolchain toolchain, PathFragment crosstoolTopPathFragment) {
+      CToolchain toolchain,
+      boolean doNotSplitLinkingCmdLine,
+      PathFragment crosstoolTopPathFragment) {
     CToolchain.Builder toolchainBuilder = CToolchain.newBuilder();
 
     Set<ArtifactCategory> definedCategories = new HashSet<>();
@@ -367,7 +182,8 @@ public final class CppToolchainInfo {
     }
 
     for (ArtifactCategory category : ArtifactCategory.values()) {
-      if (!definedCategories.contains(category) && category.getDefaultPrefix() != null
+      if (!definedCategories.contains(category)
+          && category.getDefaultPrefix() != null
           && category.getDefaultExtension() != null) {
         toolchainBuilder.addArtifactNamePattern(
             ArtifactNamePattern.newBuilder()
@@ -379,121 +195,102 @@ public final class CppToolchainInfo {
     }
 
     ImmutableSet<String> featureNames =
-        toolchain
-            .getFeatureList()
-            .stream()
+        toolchain.getFeatureList().stream()
             .map(feature -> feature.getName())
             .collect(ImmutableSet.toImmutableSet());
     if (!featureNames.contains(CppRuleClasses.NO_LEGACY_FEATURES)) {
-      try {
-        String gccToolPath = "DUMMY_GCC_TOOL";
-        String linkerToolPath = "DUMMY_LINKER_TOOL";
-        String arToolPath = "DUMMY_AR_TOOL";
-        String stripToolPath = "DUMMY_STRIP_TOOL";
-        for (ToolPath tool : toolchain.getToolPathList()) {
-          if (tool.getName().equals(CppConfiguration.Tool.GCC.getNamePart())) {
-            gccToolPath = tool.getPath();
-            linkerToolPath =
-                crosstoolTopPathFragment
-                    .getRelative(PathFragment.create(tool.getPath()))
-                    .getPathString();
-          }
-          if (tool.getName().equals(CppConfiguration.Tool.AR.getNamePart())) {
-            arToolPath = tool.getPath();
-          }
-          if (tool.getName().equals(CppConfiguration.Tool.STRIP.getNamePart())) {
-            stripToolPath = tool.getPath();
-          }
+      String gccToolPath = "DUMMY_GCC_TOOL";
+      String linkerToolPath = "DUMMY_LINKER_TOOL";
+      String arToolPath = "DUMMY_AR_TOOL";
+      String stripToolPath = "DUMMY_STRIP_TOOL";
+      for (ToolPath tool : toolchain.getToolPathList()) {
+        if (tool.getName().equals(CppConfiguration.Tool.GCC.getNamePart())) {
+          gccToolPath = tool.getPath();
+          linkerToolPath =
+              crosstoolTopPathFragment
+                  .getRelative(PathFragment.create(tool.getPath()))
+                  .getPathString();
         }
+        if (tool.getName().equals(CppConfiguration.Tool.AR.getNamePart())) {
+          arToolPath = tool.getPath();
+        }
+        if (tool.getName().equals(CppConfiguration.Tool.STRIP.getNamePart())) {
+          stripToolPath = tool.getPath();
+        }
+      }
 
-        // TODO(b/30109612): Remove fragile legacyCompileFlags shuffle once there are no legacy
-        // crosstools.
-        // Existing projects depend on flags from legacy toolchain fields appearing first on the
-        // compile command line. 'legacy_compile_flags' feature contains all these flags, and so it
-        // needs to appear before other features from {@link CppActionConfigs}.
-        CToolchain.Feature legacyCompileFlagsFeature =
-            toolchain
-                .getFeatureList()
-                .stream()
+      // TODO(b/30109612): Remove fragile legacyCompileFlags shuffle once there are no legacy
+      // crosstools.
+      // Existing projects depend on flags from legacy toolchain fields appearing first on the
+      // compile command line. 'legacy_compile_flags' feature contains all these flags, and so it
+      // needs to appear before other features from {@link CppActionConfigs}.
+      if (featureNames.contains(CppRuleClasses.LEGACY_COMPILE_FLAGS)) {
+        CToolchain.Feature legacyCompileFlags =
+            toolchain.getFeatureList().stream()
                 .filter(feature -> feature.getName().equals(CppRuleClasses.LEGACY_COMPILE_FLAGS))
                 .findFirst()
-                .orElse(null);
-        if (legacyCompileFlagsFeature != null) {
-          toolchainBuilder.addFeature(legacyCompileFlagsFeature);
-          toolchain = removeLegacyCompileFlagsFeatureFromToolchain(toolchain);
+                .get();
+        if (legacyCompileFlags != null) {
+          toolchainBuilder.addFeature(legacyCompileFlags);
         }
-
-        TextFormat.merge(
-            CppActionConfigs.getCppActionConfigs(
-                toolchain.getTargetLibc().equals("macosx") ? CppPlatform.MAC : CppPlatform.LINUX,
-                featureNames,
-                gccToolPath,
-                linkerToolPath,
-                arToolPath,
-                stripToolPath,
-                // This should be toolchain-based, rather than feature based, because
-                // it controls whether or not to declare the feature at all.
-                toolchain.getSupportsEmbeddedRuntimes(),
-                toolchain.getSupportsInterfaceSharedObjects()),
-            toolchainBuilder);
-      } catch (ParseException e) {
-        // Can only happen if we change the proto definition without changing our
-        // configuration above.
-        throw new RuntimeException(e);
       }
+      if (featureNames.contains(CppRuleClasses.DEFAULT_COMPILE_FLAGS)) {
+        CToolchain.Feature defaultCompileFlags =
+            toolchain.getFeatureList().stream()
+                .filter(feature -> feature.getName().equals(CppRuleClasses.DEFAULT_COMPILE_FLAGS))
+                .findFirst()
+                .get();
+        if (defaultCompileFlags != null) {
+          toolchainBuilder.addFeature(defaultCompileFlags);
+        }
+      }
+      toolchain = removeSpecialFeatureFromToolchain(toolchain);
+
+      CppPlatform platform =
+          toolchain.getTargetLibc().equals(CppActionConfigs.MACOS_TARGET_LIBC)
+              ? CppPlatform.MAC
+              : CppPlatform.LINUX;
+
+      toolchainBuilder.addAllActionConfig(
+          CppActionConfigs.getLegacyActionConfigs(
+              platform,
+              gccToolPath,
+              arToolPath,
+              stripToolPath,
+              toolchain.getSupportsInterfaceSharedObjects()));
+
+      toolchainBuilder.addAllFeature(
+          CppActionConfigs.getLegacyFeatures(
+              platform,
+              featureNames,
+              linkerToolPath,
+              toolchain.getSupportsEmbeddedRuntimes(),
+              toolchain.getSupportsInterfaceSharedObjects(),
+              doNotSplitLinkingCmdLine));
     }
 
     toolchainBuilder.mergeFrom(toolchain);
 
     if (!featureNames.contains(CppRuleClasses.NO_LEGACY_FEATURES)) {
-      try {
-        TextFormat.merge(
-            CppActionConfigs.getFeaturesToAppearLastInToolchain(featureNames), toolchainBuilder);
-      } catch (ParseException e) {
-        // Can only happen if we change the proto definition without changing our
-        // configuration above.
-        throw new RuntimeException(e);
-      }
+      toolchainBuilder.addAllFeature(
+          CppActionConfigs.getFeaturesToAppearLastInFeaturesList(
+              featureNames, doNotSplitLinkingCmdLine));
     }
+
     return toolchainBuilder.build();
   }
 
-  private static CToolchain removeLegacyCompileFlagsFeatureFromToolchain(CToolchain toolchain) {
+  private static CToolchain removeSpecialFeatureFromToolchain(CToolchain toolchain) {
     FieldDescriptor featuresFieldDescriptor = CToolchain.getDescriptor().findFieldByName("feature");
     return toolchain
         .toBuilder()
         .setField(
             featuresFieldDescriptor,
-            toolchain
-                .getFeatureList()
-                .stream()
+            toolchain.getFeatureList().stream()
                 .filter(feature -> !feature.getName().equals(CppRuleClasses.LEGACY_COMPILE_FLAGS))
+                .filter(feature -> !feature.getName().equals(CppRuleClasses.DEFAULT_COMPILE_FLAGS))
                 .collect(ImmutableList.toImmutableList()))
         .build();
-  }
-
-  /** @see CcToolchainProvider#getLegacyLinkOptions(). */
-  public ImmutableList<String> getLegacyLinkOptions() {
-    return legacyLinkOptions;
-  }
-
-  /** @see CcToolchainProvider#configureAllLegacyLinkOptions(CompilationMode, LinkingMode). */
-  ImmutableList<String> configureAllLegacyLinkOptions(
-      CompilationMode compilationMode, LinkingMode linkingMode) {
-    List<String> result = new ArrayList<>();
-    result.addAll(legacyLinkOptions);
-
-    result.addAll(legacyLinkOptionsFromCompilationMode.get(compilationMode));
-    result.addAll(legacyLinkOptionsFromLinkingMode.get(linkingMode));
-    return ImmutableList.copyOf(result);
-  }
-
-  /**
-   * Returns the {@link CcToolchainConfigInfo} instance that was used to initialize this {@link
-   * CppToolchainInfo}.
-   */
-  public CcToolchainConfigInfo getCcToolchainConfigInfo() {
-    return ccToolchainConfigInfo;
   }
 
   /**
@@ -502,11 +299,6 @@ public final class CppToolchainInfo {
    */
   public String getToolchainIdentifier() {
     return toolchainIdentifier;
-  }
-
-  /** Returns the path of the crosstool. */
-  public PathFragment getCrosstoolTopPathFragment() {
-    return crosstoolTopPathFragment;
   }
 
   /** Returns the system name which is required by the toolchain to run. */
@@ -557,22 +349,6 @@ public final class CppToolchainInfo {
   }
 
   /**
-   * Returns a label that references the library files needed to statically link the C++ runtime
-   * (i.e. libgcc.a, libgcc_eh.a, libstdc++.a) for the target architecture.
-   */
-  public Label getStaticRuntimeLibsLabel() {
-    return supportsEmbeddedRuntimes() ? staticRuntimeLibsLabel : null;
-  }
-
-  /**
-   * Returns a label that references the library files needed to dynamically link the C++ runtime
-   * (i.e. libgcc_s.so, libstdc++.so) for the target architecture.
-   */
-  public Label getDynamicRuntimeLibsLabel() {
-    return supportsEmbeddedRuntimes() ? dynamicRuntimeLibsLabel : null;
-  }
-
-  /**
    * Returns the abi we're using, which is a gcc version. E.g.: "gcc-3.4". Note that in practice we
    * might be using gcc-3.4 as ABI even when compiling with gcc-4.1.0, because ABIs are backwards
    * compatible.
@@ -601,54 +377,6 @@ public final class CppToolchainInfo {
     return toolchainFeatures;
   }
 
-  /** Returns whether the toolchain supports the gold linker. */
-  public boolean supportsGoldLinker() {
-    return supportsGoldLinker;
-  }
-
-  /** Returns whether the toolchain supports the --start-lib/--end-lib options. */
-  public boolean supportsStartEndLib() {
-    return supportsStartEndLib;
-  }
-
-  /** Returns whether the toolchain supports dynamic linking. */
-  public boolean supportsDynamicLinker() {
-    return supportsDynamicLinker;
-  }
-
-  /**
-   * Returns whether this toolchain supports interface shared objects.
-   *
-   * <p>Should be true if this toolchain generates ELF objects.
-   */
-  public boolean supportsInterfaceSharedObjects() {
-    return supportsInterfaceSharedObjects;
-  }
-
-  /**
-   * Returns whether the toolchain supports linking C/C++ runtime libraries supplied inside the
-   * toolchain distribution.
-   */
-  public boolean supportsEmbeddedRuntimes() {
-    return supportsEmbeddedRuntimes;
-  }
-
-  /**
-   * Returns whether the toolchain supports "Fission" C++ builds, i.e. builds where compilation
-   * partitions object code and debug symbols into separate output files.
-   */
-  public boolean supportsFission() {
-    return supportsFission;
-  }
-
-  /**
-   * Returns whether shared libraries must be compiled with position independent code on this
-   * platform.
-   */
-  public boolean toolchainNeedsPic() {
-    return toolchainNeedsPic;
-  }
-
   /**
    * Returns the run time sysroot, which is where the dynamic linker and system libraries are found
    * at runtime. This is usually an absolute path. If the toolchain compiler does not support
@@ -656,38 +384,6 @@ public final class CppToolchainInfo {
    */
   public PathFragment getRuntimeSysroot() {
     return runtimeSysroot;
-  }
-
-  /**
-   * Returns link options for the specified flag list, combined with universal options for all
-   * shared libraries (regardless of link staticness).
-   */
-  ImmutableList<String> getSharedLibraryLinkOptions(ImmutableList<String> flags) {
-    return ImmutableList.<String>builder().addAll(flags).addAll(dynamicLibraryLinkFlags).build();
-  }
-
-  /**
-   * Returns test-only link options such that certain test-specific features can be configured
-   * separately (e.g. lazy binding).
-   */
-  public ImmutableList<String> getTestOnlyLinkOptions() {
-    return testOnlyLinkFlags;
-  }
-
-  /**
-   * Returns the list of options to be used with 'objcopy' when converting binary files to object
-   * files, or {@code null} if this operation is not supported.
-   */
-  public ImmutableList<String> getObjCopyOptionsForEmbedding() {
-    return objCopyOptionsForEmbedding;
-  }
-
-  /**
-   * Returns the list of options to be used with 'ld' when converting binary files to object files,
-   * or {@code null} if this operation is not supported.
-   */
-  public ImmutableList<String> getLdOptionsForEmbedding() {
-    return ldOptionsForEmbedding;
   }
 
   /**
@@ -700,6 +396,17 @@ public final class CppToolchainInfo {
    */
   public ImmutableMap<String, String> getAdditionalMakeVariables() {
     return additionalMakeVariables;
+  }
+
+  /**
+   * Returns the legacy value of the CC_FLAGS Make variable.
+   *
+   * @deprecated Use the CC_FLAGS from feature configuration instead.
+   */
+  // TODO(b/65151735): Remove when cc_flags is entirely from features.
+  @Deprecated
+  public String getLegacyCcFlagsMakeVariable() {
+    return legacyCcFlagsMakeVariable;
   }
 
   public final boolean isLLVMCompiler() {
@@ -739,52 +446,43 @@ public final class CppToolchainInfo {
     return rawBuiltInIncludeDirectories;
   }
 
-  /** Returns compiler flags for C/C++/Asm compilation. */
-  public ImmutableList<String> getCompilerFlags() {
-    return crosstoolCompilerFlags;
-  }
-
-  /** Returns additional compiler flags for C++ compilation. */
-  public ImmutableList<String> getCxxFlags() {
-    return crosstoolCxxFlags;
-  }
-
-  /** Returns compiler flags for C compilation by compilation mode. */
-  public ImmutableListMultimap<CompilationMode, String> getCFlagsByCompilationMode() {
-    return cFlagsByCompilationMode;
-  }
-
-  /** Returns compiler flags for C++ compilation, by compilation mode. */
-  public ImmutableListMultimap<CompilationMode, String> getCxxFlagsByCompilationMode() {
-    return cxxFlagsByCompilationMode;
-  }
-
-  /** Returns unfiltered compiler options for C++ from this toolchain. */
-  public ImmutableList<String> getUnfilteredCompilerOptions(@Nullable PathFragment sysroot) {
-    if (sysroot == null) {
-      return unfilteredCompilerFlags;
-    }
-    return ImmutableList.<String>builder()
-        .add("--sysroot=" + sysroot)
-        .addAll(unfilteredCompilerFlags)
-        .build();
-  }
-
   private static ImmutableMap<String, String> computeAdditionalMakeVariables(
-      CcToolchainConfigInfo ccToolchainConfigInfo) {
+      CcToolchainConfigInfo ccToolchainConfigInfo, boolean disableGenruleCcToolchainDependency) {
     Map<String, String> makeVariablesBuilder = new HashMap<>();
     // The following are to be used to allow some build rules to avoid the limits on stack frame
-    // sizes and variable-length arrays. Ensure that these are always set.
+    // sizes and variable-length arrays.
+    // These variables are initialized here, but may be overridden by the getMakeVariables() checks.
     makeVariablesBuilder.put("STACK_FRAME_UNLIMITED", "");
     makeVariablesBuilder.put(CppConfiguration.CC_FLAGS_MAKE_VARIABLE_NAME, "");
     for (Pair<String, String> variable : ccToolchainConfigInfo.getMakeVariables()) {
       makeVariablesBuilder.put(variable.getFirst(), variable.getSecond());
     }
+
+    if (disableGenruleCcToolchainDependency) {
+      makeVariablesBuilder.remove(CppConfiguration.CC_FLAGS_MAKE_VARIABLE_NAME);
+    }
+
     return ImmutableMap.copyOf(makeVariablesBuilder);
   }
 
+  // TODO(b/65151735): Remove when cc_flags is entirely from features.
+  private static String computeLegacyCcFlagsMakeVariable(
+      CcToolchainConfigInfo ccToolchainConfigInfo) {
+    String legacyCcFlags = "";
+    // Needs to ensure the last value with the name is used, to match the previous logic in
+    // computeAdditionalMakeVariables.
+    for (Pair<String, String> variable : ccToolchainConfigInfo.getMakeVariables()) {
+      if (variable.getFirst().equals(CppConfiguration.CC_FLAGS_MAKE_VARIABLE_NAME)) {
+        legacyCcFlags = variable.getSecond();
+      }
+    }
+
+    return legacyCcFlags;
+  }
+
   private static ImmutableMap<String, PathFragment> computeToolPaths(
-      CcToolchainConfigInfo ccToolchainConfigInfo, PathFragment crosstoolTopPathFragment) {
+      CcToolchainConfigInfo ccToolchainConfigInfo, PathFragment crosstoolTopPathFragment)
+      throws EvalException {
     Map<String, PathFragment> toolPathsCollector = Maps.newHashMap();
     for (Pair<String, String> tool : ccToolchainConfigInfo.getToolPaths()) {
       String pathStr = tool.getSecond();
@@ -807,8 +505,8 @@ public final class CppToolchainInfo {
               EnumSet.allOf(CppConfiguration.Tool.class),
               tool -> {
                 if (tool == CppConfiguration.Tool.DWP) {
-                  // When fission is unsupported, don't check for the dwp tool.
-                  return ccToolchainConfigInfo.supportsFission();
+                  // TODO(hlopko): check dwp tool in analysis when per_object_debug_info is enabled.
+                  return false;
                 } else if (tool == CppConfiguration.Tool.LLVM_PROFDATA) {
                   // TODO(tmsriram): Fix this to check if this is a llvm crosstool
                   // and return true.  This needs changes to crosstool_config.proto.
@@ -823,8 +521,8 @@ public final class CppToolchainInfo {
               });
       for (CppConfiguration.Tool tool : neededTools) {
         if (!toolPathsCollector.containsKey(tool.getNamePart())) {
-          throw new IllegalArgumentException(
-              "Tool path for '" + tool.getNamePart() + "' is missing");
+          throw new EvalException(
+              Location.BUILTIN, "Tool path for '" + tool.getNamePart() + "' is missing");
         }
       }
     }
@@ -834,5 +532,13 @@ public final class CppToolchainInfo {
   private static PathFragment getToolPathFragment(
       ImmutableMap<String, PathFragment> toolPaths, CppConfiguration.Tool tool) {
     return toolPaths.get(tool.getNamePart());
+  }
+
+  public PathFragment getToolsDirectory() {
+    return getToolsDirectory(ccToolchainLabel);
+  }
+
+  static PathFragment getToolsDirectory(Label ccToolchainLabel) {
+    return ccToolchainLabel.getPackageIdentifier().getPathUnderExecRoot();
   }
 }

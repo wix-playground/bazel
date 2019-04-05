@@ -19,6 +19,7 @@ import com.google.devtools.build.lib.clock.JavaClock;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.ProfilerTask;
+import com.google.devtools.build.lib.vfs.DigestHashFunction.DefaultHashFunctionNotSetException;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
@@ -52,8 +53,8 @@ public class JavaIoFileSystem extends AbstractFileSystemWithCustomStat {
   protected static final String ERR_NO_SUCH_FILE_OR_DIR = " (No such file or directory)";
   protected static final String ERR_NOT_A_DIRECTORY = " (Not a directory)";
 
-  public JavaIoFileSystem() {
-    this(new JavaClock());
+  public JavaIoFileSystem() throws DefaultHashFunctionNotSetException {
+    this.clock = new JavaClock();
   }
 
   public JavaIoFileSystem(DigestHashFunction hashFunction) {
@@ -62,7 +63,8 @@ public class JavaIoFileSystem extends AbstractFileSystemWithCustomStat {
   }
 
   @VisibleForTesting
-  JavaIoFileSystem(Clock clock) {
+  JavaIoFileSystem(Clock clock, DigestHashFunction hashFunction) {
+    super(hashFunction);
     this.clock = clock;
   }
 

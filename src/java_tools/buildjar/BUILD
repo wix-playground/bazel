@@ -10,7 +10,6 @@ filegroup(
         "//src/java_tools/buildjar/java/com/google/devtools/build/java/bazel:srcs",
         "//src/java_tools/buildjar/java/com/google/devtools/build/java/turbine:srcs",
         "//src/java_tools/buildjar/javatests/com/google/devtools/build/buildjar:srcs",
-        "//src/java_tools/buildjar/javatests/com/google/devtools/build/java/bazel:srcs",
         "//src/java_tools/buildjar/javatests/com/google/devtools/build/java/turbine:srcs",
     ],
     visibility = ["//:__subpackages__"],
@@ -19,6 +18,7 @@ filegroup(
 package_group(
     name = "buildjar_package_group",
     packages = [
+        "//src/...",
         "//src/java_tools/buildjar/...",
         "//src/tools/android/...",
     ],
@@ -39,16 +39,6 @@ java_binary(
 )
 
 filegroup(
-    name = "JavaBuilderDeploy",
-    srcs = [":JavaBuilder_deploy.jar"],
-    tags = ["manual"],
-    visibility = [
-        ":buildjar_package_group",
-        "//src:__pkg__",
-    ],
-)
-
-filegroup(
     name = "bootstrap_VanillaJavaBuilder_deploy.jar",
     srcs = ["//src/java_tools/buildjar/java/com/google/devtools/build/buildjar:bootstrap_VanillaJavaBuilder_deploy.jar"],
     tags = ["manual"],
@@ -60,14 +50,6 @@ filegroup(
     srcs = ["//src/java_tools/buildjar/java/com/google/devtools/build/buildjar/genclass:bootstrap_genclass_deploy.jar"],
     tags = ["manual"],
     visibility = ["//visibility:public"],
-)
-
-java_library(
-    name = "BazelJavaCompiler",
-    visibility = ["//visibility:public"],
-    exports = [
-        "//src/java_tools/buildjar/java/com/google/devtools/build/java/bazel:BazelJavaCompiler",
-    ],
 )
 
 # This toolchain is used to bootstrap Bazel.

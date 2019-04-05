@@ -43,6 +43,7 @@ static constexpr const char* JAR_BIN_PATH = "jar_bin_path";
 static constexpr const char* CLASSPATH = "classpath";
 static constexpr const char* JAVA_START_CLASS = "java_start_class";
 static constexpr const char* JVM_FLAGS = "jvm_flags";
+static constexpr const char* WINDOWS_STYLE_ESCAPE_JVM_FLAGS = "escape_jvmflags";
 
 // Check if a string start with a certain prefix.
 // If it's true, store the substring without the prefix in value.
@@ -103,7 +104,7 @@ vector<wstring> JavaBinaryLauncher::ProcessesCommandLine() {
   vector<wstring> args;
   bool first = 1;
   for (const auto& arg : this->GetCommandlineArguments()) {
-    // Skip the first arugment.
+    // Skip the first argument.
     if (first) {
       first = 0;
       continue;
@@ -247,8 +248,10 @@ wstring JavaBinaryLauncher::CreateClasspathJar(const wstring& classpath) {
   }
 
   wstring rand_id = L"-" + GetRandomStr(10);
+  // Enable long path support for jar_manifest_file_path.
   wstring jar_manifest_file_path =
       binary_base_path + rand_id + L".jar_manifest";
+  blaze_util::AddUncPrefixMaybe(&jar_manifest_file_path);
   wofstream jar_manifest_file(jar_manifest_file_path);
   jar_manifest_file << L"Manifest-Version: 1.0\n";
   // No line in the MANIFEST.MF file may be longer than 72 bytes.
@@ -262,6 +265,10 @@ wstring JavaBinaryLauncher::CreateClasspathJar(const wstring& classpath) {
     jar_manifest_file << manifest_classpath_str.substr(i, 71) << "\n";
   }
   jar_manifest_file.close();
+  if (jar_manifest_file.fail()) {
+    die(L"Couldn't write jar manifest file: %s",
+        jar_manifest_file_path.c_str());
+  }
 
   // Create the command for generating classpath jar.
   wstring manifest_jar_path = binary_base_path + rand_id + L"-classpath.jar";
@@ -294,7 +301,7 @@ ExitCode JavaBinaryLauncher::Launch() {
 
   // Print Java binary path if needed
   wstring java_bin = this->Rlocation(this->GetLaunchInfoByKey(JAVA_BIN_PATH),
-                                     /*need_workspace_name =*/false);
+                                     /*has_workspace_name =*/true);
   if (this->print_javabin ||
       this->GetLaunchInfoByKey(JAVA_START_CLASS) == L"--print_javabin") {
     wprintf(L"%s\n", java_bin.c_str());
@@ -353,7 +360,7 @@ ExitCode JavaBinaryLauncher::Launch() {
     jvm_flags.push_back(flag);
   }
   wstringstream jvm_flags_launch_info_ss(this->GetLaunchInfoByKey(JVM_FLAGS));
-  while (getline(jvm_flags_launch_info_ss, flag, L' ')) {
+  while (getline(jvm_flags_launch_info_ss, flag, L'\t')) {
     jvm_flags.push_back(flag);
   }
 
@@ -397,16 +404,20 @@ ExitCode JavaBinaryLauncher::Launch() {
   }
   // Add java start class
   arguments.push_back(this->GetLaunchInfoByKey(JAVA_START_CLASS));
-  // Add the remaininng arguements, they will be passed to the program.
+  // Add the remaininng arguments, they will be passed to the program.
   for (const auto& arg : remaining_args) {
     arguments.push_back(arg);
   }
 
+  wstring (*const escape_arg_func)(const wstring&) =
+      this->GetLaunchInfoByKey(WINDOWS_STYLE_ESCAPE_JVM_FLAGS) == L"1"
+          ? WindowsEscapeArg2
+          : WindowsEscapeArg;
+
   vector<wstring> escaped_arguments;
   // Quote the arguments if having spaces
   for (const auto& arg : arguments) {
-    escaped_arguments.push_back(
-        GetEscapedArgument(arg, /*escape_backslash = */ false));
+    escaped_arguments.push_back(escape_arg_func(arg));
   }
 
   ExitCode exit_code = this->LaunchProcess(java_bin, escaped_arguments);

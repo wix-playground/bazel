@@ -24,12 +24,14 @@ import static com.google.devtools.build.android.ziputils.LocalFileHeader.LOCFLG;
 import static com.google.devtools.build.android.ziputils.LocalFileHeader.LOCTIM;
 import static java.util.stream.Collectors.toList;
 
+import com.android.builder.core.VariantConfiguration;
 import com.android.builder.core.VariantType;
 import com.android.repository.Revision;
 import com.google.common.base.Joiner;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
+import com.google.common.collect.FluentIterable;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Streams;
@@ -47,6 +49,7 @@ import com.google.devtools.build.android.ziputils.EntryHandler;
 import com.google.devtools.build.android.ziputils.LocalFileHeader;
 import com.google.devtools.build.android.ziputils.ZipIn;
 import com.google.devtools.build.android.ziputils.ZipOut;
+import java.io.BufferedWriter;
 import java.io.IOException;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
@@ -55,7 +58,6 @@ import java.nio.file.StandardOpenOption;
 import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -76,10 +78,11 @@ public class ResourceLinker {
   /**
    * A file extension to indicate whether an apk is a proto or binary format.
    *
-   * The file extension is tremendously important to aapt2 -- it uses it determine how to
+   * <p>The file extension is tremendously important to aapt2 -- it uses it determine how to
    * interpret the contents of the file.
    */
   public static final String PROTO_EXTENSION = "-pb.apk";
+
   private boolean debug;
   private static final Predicate<DirectoryEntry> IS_FLAT_FILE =
       h -> h.getFilename().endsWith(".flat");
@@ -403,7 +406,7 @@ public class ResourceLinker {
                         : IS_FLAT_FILE.and(USE_DEFAULT)),
                 workingDirectory)
             // Never compress apks.
-            .add("-0", "apk")
+            .add("-0", ".apk")
             // Add custom no-compress extensions.
             .addRepeated("-0", uncompressedExtensions)
             // Filter by resource configuration type.
@@ -425,7 +428,7 @@ public class ResourceLinker {
 
   private Path combineApks(Path protoApk, Path binaryApk, Path workingDirectory)
       throws IOException {
-    // Linking against apk as a static library elides assets, amoung other things.
+    // Linking against apk as a static library elides assets, among other things.
     // So, copy the missing details to the new apk.
     profiler.startTask("combine");
     final Path combined = workingDirectory.resolve("combined.apk");
@@ -470,18 +473,29 @@ public class ResourceLinker {
     }
   }
 
+  private Path extractPackages(CompiledResources compiled) throws IOException {
+    Path packages = workingDirectory.resolve("packages");
+    try (BufferedWriter writer = Files.newBufferedWriter(packages, StandardOpenOption.CREATE_NEW)) {
+      for (CompiledResources resources : FluentIterable.from(include).append(compiled)) {
+        writer.append(VariantConfiguration.getManifestPackage(resources.getManifest().toFile()));
+        writer.newLine();
+      }
+    }
+    return packages;
+  }
+
   private Path extractAttributes(CompiledResources compiled) throws IOException {
     profiler.startTask("attributes");
     Path attributes = workingDirectory.resolve("tool.attributes");
     // extract tool annotations from the compile resources.
     final SdkToolAttributeWriter writer = new SdkToolAttributeWriter(attributes);
-    Stream.concat(include.stream(), Stream.of(compiled))
-        .parallel()
-        .map(AndroidCompiledDataDeserializer.create()::readAttributes)
-        .map(Map::entrySet)
-        .flatMap(Set::stream)
-        .distinct()
-        .forEach(e -> e.getValue().writeResource((FullyQualifiedName) e.getKey(), writer));
+    final AndroidCompiledDataDeserializer compiledDataDeserializer =
+        AndroidCompiledDataDeserializer.create();
+    for (CompiledResources resources : FluentIterable.from(include).append(compiled)) {
+      compiledDataDeserializer
+          .readAttributes(resources)
+          .forEach((key, value) -> value.writeResource((FullyQualifiedName) key, writer));
+    }
     writer.flush();
     profiler.recordEndOf("attributes");
     return attributes;
@@ -526,7 +540,8 @@ public class ResourceLinker {
             mainDexProguard,
             javaSourceDirectory,
             resourceIds,
-            extractAttributes(compiled));
+            extractAttributes(compiled),
+            extractPackages(compiled));
       }
 
     } catch (IOException e) {

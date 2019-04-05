@@ -23,14 +23,12 @@ import com.google.devtools.build.lib.analysis.AnalysisOptions;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.SkyframePackageRootResolver;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
-import com.google.devtools.build.lib.analysis.config.DefaultsPackage;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.events.Reporter;
-import com.google.devtools.build.lib.packages.NoSuchThingException;
-import com.google.devtools.build.lib.packages.SkylarkSemanticsOptions;
-import com.google.devtools.build.lib.packages.Target;
+import com.google.devtools.build.lib.packages.StarlarkSemanticsOptions;
 import com.google.devtools.build.lib.pkgcache.PackageCacheOptions;
 import com.google.devtools.build.lib.pkgcache.PackageManager;
+import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
 import com.google.devtools.build.lib.pkgcache.TargetPatternPreloader;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.ProfilerTask;
@@ -40,15 +38,18 @@ import com.google.devtools.build.lib.skyframe.SkyframeBuildView;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
 import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.devtools.build.lib.util.ExitCode;
+import com.google.devtools.build.lib.util.io.OutErr;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.OutputService;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
-import com.google.devtools.common.options.OptionsClassProvider;
+import com.google.devtools.common.options.OptionsParsingResult;
 import com.google.devtools.common.options.OptionsProvider;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -79,7 +80,8 @@ public final class CommandEnvironment {
   private final TimestampGranularityMonitor timestampGranularityMonitor;
   private final Thread commandThread;
   private final Command command;
-  private final OptionsProvider options;
+  private final OptionsParsingResult options;
+  private final PathPackageLocator packageLocator;
 
   private String[] crashData;
 
@@ -93,10 +95,12 @@ public final class CommandEnvironment {
 
   private class BlazeModuleEnvironment implements BlazeModule.ModuleEnvironment {
     @Override
-    public Path getFileFromWorkspace(Label label)
-        throws NoSuchThingException, InterruptedException, IOException {
-      Target target = getPackageManager().getTarget(reporter, label);
-      return target.getPackage().getPackageDirectory().getRelative(target.getName());
+    public Path getFileFromWorkspace(Label label) {
+      Path buildFile = getPackageManager().getBuildFileForPackage(label.getPackageIdentifier());
+      if (buildFile == null) {
+        return null;
+      }
+      return buildFile.getParentDirectory().getRelative(label.getName());
     }
 
     @Override
@@ -123,7 +127,7 @@ public final class CommandEnvironment {
       EventBus eventBus,
       Thread commandThread,
       Command command,
-      OptionsProvider options,
+      OptionsParsingResult options,
       List<String> warnings) {
     this.runtime = runtime;
     this.workspace = workspace;
@@ -143,9 +147,23 @@ public final class CommandEnvironment {
 
     // TODO(ulfjack): We don't call beforeCommand() in tests, but rely on workingDirectory being set
     // in setupPackageCache(). This leads to NPE if we don't set it here.
-    this.setWorkingDirectory(directories.getWorkspace());
+    Path workspacePath = directories.getWorkspace();
+    this.setWorkingDirectory(workspacePath);
     this.workspaceName = null;
 
+    // If this command supports --package_path we initialize the package locator scoped
+    // to the command environment
+    if (commandHasPackageOptions(command) && workspacePath != null) {
+      this.packageLocator =
+          workspace
+              .getSkyframeExecutor()
+              .createPackageLocator(
+                  reporter,
+                  options.getOptions(PackageCacheOptions.class).packagePath,
+                  workingDirectory);
+    } else {
+      this.packageLocator = null;
+    }
     workspace.getSkyframeExecutor().setEventBus(eventBus);
 
     ClientOptions clientOptions =
@@ -186,6 +204,30 @@ public final class CommandEnvironment {
     }
   }
 
+  // Returns whether the given command supports --package_path
+  private static boolean commandHasPackageOptions(Command command) {
+    return commandHasPackageOptions(command, new HashSet<>());
+  }
+
+  private static boolean commandHasPackageOptions(Command command, Set<Command> seen) {
+    if (!seen.add(command)) {
+      return false;
+    }
+    for (int i = 0; i < command.options().length; ++i) {
+      if (command.options()[i] == PackageCacheOptions.class) {
+        return true;
+      }
+    }
+    for (int i = 0; i < command.inherits().length; ++i) {
+      Class<? extends BlazeCommand> blazeCommand = command.inherits()[i];
+      Command annotation = blazeCommand.getAnnotation(Command.class);
+      if (commandHasPackageOptions(annotation, seen)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   public BlazeRuntime getRuntime() {
     return runtime;
   }
@@ -196,6 +238,10 @@ public final class CommandEnvironment {
 
   public BlazeDirectories getDirectories() {
     return directories;
+  }
+
+  public PathPackageLocator getPackageLocator() {
+    return packageLocator;
   }
 
   /**
@@ -229,7 +275,7 @@ public final class CommandEnvironment {
     return command.name();
   }
 
-  public OptionsProvider getOptions() {
+  public OptionsParsingResult getOptions() {
     return options;
   }
 
@@ -317,6 +363,17 @@ public final class CommandEnvironment {
 
   public PathFragment getRelativeWorkingDirectory() {
     return relativeWorkingDirectory;
+  }
+
+  List<OutErr> getOutputListeners() {
+    List<OutErr> result = new ArrayList<>();
+    for (BlazeModule module : runtime.getBlazeModules()) {
+      OutErr listener = module.getOutputListener();
+      if (listener != null) {
+        result.add(listener);
+      }
+    }
+    return result;
   }
 
   /**
@@ -420,11 +477,15 @@ public final class CommandEnvironment {
     return workingDirectory;
   }
 
-  /**
-   * @return the OutputService in use, or null if none.
-   */
+  /** @return the OutputService in use, or null if none. */
+  @Nullable
   public OutputService getOutputService() {
     return outputService;
+  }
+
+  @VisibleForTesting
+  public void setOutputServiceForTesting(@Nullable OutputService outputService) {
+    this.outputService = outputService;
   }
 
   public ActionCache getPersistentActionCache() throws IOException {
@@ -509,25 +570,33 @@ public final class CommandEnvironment {
 
   /**
    * Initializes the package cache using the given options, and syncs the package cache. Also
-   * injects a defaults package and the skylark semantics using the options for the {@link
-   * BuildConfiguration}.
-   *
-   * @see DefaultsPackage
+   * injects the skylark semantics using the options for the {@link BuildConfiguration}.
    */
-  public void setupPackageCache(OptionsClassProvider options,
-      String defaultsPackageContents) throws InterruptedException, AbruptExitException {
+  public void setupPackageCache(OptionsProvider options)
+      throws InterruptedException, AbruptExitException {
     getSkyframeExecutor()
         .sync(
             reporter,
             options.getOptions(PackageCacheOptions.class),
-            options.getOptions(SkylarkSemanticsOptions.class),
-            getOutputBase(),
-            getWorkingDirectory(),
-            defaultsPackageContents,
+            packageLocator,
+            options.getOptions(StarlarkSemanticsOptions.class),
             getCommandId(),
             clientEnv,
             timestampGranularityMonitor,
             options);
+  }
+
+  public void syncPackageLoading(
+      PackageCacheOptions packageCacheOptions, StarlarkSemanticsOptions starlarkSemanticsOptions)
+      throws AbruptExitException {
+    getSkyframeExecutor()
+        .syncPackageLoading(
+            packageCacheOptions,
+            packageLocator,
+            starlarkSemanticsOptions,
+            getCommandId(),
+            clientEnv,
+            timestampGranularityMonitor);
   }
 
   public void recordLastExecutionTime() {
@@ -561,7 +630,7 @@ public final class CommandEnvironment {
    * @throws AbruptExitException if this command is unsuitable to be run as specified
    */
   void beforeCommand(
-      OptionsProvider options,
+      OptionsParsingResult options,
       CommonCommandOptions commonOptions,
       long waitTimeInMs,
       InvocationPolicy invocationPolicy)

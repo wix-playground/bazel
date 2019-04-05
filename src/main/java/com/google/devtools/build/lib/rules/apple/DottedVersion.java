@@ -15,6 +15,7 @@
 package com.google.devtools.build.lib.rules.apple;
 
 import com.google.common.base.Joiner;
+import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
 import com.google.common.base.Strings;
 import com.google.common.collect.ComparisonChain;
@@ -35,7 +36,7 @@ import javax.annotation.Nullable;
  * {@code 5.0.1beta2}. Components must start with a non-negative integer and at least one component
  * must be present.
  *
- * <p>Specifically, the format of a component is {@code \d+([a-z]+\d*)?}.
+ * <p>Specifically, the format of a component is {@code \d+([a-z0-9]*?)?(\d+)?}.
  *
  * <p>Dotted versions are ordered using natural integer sorting on components in order from first to
  * last where any missing element is considered to have the value 0 if they don't contain any
@@ -72,10 +73,59 @@ import javax.annotation.Nullable;
 @Immutable
 @AutoCodec
 public final class DottedVersion implements DottedVersionApi<DottedVersion> {
+  /** Wrapper class for {@link DottedVersion} whose {@link #equals(Object)} method is string
+   * equality.
+   *
+   * <p>This is necessary because Bazel assumes that
+   * {@link com.google.devtools.build.lib.analysis.config.FragmentOptions} that are equal yield
+   * fragments that are the same. However, this does not hold if the options hold a
+   * {@link DottedVersion} because trailing zeroes are not considered significant when comparing
+   * them, but they do matter in configuration fragments (for example, they end up in output
+   * directory names)</p>
+   * */
+  @Immutable
+  public static final class Option {
+    private final DottedVersion version;
+
+    private Option(DottedVersion version) {
+      this.version = Preconditions.checkNotNull(version);
+    }
+
+    public DottedVersion get() {
+      return version;
+    }
+
+    @Override
+    public int hashCode() {
+      return version.stringRepresentation.hashCode();
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) {
+        return true;
+      }
+
+      if (!(o instanceof Option)) {
+        return false;
+      }
+
+      return version.stringRepresentation.equals(((Option) o).version.stringRepresentation);
+    }
+  }
+
+  public static DottedVersion maybeUnwrap(DottedVersion.Option option) {
+    return option != null ? option.get() : null;
+  }
+
+  public static Option option(DottedVersion version) {
+    return version == null ? null : new Option(version);
+  }
   private static final Splitter DOT_SPLITTER = Splitter.on('.');
-  private static final Pattern COMPONENT_PATTERN = Pattern.compile("(\\d+)(?:([a-z]+)(\\d*))?");
+  private static final Pattern COMPONENT_PATTERN =
+      Pattern.compile("(\\d+)([a-z0-9]*?)?(\\d+)?", Pattern.CASE_INSENSITIVE);
   private static final String ILLEGAL_VERSION =
-      "Dotted version components must all be of the form \\d+([a-z]+\\d*)? but got %s";
+      "Dotted version components must all be of the form \\d+([a-z0-9]*?)?(\\d+)? but got %s";
   private static final String NO_ALPHA_SEQUENCE = null;
   private static final Component ZERO_COMPONENT = new Component(0, NO_ALPHA_SEQUENCE, 0, "0");
 
@@ -116,7 +166,7 @@ public final class DottedVersion implements DottedVersionApi<DottedVersion> {
     int secondNumber = 0;
     firstNumber = parseNumber(parsedComponent, 1, version);
 
-    if (parsedComponent.group(2) != null) {
+    if (!Strings.isNullOrEmpty(parsedComponent.group(2))) {
       alphaSequence = parsedComponent.group(2);
     }
 
@@ -132,7 +182,7 @@ public final class DottedVersion implements DottedVersionApi<DottedVersion> {
     try {
       firstNumber = Integer.parseInt(parsedComponent.group(group));
     } catch (NumberFormatException e) {
-      throw new IllegalArgumentException(String.format(ILLEGAL_VERSION, version));
+      throw new IllegalArgumentException(String.format(ILLEGAL_VERSION, version), e);
     }
     return firstNumber;
   }
@@ -169,6 +219,31 @@ public final class DottedVersion implements DottedVersionApi<DottedVersion> {
   }
 
   /**
+   * Returns the string representation of this dotted version, padded or truncated to the specified
+   * number of components.
+   *
+   * <p>For example, a dotted version of "7.3.0" will return "7" if one is requested, "7.3" if two
+   * are requested, "7.3.0" if three are requested, and "7.3.0.0" if four are requested.
+   *
+   * @param numComponents a positive number of dot-separated numbers that should be present in the
+   *     returned string representation
+   */
+  public String toStringWithComponents(int numComponents) {
+    Preconditions.checkArgument(numComponents > 0,
+        "Can't serialize as a version with %s components", numComponents);
+    ImmutableList.Builder<Component> stringComponents = ImmutableList.builder();
+    if (numComponents <= components.size()) {
+      stringComponents.addAll(components.subList(0, numComponents));
+    } else {
+      stringComponents.addAll(components);
+      for (int i = components.size(); i < numComponents; i++) {
+        stringComponents.add(ZERO_COMPONENT);
+      }
+    }
+    return Joiner.on('.').join(stringComponents.build());
+  }
+
+  /**
    * Returns the string representation of this dotted version, padded to a minimum number of
    * components if the string representation does not already contain that many components.
    *
@@ -183,14 +258,7 @@ public final class DottedVersion implements DottedVersionApi<DottedVersion> {
    *     the returned string representation
    */
   public String toStringWithMinimumComponents(int numMinComponents) {
-    ImmutableList.Builder<Component> stringComponents = ImmutableList.builder();
-    stringComponents.addAll(components);
-    int numComponents = Math.max(this.numOriginalComponents, numMinComponents);
-    int zeroesToPad = numComponents - components.size();
-    for (int i = 0; i < zeroesToPad; i++) {
-      stringComponents.add(ZERO_COMPONENT);
-    }
-    return Joiner.on('.').join(stringComponents.build());
+    return toStringWithComponents(Math.max(this.numOriginalComponents, numMinComponents));
   }
 
   /**

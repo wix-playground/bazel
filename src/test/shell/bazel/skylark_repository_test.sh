@@ -17,11 +17,55 @@
 # Test the local_repository binding
 #
 
-# Load the test setup defined in the parent directory
-CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${CURRENT_DIR}/../integration_test_setup.sh" \
+# --- begin runfiles.bash initialization ---
+# Copy-pasted from Bazel's Bash runfiles library (tools/bash/runfiles/runfiles.bash).
+set -euo pipefail
+if [[ ! -d "${RUNFILES_DIR:-/dev/null}" && ! -f "${RUNFILES_MANIFEST_FILE:-/dev/null}" ]]; then
+  if [[ -f "$0.runfiles_manifest" ]]; then
+    export RUNFILES_MANIFEST_FILE="$0.runfiles_manifest"
+  elif [[ -f "$0.runfiles/MANIFEST" ]]; then
+    export RUNFILES_MANIFEST_FILE="$0.runfiles/MANIFEST"
+  elif [[ -f "$0.runfiles/bazel_tools/tools/bash/runfiles/runfiles.bash" ]]; then
+    export RUNFILES_DIR="$0.runfiles"
+  fi
+fi
+if [[ -f "${RUNFILES_DIR:-/dev/null}/bazel_tools/tools/bash/runfiles/runfiles.bash" ]]; then
+  source "${RUNFILES_DIR}/bazel_tools/tools/bash/runfiles/runfiles.bash"
+elif [[ -f "${RUNFILES_MANIFEST_FILE:-/dev/null}" ]]; then
+  source "$(grep -m1 "^bazel_tools/tools/bash/runfiles/runfiles.bash " \
+            "$RUNFILES_MANIFEST_FILE" | cut -d ' ' -f 2-)"
+else
+  echo >&2 "ERROR: cannot find @bazel_tools//tools/bash/runfiles:runfiles.bash"
+  exit 1
+fi
+# --- end runfiles.bash initialization ---
+
+source "$(rlocation "io_bazel/src/test/shell/integration_test_setup.sh")" \
   || { echo "integration_test_setup.sh not found!" >&2; exit 1; }
-source "${CURRENT_DIR}/remote_helpers.sh" \
+
+# `uname` returns the current platform, e.g "MSYS_NT-10.0" or "Linux".
+# `tr` converts all upper case letters to lower case.
+# `case` matches the result if the `uname | tr` expression to string prefixes
+# that use the same wildcards as names do in Bash, i.e. "msys*" matches strings
+# starting with "msys", and "*" matches everything (it's the default case).
+case "$(uname -s | tr [:upper:] [:lower:])" in
+msys*)
+  # As of 2018-08-14, Bazel on Windows only supports MSYS Bash.
+  declare -r is_windows=true
+  ;;
+*)
+  declare -r is_windows=false
+  ;;
+esac
+
+if "$is_windows"; then
+  # Disable MSYS path conversion that converts path-looking command arguments to
+  # Windows paths (even if they arguments are not in fact paths).
+  export MSYS_NO_PATHCONV=1
+  export MSYS2_ARG_CONV_EXCL="*"
+fi
+
+source "$(rlocation "io_bazel/src/test/shell/bazel/remote_helpers.sh")" \
   || { echo "remote_helpers.sh not found!" >&2; exit 1; }
 
 # Basic test.
@@ -249,8 +293,7 @@ EOF
   [ $exitCode != 0 ] || fail "building @foo//:data.txt succeed while expected failure"
 
   expect_not_log "PACKAGE"
-  expect_log "Failed to load Skylark extension '@foo//:ext.bzl'"
-  expect_log "Maybe repository 'foo' was defined later in your WORKSPACE file?"
+  expect_log "Failed to load Starlark extension '@foo//:ext.bzl'"
 }
 
 function test_load_nonexistent_with_subworkspace() {
@@ -268,8 +311,7 @@ EOF
   [ $exitCode != 0 ] || fail "building //... succeed while expected failure"
 
   expect_not_log "PACKAGE"
-  expect_log "Failed to load Skylark extension '@does_not_exist//:random.bzl'"
-  expect_log "Maybe repository 'does_not_exist' was defined later in your WORKSPACE file?"
+  expect_log "Failed to load Starlark extension '@does_not_exist//:random.bzl'"
 
   # Retest with query //...
   bazel clean --expunge
@@ -277,8 +319,7 @@ EOF
   [ $exitCode != 0 ] || fail "querying //... succeed while expected failure"
 
   expect_not_log "PACKAGE"
-  expect_log "Failed to load Skylark extension '@does_not_exist//:random.bzl'"
-  expect_log "Maybe repository 'does_not_exist' was defined later in your WORKSPACE file?"
+  expect_log "Failed to load Starlark extension '@does_not_exist//:random.bzl'"
 }
 
 function test_skylark_local_repository() {
@@ -313,7 +354,7 @@ EOF
 
   bazel build @foo//:bar >& $TEST_log || fail "Failed to build"
   expect_log "foo"
-  expect_not_log "Workspace name in .*/WORKSPACE (@__main__) does not match the name given in the repository's definition (@foo)"
+  expect_not_log "Workspace name in .*/WORKSPACE (.*) does not match the name given in the repository's definition (@foo)"
   cat bazel-genfiles/external/foo/bar.txt >$TEST_log
   expect_log "foo"
 }
@@ -360,15 +401,13 @@ EOF
   bazel build @foo//:bar --internal_skylark_flag_test_canary >& $TEST_log \
     || fail "Expected build to succeed"
   expect_log "In repo rule: $MARKER" \
-      "Skylark flags are not propagating to repository rule implementation \
+      "Starlark flags are not propagating to repository rule implementation \
       function evaluation"
 }
 
 function test_skylark_repository_which_and_execute() {
   setup_skylark_repository
 
-  # Test we are using the client environment, not the server one
-  bazel info &> /dev/null  # Start up the server.
   echo "#!/bin/sh" > bin.sh
   echo "exit 0" >> bin.sh
   chmod +x bin.sh
@@ -392,6 +431,9 @@ def _impl(repository_ctx):
   print(result.stdout)
 repo = repository_rule(implementation=_impl, local=True)
 EOF
+
+  # Test we are using the client environment, not the server one
+  bazel info &> /dev/null  # Start up the server.
 
   FOO="BAZ" PATH="${PATH}:${PWD}" bazel build @foo//:bar >& $TEST_log \
       || fail "Failed to build"
@@ -851,6 +893,71 @@ EOF
     || fail "download_executable_file.sh is not executable"
 }
 
+function test_skylark_repository_context_downloads_return_struct() {
+   # Prepare HTTP server with Python
+  local server_dir="${TEST_TMPDIR}/server_dir"
+  mkdir -p "${server_dir}"
+  local download_with_sha256="${server_dir}/download_with_sha256.txt"
+  local download_no_sha256="${server_dir}/download_no_sha256.txt"
+  local compressed_with_sha256="${server_dir}/compressed_with_sha256.txt"
+  local compressed_no_sha256="${server_dir}/compressed_no_sha256.txt"
+  echo "This is one file" > "${download_no_sha256}"
+  echo "This is another file" > "${download_with_sha256}"
+  echo "Compressed file with sha" > "${compressed_with_sha256}"
+  echo "Compressed file no sha" > "${compressed_no_sha256}"
+  zip "${compressed_with_sha256}".zip "${compressed_with_sha256}"
+  zip "${compressed_no_sha256}".zip "${compressed_no_sha256}"
+
+  provided_sha256="$(sha256sum "${download_with_sha256}" | head -c 64)"
+  not_provided_sha256="$(sha256sum "${download_no_sha256}" | head -c 64)"
+  compressed_provided_sha256="$(sha256sum "${compressed_with_sha256}.zip" | head -c 64)"
+  compressed_not_provided_sha256="$(sha256sum "${compressed_no_sha256}.zip" | head -c 64)"
+
+  # Start HTTP server with Python
+  startup_server "${server_dir}"
+
+  setup_skylark_repository
+  # Our custom repository rule
+  cat >test.bzl <<EOF
+def _impl(repository_ctx):
+  no_sha_return = repository_ctx.download(
+    url = "http://localhost:${fileserver_port}/download_no_sha256.txt",
+    output = "download_no_sha256.txt")
+  with_sha_return = repository_ctx.download(
+    url = "http://localhost:${fileserver_port}/download_with_sha256.txt",
+    output = "download_with_sha256.txt",
+    sha256 = "${provided_sha256}")
+  compressed_no_sha_return = repository_ctx.download_and_extract(
+    url = "http://localhost:${fileserver_port}/compressed_no_sha256.txt.zip",
+    output = "compressed_no_sha256.txt.zip")
+  compressed_with_sha_return = repository_ctx.download_and_extract(
+      url = "http://localhost:${fileserver_port}/compressed_with_sha256.txt.zip",
+      output = "compressed_with_sha256.txt.zip",
+      sha256 = "${compressed_provided_sha256}")
+
+  file_content = "no_sha_return " + no_sha_return.sha256 + "\n"
+  file_content += "with_sha_return " + with_sha_return.sha256 + "\n"
+  file_content += "compressed_no_sha_return " + compressed_no_sha_return.sha256 + "\n"
+  file_content += "compressed_with_sha_return " + compressed_with_sha_return.sha256
+  repository_ctx.file("returned_shas.txt", content = file_content, executable = False)
+  repository_ctx.file("BUILD")  # necessary directories should already created by download function
+repo = repository_rule(implementation = _impl, local = False)
+EOF
+
+  bazel build @foo//:all >& $TEST_log && shutdown_server \
+    || fail "Execution of @foo//:all failed"
+
+  output_base="$(bazel info output_base)"
+  grep "no_sha_return $not_provided_sha256" $output_base/external/foo/returned_shas.txt \
+      || fail "expected calculated sha256 $not_provided_sha256"
+  grep "with_sha_return $provided_sha256" $output_base/external/foo/returned_shas.txt \
+      || fail "expected provided sha256 $provided_sha256"
+  grep "compressed_with_sha_return $compressed_provided_sha256" $output_base/external/foo/returned_shas.txt \
+      || fail "expected provided sha256 $compressed_provided_sha256"
+  grep "compressed_no_sha_return $compressed_not_provided_sha256" $output_base/external/foo/returned_shas.txt \
+      || fail "expected compressed calculated sha256 $compressed_not_provided_sha256"
+}
+
 function test_skylark_repository_download_args() {
   # Prepare HTTP server with Python
   local server_dir="${TEST_TMPDIR}/server_dir"
@@ -1021,13 +1128,12 @@ EOF
 # Test native.existing_rule(s), regression test for #1277
 function test_existing_rule() {
   create_new_workspace
+  setup_skylib_support
   repo2=$new_workspace_dir
 
   cat > BUILD
-  cat > WORKSPACE
 
-  cd ${WORKSPACE_DIR}
-  cat > WORKSPACE <<EOF
+  cat >> WORKSPACE <<EOF
 local_repository(name = 'existing', path='$repo2')
 load('//:test.bzl', 'macro')
 
@@ -1053,44 +1159,101 @@ EOF
   expect_log "non_existing = False,False"
 }
 
-function test_build_a_repo() {
-  cat > WORKSPACE <<EOF
-load("//:repo.bzl", "my_repo")
-my_repo(name = "reg")
-EOF
 
-  cat > repo.bzl <<EOF
-def _impl(repository_ctx):
-  pass
-
-my_repo = repository_rule(_impl)
-EOF
-  touch BUILD
-
-  bazel build //external:reg &> $TEST_log || fail "Couldn't build repo"
-}
-
-function test_unexported_rule() {
-  cat > repo.bzl <<'EOF'
-def _trivial_rule_impl(ctx):
-  ctx.file("BUILD","genrule(name='hello', outs=['hello.txt'], cmd=' echo hello world > $@')")
-
-def use_hidden_rule(name=""):
-  repository_rule(
-    implementation = _trivial_rule_impl,
-    attrs = {},
-  )(name=name)
-EOF
-  touch BUILD
+function test_timeout_tunable() {
   cat > WORKSPACE <<'EOF'
-load("//:repo.bzl", "use_hidden_rule")
+load("//:repo.bzl", "with_timeout")
 
-use_hidden_rule(name="foo")
+with_timeout(name="maytimeout")
 EOF
-  bazel build @foo//... > "${TEST_log}" 2>&1 && fail "Expected failure" || :
+  touch BUILD
+  cat > repo.bzl <<'EOF'
+def _impl(ctx):
+  st =ctx.execute(["bash", "-c", "sleep 10 && echo Hello world > data.txt"],
+                  timeout=1)
+  if st.return_code:
+    fail("Command did not succeed")
+  ctx.file("BUILD", "exports_files(['data.txt'])")
 
-  expect_log 'unexported'
+with_timeout = repository_rule(attrs = {}, implementation = _impl)
+EOF
+  bazel sync && fail "expected timeout" || :
+
+  bazel sync --experimental_scale_timeouts=100 \
+      || fail "expected success now the timeout is scaled"
+
+  bazel build @maytimeout//... \
+      || fail "expected success after successful sync"
 }
+
+function test_circular_load_error_message() {
+  cat > WORKSPACE <<'EOF'
+load("//:a.bzl", "total")
+EOF
+  touch BUILD
+  cat > a.bzl <<'EOF'
+load("//:b.bzl", "b")
+
+a = 10
+
+total = a + b
+EOF
+  cat > b.bzl <<'EOF'
+load("//:a.bzl", "a")
+
+b = 20
+
+difference = b - a
+EOF
+
+  bazel build //... > "${TEST_log}" 2>&1 && fail "Expected failure" || :
+
+  expect_not_log "[iI]nternal [eE]rror"
+  expect_not_log "IllegalStateException"
+  expect_log "//:a.bzl"
+  expect_log "//:b.bzl"
+}
+
+function test_ciruclar_load_error_with_path_message() {
+  cat > WORKSPACE <<'EOF'
+load("//:x.bzl", "x")
+EOF
+  touch BUILD
+  cat > x.bzl <<'EOF'
+load("//:y.bzl", "y")
+x = y
+EOF
+  cat > y.bzl <<'EOF'
+load("//:a.bzl", "total")
+
+y = total
+EOF
+  cat > a.bzl <<'EOF'
+load("//:b.bzl", "b")
+
+a = 10
+
+total = a + b
+EOF
+  cat > b.bzl <<'EOF'
+load("//:a.bzl", "a")
+
+b = 20
+
+difference = b - a
+EOF
+
+  bazel build //... > "${TEST_log}" 2>&1 && fail "Expected failure" || :
+
+  expect_not_log "[iI]nternal [eE]rror"
+  expect_not_log "IllegalStateException"
+  expect_log "WORKSPACE"
+  expect_log "//:x.bzl"
+  expect_log "//:y.bzl"
+  expect_log "//:a.bzl"
+  expect_log "//:b.bzl"
+}
+
 
 function tear_down() {
   shutdown_server

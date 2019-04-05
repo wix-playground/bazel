@@ -14,9 +14,9 @@
 // Copyright 2017 The Bazel Authors. All rights reserved.
 package com.google.devtools.build.android;
 
-import com.android.builder.core.VariantConfiguration;
+import static java.util.logging.Level.SEVERE;
+
 import com.google.common.base.Preconditions;
-import com.google.common.base.Strings;
 import com.google.devtools.build.android.aapt2.Aapt2ConfigOptions;
 import com.google.devtools.build.android.aapt2.CompiledResources;
 import com.google.devtools.build.android.aapt2.ResourceLinker;
@@ -31,6 +31,7 @@ import java.nio.file.FileSystems;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
+import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
 /** Performs resource validation and static linking for compiled android resources. */
@@ -147,6 +148,9 @@ public class ValidateAndLinkResourcesAction {
     public Path sourceJarOut;
   }
 
+  private static final Logger logger =
+      Logger.getLogger(ValidateAndLinkResourcesAction.class.getName());
+
   public static void main(String[] args) throws Exception {
     final OptionsParser optionsParser =
         OptionsParser.newOptionsParser(Options.class, Aapt2ConfigOptions.class);
@@ -172,23 +176,17 @@ public class ValidateAndLinkResourcesAction {
               // We need to make the manifest aapt safe (w.r.t., placeholders). For now, just stub
               // it out.
               .processManifest(
-                  manifest -> {
-                    final String packageForR =
-                        Strings.isNullOrEmpty(options.packageForR)
-                            ? VariantConfiguration.getManifestPackage(manifest.toFile())
-                            : options.packageForR;
-                    return AndroidManifestProcessor.writeDummyManifestForAapt(
-                        scopedTmp.getPath().resolve("manifest-aapt-dummy/AndroidManifest.xml"),
-                        packageForR);
-                  });
+                  manifest ->
+                      AndroidManifest.parseFrom(manifest)
+                          .writeDummyManifestForAapt(
+                              scopedTmp.getPath().resolve("manifest-aapt-dummy"),
+                              options.packageForR));
       profiler.recordEndOf("manifest").startTask("link");
       ResourceLinker.create(aapt2Options.aapt2, executorService, scopedTmp.getPath())
           .profileUsing(profiler)
           .dependencies(Optional.ofNullable(options.deprecatedLibraries).orElse(options.libraries))
           .include(
-              options
-                  .compiledDeps
-                  .stream()
+              options.compiledDeps.stream()
                   .map(CompiledResources::from)
                   .collect(Collectors.toList()))
           .buildVersion(aapt2Options.buildToolsVersion)
@@ -198,6 +196,9 @@ public class ValidateAndLinkResourcesAction {
           .copySourceJarTo(options.sourceJarOut)
           .copyRTxtTo(options.rTxtOut);
       profiler.recordEndOf("link");
+    } catch (Exception e) {
+      logger.log(SEVERE, "Error while validating and linking resources", e);
+      throw e;
     }
   }
 }

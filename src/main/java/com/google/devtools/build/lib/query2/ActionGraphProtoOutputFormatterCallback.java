@@ -17,41 +17,81 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.devtools.build.lib.actions.CommandLineExpansionException;
 import com.google.devtools.build.lib.analysis.AnalysisProtos;
 import com.google.devtools.build.lib.analysis.AnalysisProtos.ActionGraphContainer;
-import com.google.devtools.build.lib.events.Reporter;
+import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget;
+import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment.TargetAccessor;
 import com.google.devtools.build.lib.query2.output.AqueryOptions;
+import com.google.devtools.build.lib.skyframe.AspectValue;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetValue;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
 import com.google.devtools.build.lib.skyframe.actiongraph.ActionGraphDump;
+import com.google.protobuf.TextFormat;
 import java.io.IOException;
 import java.io.OutputStream;
 
 /** Default output callback for aquery, prints proto output. */
 public class ActionGraphProtoOutputFormatterCallback extends AqueryThreadsafeCallback {
 
-  final ActionGraphDump actionGraphDump;
+  /** Defines the types of proto output this class can handle. */
+  public enum OutputType {
+    BINARY("proto"),
+    TEXT("textproto");
+
+    private final String formatName;
+
+    OutputType(String formatName) {
+      this.formatName = formatName;
+    }
+
+    public String formatName() {
+      return formatName;
+    }
+  }
+
+  private final OutputType outputType;
+  private final ActionGraphDump actionGraphDump;
+  private final AqueryActionFilter actionFilters;
 
   ActionGraphProtoOutputFormatterCallback(
-      Reporter reporter,
+      ExtendedEventHandler eventHandler,
       AqueryOptions options,
       OutputStream out,
       SkyframeExecutor skyframeExecutor,
-      TargetAccessor<ConfiguredTargetValue> accessor) {
-    super(reporter, options, out, skyframeExecutor, accessor);
-    // TODO(twerth): Allow users to include action command lines.
-    actionGraphDump = new ActionGraphDump(/* includeActionCmdLine */ false);
+      TargetAccessor<ConfiguredTargetValue> accessor,
+      OutputType outputType,
+      AqueryActionFilter actionFilters) {
+    super(eventHandler, options, out, skyframeExecutor, accessor);
+    this.outputType = outputType;
+    this.actionFilters = actionFilters;
+    this.actionGraphDump =
+        new ActionGraphDump(
+            options.includeCommandline,
+            options.includeArtifacts,
+            this.actionFilters,
+            options.includeParamFiles);
   }
 
   @Override
   public String getName() {
-    return "proto";
+    return outputType.formatName();
   }
 
   @Override
-  public void processOutput(Iterable<ConfiguredTargetValue> partialResult) throws IOException {
+  public void processOutput(Iterable<ConfiguredTargetValue> partialResult)
+      throws IOException, InterruptedException {
     try {
+      // Enabling includeParamFiles should enable includeCommandline by default.
+      options.includeCommandline |= options.includeParamFiles;
+
       for (ConfiguredTargetValue configuredTargetValue : partialResult) {
         actionGraphDump.dumpConfiguredTarget(configuredTargetValue);
+        if (options.useAspects) {
+          if (configuredTargetValue.getConfiguredTarget() instanceof RuleConfiguredTarget) {
+            for (AspectValue aspectValue : accessor.getAspectValues(configuredTargetValue)) {
+              actionGraphDump.dumpAspect(aspectValue, configuredTargetValue);
+            }
+          }
+        }
       }
     } catch (CommandLineExpansionException e) {
       throw new IOException(e.getMessage());
@@ -62,7 +102,18 @@ public class ActionGraphProtoOutputFormatterCallback extends AqueryThreadsafeCal
   public void close(boolean failFast) throws IOException {
     if (!failFast && printStream != null) {
       ActionGraphContainer actionGraphContainer = actionGraphDump.build();
-      actionGraphContainer.writeTo(printStream);
+
+      // Write the data.
+      switch (outputType) {
+        case BINARY:
+          actionGraphContainer.writeTo(printStream);
+          break;
+        case TEXT:
+          TextFormat.print(actionGraphContainer, printStream);
+          break;
+        default:
+          throw new IllegalStateException("Unknown outputType " + outputType.formatName());
+      }
     }
   }
 

@@ -6,15 +6,15 @@ title: .bzl Style Guide
 # .bzl Style Guide
 
 
-Skylark is a language that defines how software is built, and as such it is both
-a programming and a configuration language.
+[Starlark](language.md) is a language that defines how software is built, and as
+such it is both a programming and a configuration language.
 
-You will use Skylark to write BUILD files, macros, and build rules. Macros and
+You will use Starlark to write BUILD files, macros, and build rules. Macros and
 rules are essentially meta-languages - they define how BUILD files are written.
 BUILD files are intended to be simple and repetitive.
 
 All software is read more often than it is written. This is especially true for
-Skylark, as engineers read BUILD files to understand dependencies of their
+Starlark, as engineers read BUILD files to understand dependencies of their
 targets and details of their builds.This reading will often happen in passing,
 in a hurry, or in parallel to accomplishing some other task. Consequently,
 simplicity and readability are very important so that users can parse and
@@ -44,30 +44,43 @@ to make your files easy to process, both by humans and tools.
 ## Style
 
 
-*   When in doubt, follow the [Python style
-    guide](https://www.python.org/dev/peps/pep-0008/). In particular, use 4
-    spaces for indentation (we previously recommended 2, but we now follow the
-    Python convention).
+### Python style
 
-*   Document files and functions using [docstrings](skylint.md#docstrings). Use
-    a docstring at the top of each `.bzl` file, and a docstring for each public
-    function.
+When in doubt, follow the
+[Python style guide](https://www.python.org/dev/peps/pep-0008/). In particular,
+use 4 spaces for indentation (we previously recommended 2, but we now follow the
+Python convention).
 
-*   Rules and aspects, along with their attributes, as well as providers and
-    their fields, should be documented using the `doc` argument.
+### Docstring
+
+Document files and functions using [docstrings](skylint.md#docstrings). Use a
+docstring at the top of each `.bzl` file, and a docstring for each public
+function.
+
+### Document rules and aspects
+
+Rules and aspects, along with their attributes, as well as providers and their
+fields, should be documented using the `doc` argument.
+
+### Naming convention
 
 *   Variables and function names use lowercase with words separated by
-    underscores (`[a-z][a-z0-9_]*`), e.g. `cc_library`. Top-level private values
-    start with one underscore. Bazel enforces that private values cannot be used
-    from other files. Local variables should not use the underscore prefix.
+    underscores (`[a-z][a-z0-9_]*`), e.g. `cc_library`.
+*   Top-level private values start with one underscore. Bazel enforces that
+    private values cannot be used from other files. Local variables should not
+    use the underscore prefix.
 
-*   As in BUILD files, there is no strict line length limit as labels can be
-    long. When possible, try to use at most 79 characters per line.
+### Line length
 
-*   In keyword arguments, spaces around the equal sign are optional, but be
-    consistent within any given call. In general, we follow the BUILD file
-    convention when calling macros and native rules, and the Python convention
-    for other functions, e.g.
+As in BUILD files, there is no strict line length limit as labels can be long.
+When possible, try to use at most 79 characters per line.
+
+### Keyword arguments
+
+In keyword arguments, spaces around the equal sign are optional, but be
+consistent within any given call. In general, we follow the BUILD file
+convention when calling macros and native rules, and the Python convention for
+other functions, e.g.
 
 ```python
 def fct(name, srcs):
@@ -79,16 +92,20 @@ def fct(name, srcs):
     )
 ```
 
-*   Prefer values `True` and `False` instead of `0` and `1` for boolean values
-    (e.g. when using a boolean attribute in a rule).
+### Boolean values
 
-*   Do not use the `print()` function in production code; it is only intended
-    for debugging, and will spam all direct and indirect users of your `.bzl`
-    file. The only exception is that you may submit code that uses `print()` if
-    it is disabled by default and can only be enabled by editing the source --
-    for example, if all uses of `print()` are guarded by `if DEBUG:` where
-    `DEBUG` is hardcoded to false. Be mindful of whether these statements are
-    useful enough to justify their impact on readability.
+Prefer values `True` and `False` (rather than of `1` and `0`) for boolean values
+(e.g. when using a boolean attribute in a rule).
+
+### Use print only for debugging
+
+Do not use the `print()` function in production code; it is only intended for
+debugging, and will spam all direct and indirect users of your `.bzl` file. The
+only exception is that you may submit code that uses `print()` if it is disabled
+by default and can only be enabled by editing the source -- for example, if all
+uses of `print()` are guarded by `if DEBUG:` where `DEBUG` is hardcoded to
+`False`. Be mindful of whether these statements are useful enough to justify
+their impact on readability.
 
 
 ## Macros
@@ -125,9 +142,9 @@ For macros that define non-leaf nodes, follow these best practices:
 *   When calling a macro, use only keyword arguments. This is consistent with
     rules, and greatly improves readability.
 
-Engineers often write macros when the Skylark API of relevant rules is
+Engineers often write macros when the Starlark API of relevant rules is
 insufficient for their specific use case, regardless of whether the rule is
-defined within Bazel in native code, or in Skylark. If you’re facing this
+defined within Bazel in native code, or in Starlark. If you’re facing this
 problem, ask the rule author if they can extend the API to accomplish your
 goals.
 

@@ -16,11 +16,13 @@ package com.google.devtools.build.lib.runtime;
 import static com.google.common.base.Strings.isNullOrEmpty;
 
 import com.google.devtools.build.lib.profiler.MemoryProfiler.MemoryProfileStableHeapParameters;
+import com.google.devtools.build.lib.profiler.ProfilerTask;
 import com.google.devtools.build.lib.runtime.CommandLineEvent.ToolCommandLineEvent;
 import com.google.devtools.build.lib.util.OptionsUtils;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.common.options.Converter;
 import com.google.devtools.common.options.Converters;
+import com.google.devtools.common.options.EnumConverter;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
@@ -36,18 +38,20 @@ import java.util.logging.Level;
  */
 public class CommonCommandOptions extends OptionsBase {
 
-  // To create a new incompatible change, see the javadoc for AllIncompatibleChangesExpansion.
+  /**
+   * To create a new incompatible change, see the javadoc for {@link
+   * AllIncompatibleChangesExpansion}.
+   */
   @Option(
-    name = "all_incompatible_changes",
-    defaultValue = "null",
-    documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-    effectTags = {OptionEffectTag.UNKNOWN},
-    metadataTags = {OptionMetadataTag.INCOMPATIBLE_CHANGE},
-    expansionFunction = AllIncompatibleChangesExpansion.class,
-    help =
-        "Enables all options of the form --incompatible_*. Use this option to find places where "
-            + "your build may break in the future due to deprecations or other changes."
-  )
+      name = "all_incompatible_changes",
+      defaultValue = "null",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      metadataTags = {OptionMetadataTag.INCOMPATIBLE_CHANGE},
+      expansionFunction = AllIncompatibleChangesExpansion.class,
+      help =
+          "Enables all options of the form --incompatible_*. Use this option to find places where "
+              + "your build may break in the future due to deprecations or other changes.")
   public Void allIncompatibleChanges;
 
   @Option(
@@ -59,10 +63,9 @@ public class CommonCommandOptions extends OptionsBase {
     help =
         "Selects additional config sections from the rc files; for every <command>, it "
             + "also pulls in the options from <command>:<config> if such a section exists; "
-            + "if the section does not exist, this flag is ignored. "
-            + "Note that it is currently only possible to provide these options on the "
-            + "command line, not in the rc files. The config sections and flag combinations "
-            + "they are equivalent to are located in the tools/*.blazerc config files."
+            + "if this section doesn't exist in any .rc file, Blaze fails with an error. "
+            + "The config sections and flag combinations they are equivalent to are "
+            + "located in the tools/*.blazerc config files."
   )
   public List<String> configs;
 
@@ -146,7 +149,7 @@ public class CommonCommandOptions extends OptionsBase {
         UUID.fromString(input.substring(uuidStartIndex));
       } catch (IllegalArgumentException | IndexOutOfBoundsException e) {
         throw new OptionsParsingException(
-            String.format("Value '%s' does end in a valid UUID.", input), e);
+            String.format("Value '%s' does not end in a valid UUID.", input), e);
       }
       return input;
     }
@@ -218,6 +221,26 @@ public class CommonCommandOptions extends OptionsBase {
       effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.BAZEL_MONITORING},
       help = "If set, Bazel will measure cpu usage and add it to the JSON profile.")
   public boolean enableCpuUsageProfiling;
+
+  @Option(
+      name = "experimental_profile_additional_tasks",
+      converter = ProfilerTaskConverter.class,
+      defaultValue = "none",
+      allowMultiple = true,
+      documentationCategory = OptionDocumentationCategory.LOGGING,
+      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.BAZEL_MONITORING},
+      help = "Specifies additional profile tasks to be included in the profile.")
+  public List<ProfilerTask> additionalProfileTasks;
+
+  @Option(
+      name = "experimental_slim_json_profile",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.LOGGING,
+      effectTags = {OptionEffectTag.AFFECTS_OUTPUTS, OptionEffectTag.BAZEL_MONITORING},
+      help =
+          "Slims down the size of the JSON profile by merging events if the profile gets "
+              + " too large.")
+  public boolean enableJsonProfileDiet;
 
   @Option(
       name = "profile",
@@ -415,4 +438,11 @@ public class CommonCommandOptions extends OptionsBase {
               + "one."
   )
   public boolean keepStateAfterBuild;
+
+  /** The option converter to check that the user can only specify legal profiler tasks. */
+  public static class ProfilerTaskConverter extends EnumConverter<ProfilerTask> {
+    public ProfilerTaskConverter() {
+      super(ProfilerTask.class, "profiler task");
+    }
+  }
 }

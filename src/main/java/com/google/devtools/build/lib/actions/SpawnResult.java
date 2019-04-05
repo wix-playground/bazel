@@ -14,9 +14,11 @@
 package com.google.devtools.build.lib.actions;
 
 import com.google.common.base.Preconditions;
+import com.google.common.base.Strings;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.shell.TerminationStatus;
+import com.google.protobuf.ByteString;
 import java.io.InputStream;
 import java.time.Duration;
 import java.util.Locale;
@@ -182,9 +184,7 @@ public interface SpawnResult {
    */
   Optional<Long> getNumInvoluntaryContextSwitches();
 
-  default SpawnMetrics getMetrics() {
-    return SpawnMetrics.forLocalExecution(getWallTime().orElse(Duration.ZERO));
-  }
+  SpawnMetrics getMetrics();
 
   /** Whether the spawn result was a cache hit. */
   boolean isCacheHit();
@@ -218,6 +218,7 @@ public interface SpawnResult {
     private final Status status;
     private final String executorHostName;
     private final String runnerName;
+    private final SpawnMetrics spawnMetrics;
     private final Optional<Duration> wallTime;
     private final Optional<Duration> userTime;
     private final Optional<Duration> systemTime;
@@ -226,12 +227,17 @@ public interface SpawnResult {
     private final Optional<Long> numInvoluntaryContextSwitches;
     private final boolean cacheHit;
     private final String failureMessage;
+    private final ActionInput inMemoryOutputFile;
+    private final ByteString inMemoryContents;
 
     SimpleSpawnResult(Builder builder) {
       this.exitCode = builder.exitCode;
       this.status = Preconditions.checkNotNull(builder.status);
       this.executorHostName = builder.executorHostName;
       this.runnerName = builder.runnerName;
+      this.spawnMetrics = builder.spawnMetrics != null
+          ? builder.spawnMetrics
+          : SpawnMetrics.forLocalExecution(builder.wallTime.orElse(Duration.ZERO));
       this.wallTime = builder.wallTime;
       this.userTime = builder.userTime;
       this.systemTime = builder.systemTime;
@@ -240,6 +246,8 @@ public interface SpawnResult {
       this.numInvoluntaryContextSwitches = builder.numInvoluntaryContextSwitches;
       this.cacheHit = builder.cacheHit;
       this.failureMessage = builder.failureMessage;
+      this.inMemoryOutputFile = builder.inMemoryOutputFile;
+      this.inMemoryContents = builder.inMemoryContents;
     }
 
     @Override
@@ -273,6 +281,11 @@ public interface SpawnResult {
     @Override
     public String getRunnerName() {
       return runnerName;
+    }
+
+    @Override
+    public SpawnMetrics getMetrics() {
+      return spawnMetrics;
     }
 
     @Override
@@ -330,9 +343,11 @@ public interface SpawnResult {
       }
       if (status() == Status.TIMEOUT) {
         if (getWallTime().isPresent()) {
-          explanation += String.format(
-              " (failed due to timeout after %.2f seconds.)",
-              getWallTime().get().toMillis() / 1000.0);
+          explanation +=
+              String.format(
+                  Locale.US,
+                  " (failed due to timeout after %.2f seconds.)",
+                  getWallTime().get().toMillis() / 1000.0);
         } else {
           explanation += " (failed due to timeout.)";
         }
@@ -343,7 +358,19 @@ public interface SpawnResult {
         explanation += " Action tagged as local was forcibly run remotely and failed - it's "
             + "possible that the action simply doesn't work remotely";
       }
+      if (!Strings.isNullOrEmpty(failureMessage)) {
+        explanation += " " + failureMessage;
+      }
       return messagePrefix + " failed" + reason + explanation;
+    }
+
+    @Nullable
+    @Override
+    public InputStream getInMemoryOutput(ActionInput output) {
+      if (inMemoryOutputFile != null && inMemoryOutputFile.equals(output)) {
+        return inMemoryContents.newInput();
+      }
+      return null;
     }
   }
 
@@ -355,6 +382,7 @@ public interface SpawnResult {
     private Status status;
     private String executorHostName;
     private String runnerName = "";
+    private SpawnMetrics spawnMetrics;
     private Optional<Duration> wallTime = Optional.empty();
     private Optional<Duration> userTime = Optional.empty();
     private Optional<Duration> systemTime = Optional.empty();
@@ -363,6 +391,9 @@ public interface SpawnResult {
     private Optional<Long> numInvoluntaryContextSwitches = Optional.empty();
     private boolean cacheHit;
     private String failureMessage = "";
+    /* Invariant: Either both have a value or both are null. */
+    private ActionInput inMemoryOutputFile;
+    private ByteString inMemoryContents;
 
     public SpawnResult build() {
       Preconditions.checkArgument(!runnerName.isEmpty());
@@ -394,6 +425,11 @@ public interface SpawnResult {
 
     public Builder setRunnerName(String runnerName) {
       this.runnerName = runnerName;
+      return this;
+    }
+
+    public Builder setSpawnMetrics(SpawnMetrics spawnMetrics) {
+      this.spawnMetrics = spawnMetrics;
       return this;
     }
 
@@ -449,6 +485,12 @@ public interface SpawnResult {
 
     public Builder setFailureMessage(String failureMessage) {
       this.failureMessage = failureMessage;
+      return this;
+    }
+
+    public Builder setInMemoryOutput(ActionInput outputFile, ByteString contents) {
+      this.inMemoryOutputFile = Preconditions.checkNotNull(outputFile);
+      this.inMemoryContents = Preconditions.checkNotNull(contents);
       return this;
     }
   }

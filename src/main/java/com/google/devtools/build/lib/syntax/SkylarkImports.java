@@ -16,6 +16,7 @@ package com.google.devtools.build.lib.syntax;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.cmdline.Label;
+import com.google.devtools.build.lib.cmdline.LabelConstants;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.cmdline.LabelValidator;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
@@ -55,16 +56,6 @@ public class SkylarkImports {
     public abstract Label getLabel(Label containingFileLabel);
 
     @Override
-    public boolean hasAbsolutePath() {
-      return false;
-    }
-
-    @Override
-    public PathFragment getAbsolutePath() {
-      throw new IllegalStateException("can't request absolute path from a non-absolute import");
-    }
-
-    @Override
     public int hashCode() {
       return Objects.hash(getClass(), importString);
     }
@@ -82,76 +73,6 @@ public class SkylarkImports {
       return Objects.equals(getClass(), that.getClass())
           && Objects.equals(importString, ((SkylarkImportImpl) that).importString);
     }
-  }
-
-  @VisibleForSerialization
-  @AutoCodec
-  static final class AbsolutePathImport extends SkylarkImportImpl {
-    private final PathFragment importPath;
-
-    @VisibleForSerialization
-    AbsolutePathImport(String importString, PathFragment importPath) {
-      super(importString);
-      this.importPath = importPath;
-    }
-
-    @Override
-    public PathFragment asPathFragment() {
-      return importPath;
-    }
-
-    @Override
-    public Label getLabel(Label containingFileLabel) {
-      throw new IllegalStateException("can't request a label from an absolute path import");
-    }
-
-    @Override
-    public boolean hasAbsolutePath() {
-      return true;
-    }
-
-    @Override
-    public PathFragment getAbsolutePath() {
-      return this.importPath;
-    }
-
-  }
-
-  @VisibleForSerialization
-  @AutoCodec
-  static final class RelativePathImport extends SkylarkImportImpl {
-    private final String importFile;
-
-    @VisibleForSerialization
-    RelativePathImport(String importString, String importFile) {
-      super(importString);
-      this.importFile = importFile;
-    }
-
-    @Override
-    public PathFragment asPathFragment() {
-      return PathFragment.create(importFile);
-    }
-
-    @Override
-    public Label getLabel(Label containingFileLabel) {
-      // The twistiness of the code below is due to the fact that the containing file may be in
-      // a subdirectory of the package that contains it. We need to construct a Label with
-      // the imported file in the same subdirectory of the package.
-      PathFragment containingDirInPkg =
-          PathFragment.create(containingFileLabel.getName()).getParentDirectory();
-      String targetNameForImport = containingDirInPkg.getRelative(importFile).toString();
-      try {
-        // This is for imports relative to the current repository, so repositoryMapping can be
-        // empty
-        return containingFileLabel.getRelativeWithRemapping(targetNameForImport, ImmutableMap.of());
-      } catch (LabelSyntaxException e) {
-        // Shouldn't happen because the parent label is assumed to be valid and the target string is
-        // validated on construction.
-        throw new IllegalStateException(e);
-      }
-    }
-
   }
 
   @VisibleForSerialization
@@ -230,11 +151,11 @@ public class SkylarkImports {
 
   @VisibleForTesting
   static final String EXTERNAL_PKG_NOT_ALLOWED_MSG =
-      "Skylark files may not be loaded from the //external package";
+      "Starlark files may not be loaded from the //external package";
 
   @VisibleForTesting
   static final String INVALID_PATH_SYNTAX =
-      "First argument of 'load' must be a label and start with either '//', ':', or '@'.";
+      "First argument of 'load' must be a label and start with either '//', ':', or '@'";
 
   @VisibleForTesting
   static final String INVALID_TARGET_PREFIX = "Invalid target: ";
@@ -278,7 +199,7 @@ public class SkylarkImports {
         throw new SkylarkImportSyntaxException(MUST_HAVE_BZL_EXT_MSG);
       }
       PackageIdentifier packageId = importLabel.getPackageIdentifier();
-      if (packageId.equals(Label.EXTERNAL_PACKAGE_IDENTIFIER)) {
+      if (packageId.equals(LabelConstants.EXTERNAL_PACKAGE_IDENTIFIER)) {
         throw new SkylarkImportSyntaxException(EXTERNAL_PKG_NOT_ALLOWED_MSG);
       }
       return new AbsoluteLabelImport(importString, importLabel);

@@ -21,7 +21,6 @@ import com.google.devtools.build.lib.skylarkbuildapi.FileApi;
 import com.google.devtools.build.lib.skylarkbuildapi.ProviderApi;
 import com.google.devtools.build.lib.skylarkbuildapi.SkylarkActionFactoryApi;
 import com.google.devtools.build.lib.skylarkbuildapi.SkylarkRuleContextApi;
-import com.google.devtools.build.lib.skylarkbuildapi.TransitiveInfoCollectionApi;
 import com.google.devtools.build.lib.skylarkinterface.Param;
 import com.google.devtools.build.lib.skylarkinterface.ParamType;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkCallable;
@@ -30,21 +29,27 @@ import com.google.devtools.build.lib.syntax.Environment;
 import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.syntax.SkylarkList;
 import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import javax.annotation.Nullable;
 
-/**
- * Utilities for Java compilation support in Skylark.
- */
-@SkylarkModule(name = "java_common", doc = "Utilities for Java compilation support in Skylark.")
-public interface JavaCommonApi<FileT extends FileApi, JavaInfoT extends JavaInfoApi<FileT>,
+/** Utilities for Java compilation support in Skylark. */
+@SkylarkModule(name = "java_common", doc = "Utilities for Java compilation support in Starlark.")
+public interface JavaCommonApi<
+    FileT extends FileApi,
+    JavaInfoT extends JavaInfoApi<FileT>,
+    JavaToolchainT extends JavaToolchainSkylarkApiProviderApi,
+    JavaRuntimeT extends JavaRuntimeInfoApi,
     SkylarkRuleContextT extends SkylarkRuleContextApi,
-    TransitiveInfoCollectionT extends TransitiveInfoCollectionApi,
     SkylarkActionFactoryT extends SkylarkActionFactoryApi> {
 
   @SkylarkCallable(
       name = "create_provider",
       doc =
-          "Creates a JavaInfo from jars. compile_time/runtime_jars represent the outputs of the "
+          "This API is deprecated. It will be disabled by default in Bazel 0.23. Please use "
+              + "<a href ="
+              + "'https://docs.bazel.build/versions/master/skylark/lib/JavaInfo.html#JavaInfo'>"
+              + "JavaInfo()</a> instead."
+              + "Creates a JavaInfo from jars. compile_time/runtime_jars are the outputs of the "
               + "target providing a JavaInfo, while transitive_*_jars represent their dependencies."
               + "<p>Note: compile_time_jars and runtime_jars are not automatically merged into the "
               + "transitive jars (unless the given transitive_*_jars are empty) - if this is the "
@@ -108,11 +113,12 @@ public interface JavaCommonApi<FileT extends FileApi, JavaInfoT extends JavaInfo
             name = "java_toolchain",
             positional = false,
             named = true,
-            type = TransitiveInfoCollectionApi.class,
+            type = Object.class,
+            allowedTypes = {@ParamType(type = JavaToolchainSkylarkApiProviderApi.class)},
             noneable = true,
             defaultValue = "None",
             doc =
-                "A label pointing to a java_toolchain rule to be used for retrieving the ijar "
+                "A JavaToolchainInfo to be used for retrieving the ijar "
                     + "tool. Only set when use_ijar is True."),
         @Param(
             name = "transitive_compile_time_jars",
@@ -168,167 +174,164 @@ public interface JavaCommonApi<FileT extends FileApi, JavaInfoT extends JavaInfo
       throws EvalException;
 
   @SkylarkCallable(
-    name = "provider",
-    structField = true,
-    doc = "Returns the Java declared provider. <br>"
-        + "The same value is accessible as <code>JavaInfo</code>. <br>"
-        + "Prefer using <code>JavaInfo</code> in new code."
-  )
+      name = "provider",
+      structField = true,
+      doc =
+          "Returns the Java declared provider. <br>"
+              + "The same value is accessible as <code>JavaInfo</code>. <br>"
+              + "Prefer using <code>JavaInfo</code> in new code.")
   public ProviderApi getJavaProvider();
 
   @SkylarkCallable(
-    name = "compile",
-    doc = "Compiles Java source files/jars from the implementation of a Skylark rule and returns a "
-      + "provider that represents the results of the compilation and can be added to the set of "
-      + "providers emitted by this rule.",
-    parameters = {
-      @Param(
-          name = "ctx",
-          positional = true,
-          named = false,
-          type = SkylarkRuleContextApi.class,
-          doc = "The rule context."
-      ),
-      @Param(
-          name = "source_jars",
-          positional = false,
-          named = true,
-          type = SkylarkList.class,
-          generic1 = FileApi.class,
-          defaultValue = "[]",
-          doc = "A list of the jars to be compiled. At least one of source_jars or source_files"
-            + " should be specified."
-      ),
-      @Param(
-        name = "source_files",
-        positional = false,
-        named = true,
-        type = SkylarkList.class,
-        generic1 = FileApi.class,
-        defaultValue = "[]",
-        doc = "A list of the Java source files to be compiled. At least one of source_jars or "
-          + "source_files should be specified."
-      ),
-      @Param(
-        name = "output",
-        positional = false,
-        named = true,
-        type = FileApi.class
-      ),
-      @Param(
-        name = "javac_opts",
-        positional = false,
-        named = true,
-        type = SkylarkList.class,
-        generic1 = String.class,
-        defaultValue =  "[]",
-        doc = "A list of the desired javac options. Optional."
-      ),
-      @Param(
-        name = "deps",
-        positional = false,
-        named = true,
-        type = SkylarkList.class,
-        generic1 = JavaInfoApi.class,
-        defaultValue = "[]",
-        doc = "A list of dependencies. Optional."
-      ),
-      @Param(
-          name = "exports",
-          positional = false,
-          named = true,
-          type = SkylarkList.class,
-          generic1 = JavaInfoApi.class,
-          defaultValue = "[]",
-          doc = "A list of exports. Optional."
-      ),
-      @Param(
-          name = "plugins",
-          positional = false,
-          named = true,
-          type = SkylarkList.class,
-          generic1 = JavaInfoApi.class,
-          defaultValue = "[]",
-          doc = "A list of plugins. Optional."
-      ),
-      @Param(
-          name = "exported_plugins",
-          positional = false,
-          named = true,
-          type = SkylarkList.class,
-          generic1 = JavaInfoApi.class,
-          defaultValue = "[]",
-          doc = "A list of exported plugins. Optional."
-      ),
-      @Param(
-        name = "strict_deps",
-        defaultValue = "'ERROR'",
-        positional = false,
-        named = true,
-        type = String.class,
-        doc = "A string that specifies how to handle strict deps. Possible values: 'OFF', 'ERROR',"
-          + "'WARN' and 'DEFAULT'. For more details see "
-          + "https://docs.bazel.build/versions/master/bazel-user-manual.html#flag--strict_java_deps"
-          + ". By default 'ERROR'."
-      ),
-      @Param(
-        name = "java_toolchain",
-        positional = false,
-        named = true,
-        type = TransitiveInfoCollectionApi.class,
-        doc = "A label pointing to a java_toolchain rule to be used for this compilation. "
-          + "Mandatory."
-      ),
-      @Param(
-        name = "host_javabase",
-        positional = false,
-        named = true,
-        type = TransitiveInfoCollectionApi.class,
-        doc = "A label pointing to a JDK to be used for this compilation. Mandatory."
-      ),
-      @Param(
-        name = "sourcepath",
-        positional = false,
-        named = true,
-        type = SkylarkList.class,
-        generic1 = FileApi.class,
-        defaultValue = "[]"
-      ),
-      @Param(
-          name = "resources",
-          positional = false,
-          named = true,
-          type = SkylarkList.class,
-          generic1 = FileApi.class,
-          defaultValue = "[]"
-      ),
-      @Param(
-          name = "neverlink",
-          positional = false,
-          named = true,
-          type = Boolean.class,
-          defaultValue = "False"
-      )
-    },
-    useEnvironment = true
-  )
+      name = "compile",
+      doc =
+          "Compiles Java source files/jars from the implementation of a Starlark rule and returns "
+              + "a provider that represents the results of the compilation and can be added to "
+              + "the set of providers emitted by this rule.",
+      parameters = {
+        @Param(
+            name = "ctx",
+            positional = true,
+            named = false,
+            type = SkylarkRuleContextApi.class,
+            doc = "The rule context."),
+        @Param(
+            name = "source_jars",
+            positional = false,
+            named = true,
+            type = SkylarkList.class,
+            generic1 = FileApi.class,
+            defaultValue = "[]",
+            doc =
+                "A list of the jars to be compiled. At least one of source_jars or source_files"
+                    + " should be specified."),
+        @Param(
+            name = "source_files",
+            positional = false,
+            named = true,
+            type = SkylarkList.class,
+            generic1 = FileApi.class,
+            defaultValue = "[]",
+            doc =
+                "A list of the Java source files to be compiled. At least one of source_jars or "
+                    + "source_files should be specified."),
+        @Param(name = "output", positional = false, named = true, type = FileApi.class),
+        @Param(
+            name = "output_source_jar",
+            positional = false,
+            named = true,
+            type = FileApi.class,
+            noneable = true,
+            defaultValue = "None",
+            doc = "The output source jar. Optional. Defaults to `{output_jar}-src.jar` if unset."),
+        @Param(
+            name = "javac_opts",
+            positional = false,
+            named = true,
+            type = SkylarkList.class,
+            generic1 = String.class,
+            defaultValue = "[]",
+            doc = "A list of the desired javac options. Optional."),
+        @Param(
+            name = "deps",
+            positional = false,
+            named = true,
+            type = SkylarkList.class,
+            generic1 = JavaInfoApi.class,
+            defaultValue = "[]",
+            doc = "A list of dependencies. Optional."),
+        @Param(
+            name = "exports",
+            positional = false,
+            named = true,
+            type = SkylarkList.class,
+            generic1 = JavaInfoApi.class,
+            defaultValue = "[]",
+            doc = "A list of exports. Optional."),
+        @Param(
+            name = "plugins",
+            positional = false,
+            named = true,
+            type = SkylarkList.class,
+            generic1 = JavaInfoApi.class,
+            defaultValue = "[]",
+            doc = "A list of plugins. Optional."),
+        @Param(
+            name = "exported_plugins",
+            positional = false,
+            named = true,
+            type = SkylarkList.class,
+            generic1 = JavaInfoApi.class,
+            defaultValue = "[]",
+            doc = "A list of exported plugins. Optional."),
+        @Param(
+            name = "strict_deps",
+            defaultValue = "'ERROR'",
+            positional = false,
+            named = true,
+            type = String.class,
+            doc =
+                "A string that specifies how to handle strict deps. Possible values: 'OFF', "
+                    + "'ERROR', 'WARN' and 'DEFAULT'. For more details see "
+                    + "https://docs.bazel.build/versions/master/bazel-user-manual.html#"
+                    + "flag--strict_java_deps. By default 'ERROR'."),
+        @Param(
+            name = "java_toolchain",
+            positional = false,
+            named = true,
+            type = Object.class,
+            allowedTypes = {@ParamType(type = JavaToolchainSkylarkApiProviderApi.class)},
+            doc = "A JavaToolchainInfo to be used for this compilation. Mandatory."),
+        @Param(
+            name = "host_javabase",
+            positional = false,
+            named = true,
+            type = Object.class,
+            allowedTypes = {@ParamType(type = JavaRuntimeInfoApi.class)},
+            doc = "A JavaRuntimeInfo to be used for this compilation. Mandatory."),
+        @Param(
+            name = "sourcepath",
+            positional = false,
+            named = true,
+            type = SkylarkList.class,
+            generic1 = FileApi.class,
+            defaultValue = "[]"),
+        @Param(
+            name = "resources",
+            positional = false,
+            named = true,
+            type = SkylarkList.class,
+            generic1 = FileApi.class,
+            defaultValue = "[]"),
+        @Param(
+            name = "neverlink",
+            positional = false,
+            named = true,
+            type = Boolean.class,
+            defaultValue = "False")
+      },
+      useLocation = true,
+      useEnvironment = true)
   public JavaInfoT createJavaCompileAction(
       SkylarkRuleContextT skylarkRuleContext,
       SkylarkList<FileT> sourceJars,
       SkylarkList<FileT> sourceFiles,
       FileT outputJar,
+      Object outputSourceJar,
       SkylarkList<String> javacOpts,
       SkylarkList<JavaInfoT> deps,
       SkylarkList<JavaInfoT> exports,
       SkylarkList<JavaInfoT> plugins,
       SkylarkList<JavaInfoT> exportedPlugins,
       String strictDepsMode,
-      TransitiveInfoCollectionT javaToolchain,
-      TransitiveInfoCollectionT hostJavabase,
+      JavaToolchainT javaToolchain,
+      JavaRuntimeT hostJavabase,
       SkylarkList<FileT> sourcepathEntries,
       SkylarkList<FileT> resources,
       Boolean neverlink,
-      Environment environment) throws EvalException, InterruptedException;
+      Location loc,
+      Environment environment)
+      throws EvalException, InterruptedException;
 
   @SkylarkCallable(
       name = "run_ijar",
@@ -365,14 +368,19 @@ public interface JavaCommonApi<FileT extends FileApi, JavaInfoT extends JavaInfo
             name = "java_toolchain",
             positional = false,
             named = true,
-            type = TransitiveInfoCollectionApi.class,
-            doc = "A label pointing to a java_toolchain rule to used to find the ijar tool."),
-      })
+            type = Object.class,
+            allowedTypes = {@ParamType(type = JavaToolchainSkylarkApiProviderApi.class)},
+            doc = "A JavaToolchainInfo to used to find the ijar tool."),
+      },
+      useSkylarkSemantics = true,
+      useLocation = true)
   public FileApi runIjar(
       SkylarkActionFactoryT actions,
       FileT jar,
       Object targetLabel,
-      TransitiveInfoCollectionT javaToolchain)
+      JavaToolchainT javaToolchain,
+      Location location,
+      StarlarkSemantics semantics)
       throws EvalException;
 
   @SkylarkCallable(
@@ -410,12 +418,19 @@ public interface JavaCommonApi<FileT extends FileApi, JavaInfoT extends JavaInfo
             name = "java_toolchain",
             positional = false,
             named = true,
-            type = TransitiveInfoCollectionApi.class,
-            doc = "A label pointing to a java_toolchain rule to used to find the stamp_jar tool."),
-      })
+            type = Object.class,
+            allowedTypes = {@ParamType(type = JavaToolchainSkylarkApiProviderApi.class)},
+            doc = "A JavaToolchainInfo to used to find the stamp_jar tool."),
+      },
+      useSkylarkSemantics = true,
+      useLocation = true)
   public FileApi stampJar(
-      SkylarkActionFactoryT actions, FileT jar, Label targetLabel,
-      TransitiveInfoCollectionT javaToolchain)
+      SkylarkActionFactoryT actions,
+      FileT jar,
+      Label targetLabel,
+      JavaToolchainT javaToolchain,
+      Location location,
+      StarlarkSemantics semantics)
       throws EvalException;
 
   @SkylarkCallable(
@@ -457,23 +472,29 @@ public interface JavaCommonApi<FileT extends FileApi, JavaInfoT extends JavaInfo
             name = "java_toolchain",
             positional = false,
             named = true,
-            type = TransitiveInfoCollectionApi.class,
-            doc = "A label pointing to a java_toolchain rule to used to find the ijar tool."),
+            type = Object.class,
+            allowedTypes = {@ParamType(type = JavaToolchainSkylarkApiProviderApi.class)},
+            doc = "A JavaToolchainInfo to used to find the ijar tool."),
         @Param(
             name = "host_javabase",
             positional = false,
             named = true,
-            type = TransitiveInfoCollectionApi.class,
-            doc = "A label pointing to a JDK to be used for packing sources."),
+            type = Object.class,
+            allowedTypes = {@ParamType(type = JavaRuntimeInfoApi.class)},
+            doc = "A JavaRuntimeInfo to be used for packing sources."),
       },
-      allowReturnNones = true)
+      allowReturnNones = true,
+      useSkylarkSemantics = true,
+      useLocation = true)
   public FileApi packSources(
       SkylarkActionFactoryT actions,
       FileT outputJar,
       SkylarkList<FileT> sourceFiles,
       SkylarkList<FileT> sourceJars,
-      TransitiveInfoCollectionT javaToolchain,
-      TransitiveInfoCollectionT hostJavabase)
+      JavaToolchainT javaToolchain,
+      JavaRuntimeT hostJavabase,
+      Location location,
+      StarlarkSemantics semantics)
       throws EvalException;
 
   @SkylarkCallable(
@@ -482,58 +503,77 @@ public interface JavaCommonApi<FileT extends FileApi, JavaInfoT extends JavaInfo
       documented = false,
       parameters = {
         @Param(
-            name = "ctx",
-            positional = true,
-            named = false,
-            type = SkylarkRuleContextApi.class,
-            doc = "The rule context."
-        ),
-        @Param(name = "java_toolchain_attr", positional = false, named = true, type = String.class)
-      })
+            name = "java_toolchain",
+            positional = false,
+            named = true,
+            type = Object.class,
+            allowedTypes = {@ParamType(type = JavaToolchainSkylarkApiProviderApi.class)},
+            doc =
+                "A JavaToolchainInfo to be used for retrieving the ijar "
+                    + "tool. Only set when use_ijar is True."),
+      },
+      useLocation = true)
   // TODO(b/78512644): migrate callers to passing explicit javacopts or using custom toolchains, and
   // delete
-  public ImmutableList<String> getDefaultJavacOpts(
-      SkylarkRuleContextT skylarkRuleContext, String javaToolchainAttr) throws EvalException;
+  public ImmutableList<String> getDefaultJavacOpts(JavaToolchainT javaToolchain, Location loc)
+      throws EvalException;
 
   @SkylarkCallable(
-    name = "merge",
-    doc = "Merges the given providers into a single JavaInfo.",
-    parameters = {
-      @Param(
-          name = "providers",
-          positional = true,
-          named = false,
-          type = SkylarkList.class,
-          generic1 = JavaInfoApi.class,
-          doc = "The list of providers to merge."
-      ),
-    }
-  )
+      name = "merge",
+      doc = "Merges the given providers into a single JavaInfo.",
+      parameters = {
+        @Param(
+            name = "providers",
+            positional = true,
+            named = false,
+            type = SkylarkList.class,
+            generic1 = JavaInfoApi.class,
+            doc = "The list of providers to merge."),
+      })
   public JavaInfoT mergeJavaProviders(SkylarkList<JavaInfoT> providers);
 
   @SkylarkCallable(
-    name = "make_non_strict",
-    doc =
-        "Returns a new Java provider whose direct-jars part is the union of both the direct and"
-            + " indirect jars of the given Java provider.",
-    parameters = {
-      @Param(
-          name = "java_info",
-          positional = true,
-          named = false,
-          type = JavaInfoApi.class,
-          doc = "The java info."
-      ),
-    }
-  )
+      name = "make_non_strict",
+      doc =
+          "Returns a new Java provider whose direct-jars part is the union of both the direct and"
+              + " indirect jars of the given Java provider.",
+      parameters = {
+        @Param(
+            name = "java_info",
+            positional = true,
+            named = false,
+            type = JavaInfoApi.class,
+            doc = "The java info."),
+      })
   public JavaInfoT makeNonStrict(JavaInfoT javaInfo);
 
   @SkylarkCallable(
-    name = "JavaRuntimeInfo",
-    doc =
-        "The key used to retrieve the provider that contains information about the Java "
-            + "runtime being used.",
-    structField = true
-  )
+      name = "JavaToolchainInfo",
+      doc =
+          "The key used to retrieve the provider that contains information about the Java "
+              + "toolchain being used.",
+      structField = true)
+  public ProviderApi getJavaToolchainProvider();
+
+  @SkylarkCallable(
+      name = "JavaRuntimeInfo",
+      doc =
+          "The key used to retrieve the provider that contains information about the Java "
+              + "runtime being used.",
+      structField = true)
   public ProviderApi getJavaRuntimeProvider();
+
+  @SkylarkCallable(
+      name = "is_java_toolchain_resolution_enabled_do_not_use",
+      documented = false,
+      parameters = {
+        @Param(
+            name = "ctx",
+            positional = false,
+            named = true,
+            type = SkylarkRuleContextApi.class,
+            doc = "The rule context."),
+      },
+      doc = "Returns true if --incompatible_use_toolchain_resolution_for_java_rules is enabled.")
+  boolean isJavaToolchainResolutionEnabled(SkylarkRuleContextT ruleContext) throws EvalException;
 }

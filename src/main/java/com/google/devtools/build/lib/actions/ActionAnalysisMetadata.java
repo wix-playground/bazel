@@ -31,6 +31,14 @@ public interface ActionAnalysisMetadata {
   ActionOwner getOwner();
 
   /**
+   * Returns true if the action can be shared, i.e. multiple configured targets can create the same
+   * action.
+   *
+   * <p>In theory, these should not exist, but in practice, they do.
+   */
+  boolean isShareable();
+
+  /**
    * Returns a mnemonic (string constant) for this kind of action; written into
    * the master log so that the appropriate parser can be invoked for the output
    * of the action. Effectively a public method as the value is used by the
@@ -181,7 +189,8 @@ public interface ActionAnalysisMetadata {
   }
 
   /**
-   * Whether this action has loose headers.
+   * Indicates whether this action has loose headers, or if this is an {@link ActionTemplate},
+   * whether the expanded action(s) will have loose headers.
    *
    * <p>If this is true, top-down evaluation considers an action changed if any source files in
    * package have changed.

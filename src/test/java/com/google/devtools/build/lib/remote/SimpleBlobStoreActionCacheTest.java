@@ -15,17 +15,27 @@ package com.google.devtools.build.lib.remote;
 
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.devtools.build.lib.remote.util.Utils.getFromFuture;
+import static com.google.devtools.build.lib.testutil.MoreAsserts.assertThrows;
 import static java.nio.charset.StandardCharsets.UTF_8;
 
+import build.bazel.remote.execution.v2.Action;
+import build.bazel.remote.execution.v2.ActionResult;
+import build.bazel.remote.execution.v2.Command;
+import build.bazel.remote.execution.v2.Digest;
+import build.bazel.remote.execution.v2.Directory;
+import build.bazel.remote.execution.v2.DirectoryNode;
+import build.bazel.remote.execution.v2.FileNode;
+import build.bazel.remote.execution.v2.Tree;
 import com.google.common.base.Charsets;
 import com.google.common.collect.ImmutableList;
 import com.google.common.util.concurrent.ListeningScheduledExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.devtools.build.lib.actions.ActionInputHelper;
 import com.google.devtools.build.lib.clock.JavaClock;
-import com.google.devtools.build.lib.remote.Retrier.Backoff;
 import com.google.devtools.build.lib.remote.blobstore.ConcurrentMapBlobStore;
+import com.google.devtools.build.lib.remote.options.RemoteOptions;
 import com.google.devtools.build.lib.remote.util.DigestUtil;
+import com.google.devtools.build.lib.remote.util.DigestUtil.ActionKey;
 import com.google.devtools.build.lib.remote.util.TracingMetadataUtils;
 import com.google.devtools.build.lib.vfs.DigestHashFunction;
 import com.google.devtools.build.lib.vfs.FileSystem;
@@ -33,13 +43,9 @@ import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 import com.google.devtools.common.options.Options;
-import com.google.devtools.remoteexecution.v1test.ActionResult;
-import com.google.devtools.remoteexecution.v1test.Digest;
-import com.google.devtools.remoteexecution.v1test.Directory;
-import com.google.devtools.remoteexecution.v1test.DirectoryNode;
-import com.google.devtools.remoteexecution.v1test.FileNode;
-import com.google.devtools.remoteexecution.v1test.Tree;
 import io.grpc.Context;
+import java.io.IOException;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
@@ -61,7 +67,6 @@ public class SimpleBlobStoreActionCacheTest {
   private FakeActionInputFileCache fakeFileCache;
   private Context withEmptyMetadata;
   private Context prevContext;
-  private Retrier retrier;
 
   private static ListeningScheduledExecutorService retryService;
 
@@ -77,23 +82,6 @@ public class SimpleBlobStoreActionCacheTest {
     execRoot = fs.getPath("/exec/root");
     FileSystemUtils.createDirectoryAndParents(execRoot);
     fakeFileCache = new FakeActionInputFileCache(execRoot);
-    retrier =
-        new Retrier(
-            () ->
-                new Backoff() {
-                  @Override
-                  public long nextDelayMillis() {
-                    return -1;
-                  }
-
-                  @Override
-                  public int getRetryAttempts() {
-                    return 0;
-                  }
-                },
-            (e) -> false,
-            retryService,
-            RemoteRetrier.ALLOW_ALL_CALLS);
     Path stdout = fs.getPath("/tmp/stdout");
     Path stderr = fs.getPath("/tmp/stderr");
     FileSystemUtils.createDirectoryAndParents(stdout.getParentDirectory());
@@ -122,7 +110,6 @@ public class SimpleBlobStoreActionCacheTest {
     return new SimpleBlobStoreActionCache(
         Options.getDefaults(RemoteOptions.class),
         new ConcurrentMapBlobStore(map),
-        retrier,
         DIGEST_UTIL);
   }
 
@@ -311,6 +298,25 @@ public class SimpleBlobStoreActionCacheTest {
   }
 
   @Test
+  public void testUploadBlobAtMostOnce() throws Exception {
+    final Digest digest = DIGEST_UTIL.computeAsUtf8("abcdefg");
+
+    final ConcurrentMap<String, byte[]> map = new ConcurrentHashMap<>();
+    final SimpleBlobStoreActionCache client = newClient(map);
+
+    byte[] bytes = "abcdefg".getBytes(UTF_8);
+    assertThat(client.uploadBlob(bytes)).isEqualTo(digest);
+    assertThat(map.keySet()).containsExactly(digest.getHash());
+    assertThat(map.entrySet()).hasSize(1);
+    assertThat(map.get(digest.getHash())).isEqualTo(bytes);
+
+    // Blob store does not get upload more than once during a single build.
+    map.remove(digest.getHash());
+    assertThat(client.uploadBlob(bytes)).isEqualTo(digest);
+    assertThat(map.entrySet()).hasSize(0);
+  }
+
+  @Test
   public void testUploadDirectory() throws Exception {
     final Digest fooDigest =
         fakeFileCache.createScratchInput(ActionInputHelper.fromPath("a/foo"), "xyz");
@@ -334,20 +340,36 @@ public class SimpleBlobStoreActionCacheTest {
     final Path quxFile = execRoot.getRelative("bar/qux");
     quxFile.setExecutable(true);
     final Path barDir = execRoot.getRelative("bar");
+    Command cmd = Command.newBuilder().addOutputFiles("bla").build();
+    final Digest cmdDigest = DIGEST_UTIL.compute(cmd);
+    Action action = Action.newBuilder().setCommandDigest(cmdDigest).build();
+    final Digest actionDigest = DIGEST_UTIL.compute(action);
 
     final ConcurrentMap<String, byte[]> map = new ConcurrentHashMap<>();
     final SimpleBlobStoreActionCache client = newClient(map);
 
     ActionResult.Builder result = ActionResult.newBuilder();
-    client.upload(result, execRoot, ImmutableList.<Path>of(fooFile, barDir));
+    client.upload(
+        result,
+        DIGEST_UTIL.asActionKey(actionDigest),
+        action,
+        cmd,
+        execRoot,
+        ImmutableList.<Path>of(fooFile, barDir),
+        /* uploadAction= */ true);
     ActionResult.Builder expectedResult = ActionResult.newBuilder();
     expectedResult.addOutputFilesBuilder().setPath("a/foo").setDigest(fooDigest);
     expectedResult.addOutputDirectoriesBuilder().setPath("bar").setTreeDigest(barDigest);
     assertThat(result.build()).isEqualTo(expectedResult.build());
 
     assertThat(map.keySet())
-        .containsExactly(fooDigest.getHash(), quxDigest.getHash(), barDigest.getHash());
-  }
+        .containsExactly(
+            fooDigest.getHash(),
+            quxDigest.getHash(),
+            barDigest.getHash(),
+            cmdDigest.getHash(),
+            actionDigest.getHash());
+ }
 
   @Test
   public void testUploadDirectoryEmpty() throws Exception {
@@ -360,13 +382,12 @@ public class SimpleBlobStoreActionCacheTest {
     final ConcurrentMap<String, byte[]> map = new ConcurrentHashMap<>();
     final SimpleBlobStoreActionCache client = newClient(map);
 
-    ActionResult.Builder result = ActionResult.newBuilder();
-    client.upload(result, execRoot, ImmutableList.<Path>of(barDir));
+    ActionResult result = uploadDirectory(client, ImmutableList.<Path>of(barDir));
     ActionResult.Builder expectedResult = ActionResult.newBuilder();
     expectedResult.addOutputDirectoriesBuilder().setPath("bar").setTreeDigest(barDigest);
-    assertThat(result.build()).isEqualTo(expectedResult.build());
+    assertThat(result).isEqualTo(expectedResult.build());
 
-    assertThat(map.keySet()).containsExactly(barDigest.getHash());
+    assertThat(map.keySet()).contains(barDigest.getHash());
   }
 
   @Test
@@ -403,13 +424,43 @@ public class SimpleBlobStoreActionCacheTest {
     quxFile.setExecutable(true);
     final Path barDir = execRoot.getRelative("bar");
 
-    ActionResult.Builder result = ActionResult.newBuilder();
-    client.upload(result, execRoot, ImmutableList.<Path>of(barDir));
+    ActionResult result = uploadDirectory(client, ImmutableList.<Path>of(barDir));
     ActionResult.Builder expectedResult = ActionResult.newBuilder();
     expectedResult.addOutputDirectoriesBuilder().setPath("bar").setTreeDigest(barDigest);
-    assertThat(result.build()).isEqualTo(expectedResult.build());
+    assertThat(result).isEqualTo(expectedResult.build());
 
     assertThat(map.keySet())
-        .containsExactly(wobbleDigest.getHash(), quxDigest.getHash(), barDigest.getHash());
+        .containsAllOf(wobbleDigest.getHash(), quxDigest.getHash(), barDigest.getHash());
+  }
+
+  private ActionResult uploadDirectory(SimpleBlobStoreActionCache client, List<Path> outputs)
+      throws Exception {
+    ActionResult.Builder result = ActionResult.newBuilder();
+    Action action = Action.getDefaultInstance();
+    ActionKey actionKey = DIGEST_UTIL.computeActionKey(action);
+    Command cmd = Command.getDefaultInstance();
+    client.upload(result, actionKey, action, cmd, execRoot, outputs, /* uploadAction= */ true);
+    return result.build();
+  }
+
+  @Test
+  public void testDownloadFailsOnDigestMismatch() {
+    // Test that the download fails when a blob/file has a different content hash than expected.
+
+    final ConcurrentMap<String, byte[]> map = new ConcurrentHashMap<>();
+    Digest digest = DIGEST_UTIL.computeAsUtf8("hello");
+    // Store content that doesn't match its digest
+    map.put(digest.getHash(), "world".getBytes(Charsets.UTF_8));
+    final SimpleBlobStoreActionCache client = newClient(map);
+
+    IOException e =
+        assertThrows(IOException.class, () -> getFromFuture(client.downloadBlob(digest)));
+    assertThat(e).hasMessageThat().contains(digest.getHash());
+
+    e =
+        assertThrows(
+            IOException.class,
+            () -> getFromFuture(client.downloadFile(fs.getPath("/exec/root/foo"), digest)));
+    assertThat(e).hasMessageThat().contains(digest.getHash());
   }
 }

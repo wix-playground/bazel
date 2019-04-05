@@ -32,6 +32,7 @@ import com.google.devtools.build.lib.analysis.actions.CustomCommandLine;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
+import com.google.devtools.build.lib.analysis.skylark.SymbolGenerator;
 import com.google.devtools.build.lib.analysis.test.InstrumentedFilesCollector.InstrumentationSpec;
 import com.google.devtools.build.lib.collect.IterablesChain;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
@@ -40,15 +41,16 @@ import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.packages.AttributeMap;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
-import com.google.devtools.build.lib.packages.Info;
+import com.google.devtools.build.lib.packages.InfoInterface;
 import com.google.devtools.build.lib.packages.NativeProvider;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
 import com.google.devtools.build.lib.packages.TriState;
-import com.google.devtools.build.lib.rules.android.DataBinding.DataBindingContext;
 import com.google.devtools.build.lib.rules.android.ZipFilterBuilder.CheckHashMismatchMode;
-import com.google.devtools.build.lib.rules.cpp.CcLinkParams;
-import com.google.devtools.build.lib.rules.cpp.CcLinkingInfo;
+import com.google.devtools.build.lib.rules.android.databinding.DataBindingContext;
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
+import com.google.devtools.build.lib.rules.cpp.LibraryToLink.CcLinkingContext;
+import com.google.devtools.build.lib.rules.cpp.LibraryToLink.CcLinkingContext.LinkOptions;
 import com.google.devtools.build.lib.rules.java.ClasspathConfiguredFragment;
 import com.google.devtools.build.lib.rules.java.JavaCcLinkParamsProvider;
 import com.google.devtools.build.lib.rules.java.JavaCommon;
@@ -56,6 +58,7 @@ import com.google.devtools.build.lib.rules.java.JavaCompilationArgsProvider;
 import com.google.devtools.build.lib.rules.java.JavaCompilationArgsProvider.ClasspathType;
 import com.google.devtools.build.lib.rules.java.JavaCompilationArtifacts;
 import com.google.devtools.build.lib.rules.java.JavaCompilationHelper;
+import com.google.devtools.build.lib.rules.java.JavaCompileAction;
 import com.google.devtools.build.lib.rules.java.JavaInfo;
 import com.google.devtools.build.lib.rules.java.JavaPluginInfoProvider;
 import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider;
@@ -86,8 +89,10 @@ public class AndroidCommon {
 
   private static final ImmutableSet<String> TRANSITIVE_ATTRIBUTES =
       ImmutableSet.of("deps", "exports");
+
+  private static final int DEX_THREADS = 5;
   private static final ResourceSet DEX_RESOURCE_SET =
-      ResourceSet.createWithRamCpuIo(4096.0, 5.0, 0.0);
+      ResourceSet.createWithRamCpu(/* memoryMb= */ 4096.0, /* cpuUsage= */ DEX_THREADS);
 
   public static final <T extends TransitiveInfoProvider> Iterable<T> getTransitivePrerequisites(
       RuleContext ruleContext, Mode mode, final Class<T> classType) {
@@ -101,7 +106,7 @@ public class AndroidCommon {
     return builder.build();
   }
 
-  public static final <T extends Info> Iterable<T> getTransitivePrerequisites(
+  public static final <T extends InfoInterface> Iterable<T> getTransitivePrerequisites(
       RuleContext ruleContext, Mode mode, NativeProvider<T> key) {
     IterablesChain.Builder<T> builder = IterablesChain.builder();
     AttributeMap attributes = ruleContext.attributes();
@@ -113,7 +118,7 @@ public class AndroidCommon {
     return builder.build();
   }
 
-  public static final <T extends Info> Iterable<T> getTransitivePrerequisites(
+  public static final <T extends InfoInterface> Iterable<T> getTransitivePrerequisites(
       RuleContext ruleContext, Mode mode, BuiltinProvider<T> key) {
     IterablesChain.Builder<T> builder = IterablesChain.builder();
     AttributeMap attributes = ruleContext.attributes();
@@ -178,23 +183,21 @@ public class AndroidCommon {
   public static NestedSet<Artifact> collectTransitiveNeverlinkLibraries(
       RuleContext ruleContext,
       Iterable<? extends TransitiveInfoCollection> deps,
-      ImmutableList<Artifact> runtimeJars) {
-    NestedSetBuilder<Artifact> builder = NestedSetBuilder.naiveLinkOrder();
-
+      NestedSet<Artifact> runtimeJars) {
+    NestedSetBuilder<Artifact> neverlinkedRuntimeJars = NestedSetBuilder.naiveLinkOrder();
     for (AndroidNeverLinkLibrariesProvider provider :
         AnalysisUtils.getProviders(deps, AndroidNeverLinkLibrariesProvider.class)) {
-      builder.addTransitive(provider.getTransitiveNeverLinkLibraries());
+      neverlinkedRuntimeJars.addTransitive(provider.getTransitiveNeverLinkLibraries());
     }
 
     if (JavaCommon.isNeverLink(ruleContext)) {
-      builder.addAll(runtimeJars);
+      neverlinkedRuntimeJars.addTransitive(runtimeJars);
       for (JavaCompilationArgsProvider provider :
           JavaInfo.getProvidersFromListOfTargets(JavaCompilationArgsProvider.class, deps)) {
-        builder.addTransitive(provider.getRuntimeJars());
+        neverlinkedRuntimeJars.addTransitive(provider.getRuntimeJars());
       }
     }
-
-    return builder.build();
+    return neverlinkedRuntimeJars.build();
   }
 
   /**
@@ -216,7 +219,7 @@ public class AndroidCommon {
       // Multithreaded dex tends to run faster, but only up to about 5 threads (at which point the
       // law of diminishing returns kicks in). This was determined experimentally, with 5-thread dex
       // performing about 25% faster than 1-thread dex.
-      commandLine.add("--num-threads=5");
+      commandLine.add("--num-threads=" + DEX_THREADS);
     }
 
     commandLine.addAll(dexOptions);
@@ -238,6 +241,7 @@ public class AndroidCommon {
             .setProgressMessage("Converting %s to dex format", jarToDex.getExecPathString())
             .setMnemonic("AndroidDexer")
             .addCommandLine(commandLine.build())
+            // TODO(ulfjack): Use 1 CPU if multidex is true?
             .setResources(DEX_RESOURCE_SET);
     if (mainDexList != null) {
       builder.addInput(mainDexList);
@@ -522,9 +526,12 @@ public class AndroidCommon {
       jarsProducedForRuntime.add(resourceApk.getResourceJavaClassJar());
     }
 
+    // Databinding metadata that the databinding annotation processor reads.
+    ImmutableList<Artifact> additionalJavaInputsFromDatabinding =
+        resourceApk.asDataBindingContext().processDeps(ruleContext, isBinary);
+
     JavaCompilationHelper helper =
-        initAttributes(
-            attributes, javaSemantics, resourceApk.asDataBindingContext().processDeps(ruleContext));
+        initAttributes(attributes, javaSemantics, additionalJavaInputsFromDatabinding);
     if (ruleContext.hasErrors()) {
       return null;
     }
@@ -617,14 +624,9 @@ public class AndroidCommon {
 
     nativeHeaderOutput = helper.createNativeHeaderJar(classJar);
 
-    outputDepsProto = helper.createOutputDepsProtoArtifact(classJar, javaArtifactsBuilder);
-    helper.createCompileActionWithInstrumentation(
-        classJar,
-        manifestProtoOutput,
-        genSourceJar,
-        outputDepsProto,
-        javaArtifactsBuilder,
-        nativeHeaderOutput);
+    JavaCompileAction javaCompileAction =
+        helper.createCompileAction(classJar, manifestProtoOutput, genSourceJar, nativeHeaderOutput);
+    outputDepsProto = javaCompileAction.getOutputDepsProto();
 
     if (generateExtensionRegistry) {
       generatedExtensionRegistryProvider =
@@ -658,7 +660,9 @@ public class AndroidCommon {
         collectTransitiveNeverlinkLibraries(
             ruleContext,
             javaCommon.getDependencies(),
-            javaCommon.getJavaCompilationArtifacts().getRuntimeJars());
+            NestedSetBuilder.<Artifact>naiveLinkOrder()
+                .addAll(javaCommon.getJavaCompilationArtifacts().getRuntimeJars())
+                .build());
     if (collectJavaCompilationArgs) {
       boolean hasSources = attributes.hasSources();
       this.javaCompilationArgs = collectJavaCompilationArgs(asNeverLink, hasSources);
@@ -810,39 +814,44 @@ public class AndroidCommon {
     return asNeverLink;
   }
 
-  public CcLinkingInfo getCcLinkingInfo() {
-    return getCcLinkingInfo(
-        javaCommon.targetsTreatedAsDeps(ClasspathType.BOTH), ImmutableList.<String>of());
+  CcInfo getCcInfo() {
+    return getCcInfo(
+        javaCommon.targetsTreatedAsDeps(ClasspathType.BOTH),
+        ImmutableList.of(),
+        ruleContext.getSymbolGenerator());
   }
 
-  public static CcLinkingInfo getCcLinkingInfo(
-      final Iterable<? extends TransitiveInfoCollection> deps, final Collection<String> linkOpts) {
+  static CcInfo getCcInfo(
+      final Iterable<? extends TransitiveInfoCollection> deps,
+      final Collection<String> linkOpts,
+      SymbolGenerator<?> symbolGenerator) {
 
-    CcLinkParams linkOptsParams = CcLinkParams.builder().addLinkOpts(linkOpts).build();
-    CcLinkingInfo linkOptsProvider =
-        CcLinkingInfo.Builder.create()
-            .setStaticModeParamsForDynamicLibrary(linkOptsParams)
-            .setStaticModeParamsForExecutable(linkOptsParams)
-            .setDynamicModeParamsForDynamicLibrary(linkOptsParams)
-            .setDynamicModeParamsForExecutable(linkOptsParams)
+    CcLinkingContext ccLinkingContext =
+        CcLinkingContext.builder()
+            .addUserLinkFlags(
+                NestedSetBuilder.<LinkOptions>linkOrder()
+                    .add(LinkOptions.of(linkOpts, symbolGenerator))
+                    .build())
             .build();
 
-    ImmutableList<CcLinkingInfo> ccLinkingInfos =
-        ImmutableList.<CcLinkingInfo>builder()
-            .add(linkOptsProvider)
+    CcInfo linkoptsCcInfo = CcInfo.builder().setCcLinkingContext(ccLinkingContext).build();
+
+    ImmutableList<CcInfo> ccInfos =
+        ImmutableList.<CcInfo>builder()
+            .add(linkoptsCcInfo)
             .addAll(
-                Streams.stream(AnalysisUtils.getProviders(deps, JavaCcLinkParamsProvider.class))
-                    .map(JavaCcLinkParamsProvider::getCcLinkingInfo)
+                Streams.stream(AnalysisUtils.getProviders(deps, JavaCcLinkParamsProvider.PROVIDER))
+                    .map(JavaCcLinkParamsProvider::getCcInfo)
                     .collect(ImmutableList.toImmutableList()))
             .addAll(
                 Streams.stream(
                         AnalysisUtils.getProviders(deps, AndroidCcLinkParamsProvider.PROVIDER))
                     .map(AndroidCcLinkParamsProvider::getLinkParams)
                     .collect(ImmutableList.toImmutableList()))
-            .addAll(AnalysisUtils.getProviders(deps, CcLinkingInfo.PROVIDER))
+            .addAll(AnalysisUtils.getProviders(deps, CcInfo.PROVIDER))
             .build();
 
-    return CcLinkingInfo.merge(ccLinkingInfos);
+    return CcInfo.merge(ccInfos);
   }
 
   /** Returns {@link AndroidConfiguration} in given context. */
@@ -872,10 +881,17 @@ public class AndroidCommon {
       JavaSemantics semantics,
       DataBindingContext dataBindingContext,
       boolean isLibrary) {
-    ImmutableList<Artifact> srcs =
-        dataBindingContext.addAnnotationFileToSrcs(
-            ruleContext.getPrerequisiteArtifacts("srcs", RuleConfiguredTarget.Mode.TARGET).list(),
-            ruleContext);
+
+    ImmutableList<Artifact> ruleSources =
+        ruleContext.getPrerequisiteArtifacts("srcs", RuleConfiguredTarget.Mode.TARGET).list();
+
+    ImmutableList<Artifact> dataBindingSources =
+        dataBindingContext.getAnnotationSourceFiles(ruleContext);
+
+    ImmutableList<Artifact> srcs = ImmutableList.<Artifact>builder()
+        .addAll(ruleSources)
+        .addAll(dataBindingSources)
+        .build();
 
     ImmutableList<TransitiveInfoCollection> compileDeps;
     ImmutableList<TransitiveInfoCollection> runtimeDeps;
@@ -935,18 +951,22 @@ public class AndroidCommon {
       Artifact filter,
       Artifact out,
       CheckHashMismatchMode checkHashMismatch) {
-    new ZipFilterBuilder(ruleContext)
-        .setInputZip(in)
-        .addFilterZips(ImmutableList.of(filter))
-        .setOutputZip(out)
-        .addFileTypeToFilter(".class")
-        .setCheckHashMismatchMode(checkHashMismatch)
-        .addExplicitFilter("R\\.class")
-        .addExplicitFilter("R\\$.*\\.class")
-        // These files are generated by databinding in both the target and the instrumentation app
-        // with different contents. We want to keep the one from the target app.
-        .addExplicitFilter("/BR\\.class$")
-        .addExplicitFilter("/databinding/[^/]+Binding\\.class$")
-        .build();
+    ZipFilterBuilder builder =
+        new ZipFilterBuilder(ruleContext)
+            .setInputZip(in)
+            .addFilterZips(ImmutableList.of(filter))
+            .setOutputZip(out)
+            .addFileTypeToFilter(".class")
+            .setCheckHashMismatchMode(checkHashMismatch)
+            // These files are generated by databinding in both the target and the instrumentation
+            // app with different contents. We want to keep the one from the target app.
+            .addExplicitFilter("/BR\\.class$")
+            .addExplicitFilter("/databinding/[^/]+Binding\\.class$");
+
+    if (getAndroidConfig(ruleContext).removeRClassesFromInstrumentationTestJar()) {
+      builder.addExplicitFilter("R\\.class").addExplicitFilter("R\\$.*\\.class");
+    }
+
+    builder.build();
   }
 }

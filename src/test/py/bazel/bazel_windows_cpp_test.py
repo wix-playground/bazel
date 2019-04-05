@@ -469,11 +469,12 @@ class BazelWindowsCppTest(test_base.TestBase):
     ])
 
     # Test exporting symbols using custom DEF file in cc_library.
-    # Auto-generating DEF file should be disbaled when custom DEF file specified
+    # Auto-generating DEF file should be disabled when custom DEF file specified
     exit_code, _, stderr = self.RunBazel([
         'build', '//:lib', '-s', '--output_groups=dynamic_library',
         '--features=windows_export_all_symbols'
     ])
+    self.AssertExitCode(exit_code, 0, stderr)
 
     bazel_bin = self.getBazelInfo('bazel-bin')
     lib_if = os.path.join(bazel_bin, 'lib.if.lib')

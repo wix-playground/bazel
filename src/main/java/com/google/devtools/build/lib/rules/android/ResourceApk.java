@@ -18,7 +18,7 @@ import com.google.devtools.build.lib.analysis.OutputGroupInfo;
 import com.google.devtools.build.lib.analysis.RuleConfiguredTargetBuilder;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.rules.android.DataBinding.DataBindingContext;
+import com.google.devtools.build.lib.rules.android.databinding.DataBindingContext;
 import java.util.Optional;
 import javax.annotation.Nullable;
 
@@ -291,7 +291,7 @@ public final class ResourceApk {
         .withResourceDependencies(resourceDeps)
         .withAssetDependencies(assetDeps)
         .setDebug(dataContext.useDebug())
-        .setThrowOnResourceConflict(dataContext.getAndroidConfig().throwOnResourceConflict())
+        .setThrowOnResourceConflict(dataContext.throwOnResourceConflict())
         .buildWithoutLocalResources(dataContext, manifest, dataBindingContext);
   }
 }

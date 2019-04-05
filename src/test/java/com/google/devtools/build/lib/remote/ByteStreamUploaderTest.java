@@ -17,6 +17,8 @@ import static com.google.common.truth.Truth.assertThat;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.Assert.fail;
 
+import build.bazel.remote.execution.v2.Digest;
+import build.bazel.remote.execution.v2.RequestMetadata;
 import com.google.bytestream.ByteStreamGrpc;
 import com.google.bytestream.ByteStreamGrpc.ByteStreamImplBase;
 import com.google.bytestream.ByteStreamProto.WriteRequest;
@@ -26,12 +28,10 @@ import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningScheduledExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.devtools.build.lib.analysis.BlazeVersionInfo;
-import com.google.devtools.build.lib.remote.Retrier.RetryException;
 import com.google.devtools.build.lib.remote.util.DigestUtil;
+import com.google.devtools.build.lib.remote.util.TestUtils;
 import com.google.devtools.build.lib.remote.util.TracingMetadataUtils;
 import com.google.devtools.build.lib.vfs.DigestHashFunction;
-import com.google.devtools.remoteexecution.v1test.Digest;
-import com.google.devtools.remoteexecution.v1test.RequestMetadata;
 import com.google.protobuf.ByteString;
 import io.grpc.BindableService;
 import io.grpc.Context;
@@ -45,6 +45,7 @@ import io.grpc.ServerInterceptors;
 import io.grpc.ServerServiceDefinition;
 import io.grpc.Status;
 import io.grpc.Status.Code;
+import io.grpc.StatusRuntimeException;
 import io.grpc.inprocess.InProcessChannelBuilder;
 import io.grpc.inprocess.InProcessServerBuilder;
 import io.grpc.stub.StreamObserver;
@@ -136,7 +137,7 @@ public class ByteStreamUploaderTest {
   public void singleBlobUploadShouldWork() throws Exception {
     Context prevContext = withEmptyMetadata.attach();
     RemoteRetrier retrier =
-        new RemoteRetrier(() -> mockBackoff, (e) -> true, retryService, Retrier.ALLOW_ALL_CALLS);
+        TestUtils.newRemoteRetrier(() -> mockBackoff, (e) -> true, retryService);
     ByteStreamUploader uploader = new ByteStreamUploader(INSTANCE_NAME,
         new ReferenceCountedChannel(channel), null, 3, retrier);
 
@@ -208,8 +209,7 @@ public class ByteStreamUploaderTest {
   public void multipleBlobsUploadShouldWork() throws Exception {
     Context prevContext = withEmptyMetadata.attach();
     RemoteRetrier retrier =
-        new RemoteRetrier(
-            () -> new FixedBackoff(1, 0), (e) -> true, retryService, Retrier.ALLOW_ALL_CALLS);
+        TestUtils.newRemoteRetrier(() -> new FixedBackoff(1, 0), (e) -> true, retryService);
     ByteStreamUploader uploader = new ByteStreamUploader(INSTANCE_NAME,
         new ReferenceCountedChannel(channel), null, 3, retrier);
 
@@ -242,8 +242,7 @@ public class ByteStreamUploaderTest {
     // We upload blobs with different context, and retry 3 times for each upload.
     // We verify that the correct metadata is passed to the server with every blob.
     RemoteRetrier retrier =
-        new RemoteRetrier(
-            () -> new FixedBackoff(5, 0), (e) -> true, retryService, Retrier.ALLOW_ALL_CALLS);
+        TestUtils.newRemoteRetrier(() -> new FixedBackoff(5, 0), (e) -> true, retryService);
     ByteStreamUploader uploader = new ByteStreamUploader(INSTANCE_NAME,
         new ReferenceCountedChannel(channel), null, 3, retrier);
 
@@ -336,7 +335,7 @@ public class ByteStreamUploaderTest {
 
     Context prevContext = withEmptyMetadata.attach();
     RemoteRetrier retrier =
-        new RemoteRetrier(() -> mockBackoff, (e) -> true, retryService, Retrier.ALLOW_ALL_CALLS);
+        TestUtils.newRemoteRetrier(() -> mockBackoff, (e) -> true, retryService);
     ByteStreamUploader uploader = new ByteStreamUploader(INSTANCE_NAME,
         new ReferenceCountedChannel(channel), null, 3, retrier);
 
@@ -398,8 +397,7 @@ public class ByteStreamUploaderTest {
   public void errorsShouldBeReported() throws IOException, InterruptedException {
     Context prevContext = withEmptyMetadata.attach();
     RemoteRetrier retrier =
-        new RemoteRetrier(
-            () -> new FixedBackoff(1, 10), (e) -> true, retryService, Retrier.ALLOW_ALL_CALLS);
+        TestUtils.newRemoteRetrier(() -> new FixedBackoff(1, 10), (e) -> true, retryService);
     ByteStreamUploader uploader = new ByteStreamUploader(INSTANCE_NAME,
         new ReferenceCountedChannel(channel), null, 3, retrier);
 
@@ -417,8 +415,7 @@ public class ByteStreamUploaderTest {
     try {
       uploader.uploadBlob(chunker, true);
       fail("Should have thrown an exception.");
-    } catch (RetryException e) {
-      assertThat(e.getAttempts()).isEqualTo(2);
+    } catch (IOException e) {
       assertThat(RemoteRetrierUtils.causedByStatus(e, Code.INTERNAL)).isTrue();
     }
 
@@ -429,8 +426,7 @@ public class ByteStreamUploaderTest {
   public void shutdownShouldCancelOngoingUploads() throws Exception {
     Context prevContext = withEmptyMetadata.attach();
     RemoteRetrier retrier =
-        new RemoteRetrier(
-            () -> new FixedBackoff(1, 10), (e) -> true, retryService, Retrier.ALLOW_ALL_CALLS);
+        TestUtils.newRemoteRetrier(() -> new FixedBackoff(1, 10), (e) -> true, retryService);
     ByteStreamUploader uploader = new ByteStreamUploader(INSTANCE_NAME,
         new ReferenceCountedChannel(channel), null, 3, retrier);
 
@@ -492,8 +488,7 @@ public class ByteStreamUploaderTest {
     ListeningScheduledExecutorService retryService =
         MoreExecutors.listeningDecorator(Executors.newScheduledThreadPool(1));
     RemoteRetrier retrier =
-        new RemoteRetrier(
-            () -> new FixedBackoff(1, 10), (e) -> true, retryService, Retrier.ALLOW_ALL_CALLS);
+        TestUtils.newRemoteRetrier(() -> new FixedBackoff(1, 10), (e) -> true, retryService);
     ByteStreamUploader uploader = new ByteStreamUploader(INSTANCE_NAME,
         new ReferenceCountedChannel(channel), null, 3, retrier);
 
@@ -516,7 +511,7 @@ public class ByteStreamUploaderTest {
     try {
       uploader.uploadBlob(chunker, true);
       fail("Should have thrown an exception.");
-    } catch (RetryException e) {
+    } catch (IOException e) {
       assertThat(e).hasCauseThat().isInstanceOf(RejectedExecutionException.class);
     }
 
@@ -527,7 +522,7 @@ public class ByteStreamUploaderTest {
   public void resourceNameWithoutInstanceName() throws Exception {
     Context prevContext = withEmptyMetadata.attach();
     RemoteRetrier retrier =
-        new RemoteRetrier(() -> mockBackoff, (e) -> true, retryService, Retrier.ALLOW_ALL_CALLS);
+        TestUtils.newRemoteRetrier(() -> mockBackoff, (e) -> true, retryService);
     ByteStreamUploader uploader =
         new ByteStreamUploader(/* instanceName */ null,
             new ReferenceCountedChannel(channel), null, 3, retrier);
@@ -568,11 +563,8 @@ public class ByteStreamUploaderTest {
   public void nonRetryableStatusShouldNotBeRetried() throws Exception {
     Context prevContext = withEmptyMetadata.attach();
     RemoteRetrier retrier =
-        new RemoteRetrier(
-            () -> new FixedBackoff(1, 0),
-            /* No Status is retriable. */ (e) -> false,
-            retryService,
-            Retrier.ALLOW_ALL_CALLS);
+        TestUtils.newRemoteRetrier(
+            () -> new FixedBackoff(1, 0), /* No Status is retriable. */ (e) -> false, retryService);
     ByteStreamUploader uploader =
         new ByteStreamUploader(/* instanceName */ null,
             new ReferenceCountedChannel(channel), null, 3, retrier);
@@ -594,9 +586,85 @@ public class ByteStreamUploaderTest {
     try {
       uploader.uploadBlob(chunker, true);
       fail("Should have thrown an exception.");
-    } catch (RetryException e) {
+    } catch (IOException e) {
       assertThat(numCalls.get()).isEqualTo(1);
     }
+
+    withEmptyMetadata.detach(prevContext);
+  }
+
+  @Test
+  public void failedUploadsShouldNotDeduplicate() throws Exception {
+    Context prevContext = withEmptyMetadata.attach();
+    RemoteRetrier retrier =
+        TestUtils.newRemoteRetrier(() -> Retrier.RETRIES_DISABLED, (e) -> false, retryService);
+    ByteStreamUploader uploader =
+        new ByteStreamUploader(
+            INSTANCE_NAME, new ReferenceCountedChannel(channel), null, 3, retrier);
+
+    byte[] blob = new byte[CHUNK_SIZE * 2 + 1];
+    new Random().nextBytes(blob);
+
+    Chunker chunker = Chunker.builder(DIGEST_UTIL).setInput(blob).setChunkSize(CHUNK_SIZE).build();
+
+    AtomicInteger numUploads = new AtomicInteger();
+    serviceRegistry.addService(
+        new ByteStreamImplBase() {
+          boolean failRequest = true;
+
+          @Override
+          public StreamObserver<WriteRequest> write(StreamObserver<WriteResponse> streamObserver) {
+            numUploads.incrementAndGet();
+            return new StreamObserver<WriteRequest>() {
+              long nextOffset = 0;
+
+              @Override
+              public void onNext(WriteRequest writeRequest) {
+                if (failRequest) {
+                  streamObserver.onError(Status.UNKNOWN.asException());
+                  failRequest = false;
+                } else {
+                  nextOffset += writeRequest.getData().size();
+                  boolean lastWrite = blob.length == nextOffset;
+                  assertThat(writeRequest.getFinishWrite()).isEqualTo(lastWrite);
+                }
+              }
+
+              @Override
+              public void onError(Throwable throwable) {
+                fail("onError should never be called.");
+              }
+
+              @Override
+              public void onCompleted() {
+                assertThat(nextOffset).isEqualTo(blob.length);
+
+                WriteResponse response =
+                    WriteResponse.newBuilder().setCommittedSize(nextOffset).build();
+                streamObserver.onNext(response);
+                streamObserver.onCompleted();
+              }
+            };
+          }
+        });
+
+    StatusRuntimeException expected = null;
+    try {
+      // This should fail
+      uploader.uploadBlob(chunker, true);
+    } catch (IOException e) {
+      if (e.getCause() instanceof StatusRuntimeException) {
+        expected = (StatusRuntimeException) e.getCause();
+      }
+    }
+    assertThat(expected).isNotNull();
+    assertThat(Status.fromThrowable(expected).getCode()).isEqualTo(Code.UNKNOWN);
+    // This should trigger an upload.
+    uploader.uploadBlob(chunker, false);
+
+    assertThat(numUploads.get()).isEqualTo(2);
+
+    blockUntilInternalStateConsistent(uploader);
 
     withEmptyMetadata.detach(prevContext);
   }
@@ -605,7 +673,7 @@ public class ByteStreamUploaderTest {
   public void deduplicationOfUploadsShouldWork() throws Exception {
     Context prevContext = withEmptyMetadata.attach();
     RemoteRetrier retrier =
-        new RemoteRetrier(() -> mockBackoff, (e) -> true, retryService, Retrier.ALLOW_ALL_CALLS);
+        TestUtils.newRemoteRetrier(() -> mockBackoff, (e) -> true, retryService);
     ByteStreamUploader uploader = new ByteStreamUploader(INSTANCE_NAME,
         new ReferenceCountedChannel(channel), null, 3, retrier);
 

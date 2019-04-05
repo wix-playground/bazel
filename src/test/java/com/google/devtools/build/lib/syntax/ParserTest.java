@@ -18,6 +18,7 @@ import static com.google.common.truth.Truth.assertWithMessage;
 import static org.junit.Assert.fail;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.events.Location.LineAndColumn;
@@ -27,6 +28,7 @@ import com.google.devtools.build.lib.syntax.SkylarkImports.SkylarkImportSyntaxEx
 import com.google.devtools.build.lib.syntax.util.EvaluationTestCase;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Set;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -47,11 +49,14 @@ public class ParserTest extends EvaluationTestCase {
     return parseFileWithComments(input).getStatements();
   }
 
+  private BuildFileAST parseFileForSkylarkAsAST(String... input) {
+    BuildFileAST ast = BuildFileAST.parseString(getEventHandler(), input);
+    return ast.validate(env, getEventHandler());
+  }
+
   /** Parses Skylark code */
   private List<Statement> parseFileForSkylark(String... input) {
-    BuildFileAST ast = BuildFileAST.parseString(getEventHandler(), input);
-    ast = ast.validate(env, getEventHandler());
-    return ast.getStatements();
+    return parseFileForSkylarkAsAST(input).getStatements();
   }
 
   private static String getText(String text, ASTNode node) {
@@ -1099,7 +1104,6 @@ public class ParserTest extends EvaluationTestCase {
     SkylarkImport imp = SkylarkImports.create(stmt.getImport().getValue());
 
     assertThat(imp.getImportString()).named("getImportString()").isEqualTo(importString);
-    assertThat(imp.hasAbsolutePath()).named("hasAbsolutePath()").isFalse();
 
     Label containingFileLabel = Label.parseAbsoluteUnchecked(containingFileLabelString);
     assertThat(imp.getLabel(containingFileLabel)).named("containingFileLabel()")
@@ -1222,8 +1226,8 @@ public class ParserTest extends EvaluationTestCase {
     List<Statement> statements = parseFileForSkylark("load('//foo/bar:file.bzl', 'fun_test')\n");
     LoadStatement stmt = (LoadStatement) statements.get(0);
     assertThat(stmt.getImport().getValue()).isEqualTo("//foo/bar:file.bzl");
-    assertThat(stmt.getSymbols()).hasSize(1);
-    Identifier sym = stmt.getSymbols().get(0);
+    assertThat(stmt.getBindings()).hasSize(1);
+    Identifier sym = stmt.getBindings().get(0).getLocalName();
     int startOffset = sym.getLocation().getStartOffset();
     int endOffset = sym.getLocation().getEndOffset();
     assertThat(startOffset).named("getStartOffset()").isEqualTo(27);
@@ -1235,7 +1239,7 @@ public class ParserTest extends EvaluationTestCase {
     List<Statement> statements = parseFileForSkylark("load('//foo/bar:file.bzl', 'fun_test',)\n");
     LoadStatement stmt = (LoadStatement) statements.get(0);
     assertThat(stmt.getImport().getValue()).isEqualTo("//foo/bar:file.bzl");
-    assertThat(stmt.getSymbols()).hasSize(1);
+    assertThat(stmt.getBindings()).hasSize(1);
   }
 
   @Test
@@ -1243,7 +1247,7 @@ public class ParserTest extends EvaluationTestCase {
     List<Statement> statements = parseFileForSkylark("load(':file.bzl', 'foo', 'bar')\n");
     LoadStatement stmt = (LoadStatement) statements.get(0);
     assertThat(stmt.getImport().getValue()).isEqualTo(":file.bzl");
-    assertThat(stmt.getSymbols()).hasSize(2);
+    assertThat(stmt.getBindings()).hasSize(2);
   }
 
   @Test
@@ -1279,10 +1283,10 @@ public class ParserTest extends EvaluationTestCase {
     List<Statement> statements =
         parseFileForSkylark("load('//foo/bar:file.bzl', my_alias = 'lawl')\n");
     LoadStatement stmt = (LoadStatement) statements.get(0);
-    ImmutableList<Identifier> actualSymbols = stmt.getSymbols();
+    ImmutableList<LoadStatement.Binding> actualSymbols = stmt.getBindings();
 
     assertThat(actualSymbols).hasSize(1);
-    Identifier sym = actualSymbols.get(0);
+    Identifier sym = actualSymbols.get(0).getLocalName();
     assertThat(sym.getName()).isEqualTo("my_alias");
     int startOffset = sym.getLocation().getStartOffset();
     int endOffset = sym.getLocation().getEndOffset();
@@ -1300,14 +1304,14 @@ public class ParserTest extends EvaluationTestCase {
     List<Statement> statements =
         parseFileForSkylark(String.format("load('//foo/bar:file.bzl', %s)\n", loadSymbolString));
     LoadStatement stmt = (LoadStatement) statements.get(0);
-    ImmutableList<Identifier> actualSymbols = stmt.getSymbols();
+    ImmutableList<LoadStatement.Binding> actualSymbols = stmt.getBindings();
 
     assertThat(actualSymbols).hasSize(expectedSymbols.length);
 
     List<String> actualSymbolNames = new LinkedList<>();
 
-    for (Identifier identifier : actualSymbols) {
-      actualSymbolNames.add(identifier.getName());
+    for (LoadStatement.Binding binding : actualSymbols) {
+      actualSymbolNames.add(binding.getLocalName().getName());
     }
 
     assertThat(actualSymbolNames).containsExactly((Object[]) expectedSymbols);
@@ -1480,5 +1484,45 @@ public class ParserTest extends EvaluationTestCase {
     setFailFast(false);
     parseFile("func(*array)");
     assertContainsError("*args arguments are not allowed in BUILD files");
+  }
+
+  @Test
+  public void testArgumentAfterKwargs() throws Exception {
+    setFailFast(false);
+    parseFileForSkylark(
+        "f(",
+        "    1,",
+        "    *[2],",
+        "    *[3],", // error on this line
+        ")\n");
+    assertContainsError(":4:5: *arg argument is misplaced");
+  }
+
+  @Test
+  public void testPositionalArgAfterKeywordArg() throws Exception {
+    setFailFast(false);
+    parseFileForSkylark(
+        "f(",
+        "    2,",
+        "    a = 4,",
+        "    3,", // error on this line
+        ")\n");
+    assertContainsError(":4:5: positional argument is misplaced (positional arguments come first)");
+  }
+
+  @Test
+  public void testStringsAreDeduped() throws Exception {
+    BuildFileAST buildFileAST =
+        parseFileForSkylarkAsAST("L1 = ['cat', 'dog', 'fish']", "L2 = ['dog', 'fish', 'cat']");
+    Set<String> uniqueStringInstances = Sets.newIdentityHashSet();
+    SyntaxTreeVisitor collectAllStringsInStringLiteralsVisitor =
+        new SyntaxTreeVisitor() {
+          @Override
+          public void visit(StringLiteral stringLiteral) {
+            uniqueStringInstances.add(stringLiteral.getValue());
+          }
+        };
+    collectAllStringsInStringLiteralsVisitor.visit(buildFileAST);
+    assertThat(uniqueStringInstances).containsExactly("cat", "dog", "fish");
   }
 }

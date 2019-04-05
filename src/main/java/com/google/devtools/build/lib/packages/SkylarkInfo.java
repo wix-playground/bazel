@@ -20,6 +20,7 @@ import com.google.common.collect.ImmutableCollection;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.ImmutableSortedMap;
 import com.google.common.collect.Sets;
 import com.google.common.collect.Sets.SetView;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
@@ -43,7 +44,7 @@ import javax.annotation.Nullable;
  * implementing classes). Schemaless instances are map-based, while schemaful instances have a fixed
  * layout and array and are therefore more efficient.
  */
-public abstract class SkylarkInfo extends Info implements Concatable, SkylarkClassObject {
+public abstract class SkylarkInfo extends StructImpl implements Concatable, SkylarkClassObject {
 
   // Private because this should not be subclassed outside this file.
   private SkylarkInfo(Provider provider, @Nullable Location loc) {
@@ -124,9 +125,9 @@ public abstract class SkylarkInfo extends Info implements Concatable, SkylarkCla
    * NativeInfo} subclass.
    */
   // TODO(bazel-team): Make the special structs that need a custom error message use a different
-  // provider (subclassing NativeProvider) and a different Info implementation. Then remove this
-  // functionality, thereby saving a string pointer field for the majority of providers that don't
-  // need it.
+  // provider (subclassing NativeProvider) and a different StructImpl implementation. Then remove
+  // this functionality, thereby saving a string pointer field for the majority of providers that
+  // don't need it.
   public static SkylarkInfo createSchemalessWithCustomMessage(
       Provider provider, Map<String, Object> values, String errorMessageFormatForUnknownField) {
     Preconditions.checkNotNull(errorMessageFormatForUnknownField);
@@ -250,8 +251,7 @@ public abstract class SkylarkInfo extends Info implements Concatable, SkylarkCla
   /** A {@link SkylarkInfo} implementation that stores its values in a map. */
   // TODO(b/72448383): Make private.
   public static final class MapBackedSkylarkInfo extends SkylarkInfo {
-
-    private final ImmutableMap<String, Object> values;
+    private final ImmutableSortedMap<String, Object> values;
 
     /**
      * Formattable string with one {@code '%s'} placeholder for the missing field name.

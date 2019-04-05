@@ -80,7 +80,7 @@ final class ProcessWrapperSandboxedSpawnRunner extends AbstractSandboxSpawnRunne
     sandboxExecRoot.createDirectory();
 
     Map<String, String> environment =
-        localEnvProvider.rewriteLocalEnv(spawn.getEnvironment(), execRoot, "/tmp");
+        localEnvProvider.rewriteLocalEnv(spawn.getEnvironment(), binTools, "/tmp");
 
     Duration timeout = context.getTimeout();
     ProcessWrapperUtil.CommandLineBuilder commandLineBuilder =
@@ -101,8 +101,12 @@ final class ProcessWrapperSandboxedSpawnRunner extends AbstractSandboxSpawnRunne
             sandboxExecRoot,
             commandLineBuilder.build(),
             environment,
-            SandboxHelpers.processInputFiles(spawn, context, execRoot),
-            SandboxHelpers.getOutputFiles(spawn),
+            SandboxHelpers.processInputFiles(
+                spawn,
+                context,
+                execRoot,
+                getSandboxOptions().symlinkedSandboxExpandsTreeArtifactsInRunfilesTree),
+            SandboxHelpers.getOutputs(spawn),
             getWritableDirs(sandboxExecRoot, environment));
 
     return runSpawn(spawn, sandbox, context, execRoot, timeout, statisticsPath);

@@ -19,7 +19,6 @@ import static java.nio.charset.StandardCharsets.UTF_8;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Multimap;
 import com.google.common.hash.HashCode;
@@ -27,17 +26,20 @@ import com.google.devtools.build.lib.actions.ActionExecutionMetadata;
 import com.google.devtools.build.lib.actions.ActionInput;
 import com.google.devtools.build.lib.actions.ActionInputHelper;
 import com.google.devtools.build.lib.actions.ExecException;
-import com.google.devtools.build.lib.actions.ExecutionRequirements;
 import com.google.devtools.build.lib.actions.MetadataProvider;
 import com.google.devtools.build.lib.actions.ResourceManager;
 import com.google.devtools.build.lib.actions.ResourceManager.ResourceHandle;
 import com.google.devtools.build.lib.actions.Spawn;
 import com.google.devtools.build.lib.actions.SpawnResult;
+import com.google.devtools.build.lib.actions.Spawns;
 import com.google.devtools.build.lib.actions.UserExecException;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
+import com.google.devtools.build.lib.exec.BinTools;
 import com.google.devtools.build.lib.exec.SpawnRunner;
+import com.google.devtools.build.lib.exec.local.LocalEnvProvider;
 import com.google.devtools.build.lib.sandbox.SandboxHelpers;
+import com.google.devtools.build.lib.sandbox.SandboxHelpers.SandboxOutputs;
 import com.google.devtools.build.lib.util.io.FileOutErr;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -51,7 +53,6 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.SortedMap;
 import java.util.regex.Pattern;
 
@@ -76,18 +77,27 @@ final class WorkerSpawnRunner implements SpawnRunner {
   private final Multimap<String, String> extraFlags;
   private final EventHandler reporter;
   private final SpawnRunner fallbackRunner;
+  private final LocalEnvProvider localEnvProvider;
+  private final boolean sandboxUsesExpandedTreeArtifactsInRunfiles;
+  private final BinTools binTools;
 
   public WorkerSpawnRunner(
       Path execRoot,
       WorkerPool workers,
       Multimap<String, String> extraFlags,
       EventHandler reporter,
-      SpawnRunner fallbackRunner) {
+      SpawnRunner fallbackRunner,
+      LocalEnvProvider localEnvProvider,
+      boolean sandboxUsesExpandedTreeArtifactsInRunfiles,
+      BinTools binTools) {
     this.execRoot = execRoot;
     this.workers = Preconditions.checkNotNull(workers);
     this.extraFlags = extraFlags;
     this.reporter = reporter;
     this.fallbackRunner = fallbackRunner;
+    this.localEnvProvider = localEnvProvider;
+    this.sandboxUsesExpandedTreeArtifactsInRunfiles = sandboxUsesExpandedTreeArtifactsInRunfiles;
+    this.binTools = binTools;
   }
 
   @Override
@@ -98,8 +108,7 @@ final class WorkerSpawnRunner implements SpawnRunner {
   @Override
   public SpawnResult exec(Spawn spawn, SpawnExecutionContext context)
       throws ExecException, IOException, InterruptedException {
-    if (!spawn.getExecutionInfo().containsKey(ExecutionRequirements.SUPPORTS_WORKERS)
-        || !spawn.getExecutionInfo().get(ExecutionRequirements.SUPPORTS_WORKERS).equals("1")) {
+    if (!Spawns.supportsWorkers(spawn)) {
       // TODO(ulfjack): Don't circumvent SpawnExecutionPolicy. Either drop the warning here, or
       // provide a mechanism in SpawnExecutionPolicy to report warnings.
       reporter.handle(
@@ -110,6 +119,11 @@ final class WorkerSpawnRunner implements SpawnRunner {
 
     context.report(ProgressStatus.SCHEDULING, getName());
     return actuallyExec(spawn, context);
+  }
+
+  @Override
+  public boolean canExec(Spawn spawn) {
+    return Spawns.supportsWorkers(spawn);
   }
 
   private SpawnResult actuallyExec(Spawn spawn, SpawnExecutionContext context)
@@ -125,18 +139,22 @@ final class WorkerSpawnRunner implements SpawnRunner {
     // its args and put them into the WorkRequest instead.
     List<String> flagFiles = new ArrayList<>();
     ImmutableList<String> workerArgs = splitSpawnArgsIntoWorkerArgsAndFlagFiles(spawn, flagFiles);
-    ImmutableMap<String, String> env = spawn.getEnvironment();
+    Map<String, String> env =
+        localEnvProvider.rewriteLocalEnv(spawn.getEnvironment(), binTools, "/tmp");
 
     MetadataProvider inputFileCache = context.getMetadataProvider();
 
     SortedMap<PathFragment, HashCode> workerFiles =
         WorkerFilesHash.getWorkerFilesWithHashes(
-            spawn, context.getArtifactExpander(), context.getMetadataProvider());
+            spawn, context.getArtifactExpander(), context.getPathResolver(),
+            context.getMetadataProvider());
 
     HashCode workerFilesCombinedHash = WorkerFilesHash.getCombinedHash(workerFiles);
 
-    Map<PathFragment, Path> inputFiles = SandboxHelpers.processInputFiles(spawn, context, execRoot);
-    Set<PathFragment> outputFiles = SandboxHelpers.getOutputFiles(spawn);
+    Map<PathFragment, Path> inputFiles =
+        SandboxHelpers.processInputFiles(
+            spawn, context, execRoot, sandboxUsesExpandedTreeArtifactsInRunfiles);
+    SandboxOutputs outputs = SandboxHelpers.getOutputs(spawn);
 
     WorkerKey key =
         new WorkerKey(
@@ -151,7 +169,7 @@ final class WorkerSpawnRunner implements SpawnRunner {
     WorkRequest workRequest = createWorkRequest(spawn, context, flagFiles, inputFileCache);
 
     long startTime = System.currentTimeMillis();
-    WorkResponse response = execInWorker(spawn, key, workRequest, context, inputFiles, outputFiles);
+    WorkResponse response = execInWorker(spawn, key, workRequest, context, inputFiles, outputs);
     Duration wallTime = Duration.ofMillis(System.currentTimeMillis() - startTime);
 
     FileOutErr outErr = context.getFileOutErr();
@@ -232,6 +250,9 @@ final class WorkerSpawnRunner implements SpawnRunner {
    * files. The @ itself can be escaped with @@. This deliberately does not expand --flagfile= style
    * arguments, because we want to get rid of the expansion entirely at some point in time.
    *
+   * Also check that the argument is not an external repository label, because they start with `@`
+   * and are not flagfile locations.
+   *
    * @param execRoot the current execroot of the build (relative paths will be assumed to be
    *     relative to this directory).
    * @param arg the argument to expand.
@@ -240,7 +261,7 @@ final class WorkerSpawnRunner implements SpawnRunner {
    */
   static void expandArgument(Path execRoot, String arg, WorkRequest.Builder requestBuilder)
       throws IOException {
-    if (arg.startsWith("@") && !arg.startsWith("@@")) {
+    if (arg.startsWith("@") && !arg.startsWith("@@") && !isExternalRepositoryLabel(arg)) {
       for (String line :
           Files.readAllLines(
               Paths.get(execRoot.getRelative(arg.substring(1)).getPathString()), UTF_8)) {
@@ -251,13 +272,17 @@ final class WorkerSpawnRunner implements SpawnRunner {
     }
   }
 
+  private static boolean isExternalRepositoryLabel(String arg) {
+    return arg.matches("^@.*//.*");
+  }
+
   private WorkResponse execInWorker(
       Spawn spawn,
       WorkerKey key,
       WorkRequest request,
       SpawnExecutionContext context,
       Map<PathFragment, Path> inputFiles,
-      Set<PathFragment> outputFiles)
+      SandboxOutputs outputs)
       throws InterruptedException, ExecException {
     Worker worker = null;
     WorkResponse response;
@@ -290,7 +315,7 @@ final class WorkerSpawnRunner implements SpawnRunner {
           ResourceManager.instance().acquireResources(owner, spawn.getLocalResources())) {
         context.report(ProgressStatus.EXECUTING, getName());
         try {
-          worker.prepareExecution(inputFiles, outputFiles, key.getWorkerFilesWithHashes().keySet());
+          worker.prepareExecution(inputFiles, outputs, key.getWorkerFilesWithHashes().keySet());
         } catch (IOException e) {
           throw new UserExecException(
               ErrorMessage.builder()

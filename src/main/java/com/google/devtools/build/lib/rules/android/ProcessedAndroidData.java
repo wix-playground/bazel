@@ -19,7 +19,8 @@ import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
 import com.google.devtools.build.lib.packages.RuleErrorConsumer;
 import com.google.devtools.build.lib.rules.android.AndroidConfiguration.AndroidAaptVersion;
-import com.google.devtools.build.lib.rules.android.DataBinding.DataBindingContext;
+import com.google.devtools.build.lib.rules.android.databinding.DataBinding;
+import com.google.devtools.build.lib.rules.android.databinding.DataBindingContext;
 import com.google.devtools.build.lib.rules.java.ProguardHelper;
 import com.google.devtools.build.lib.syntax.Type;
 import java.util.List;
@@ -78,9 +79,7 @@ public class ProcessedAndroidData {
 
     AndroidResourcesProcessorBuilder builder =
         builderForNonIncrementalTopLevelTarget(dataContext, manifest, manifestValues, aaptVersion)
-            .setUseCompiledResourcesForMerge(
-                aaptVersion == AndroidAaptVersion.AAPT2
-                    && dataContext.getAndroidConfig().skipParsingAction())
+            .setUseCompiledResourcesForMerge(aaptVersion == AndroidAaptVersion.AAPT2)
             .setManifestOut(
                 dataContext.createOutputArtifact(AndroidRuleClasses.ANDROID_PROCESSED_MANIFEST))
             .setMergedResourcesOut(
@@ -119,6 +118,7 @@ public class ProcessedAndroidData {
 
     AndroidResourcesProcessorBuilder builder =
         builderForTopLevelTarget(dataContext, manifest, proguardPrefix, manifestValues)
+            .targetAaptVersion(AndroidAaptVersion.chooseTargetAaptVersion(ruleContext))
             .setApkOut(apkOut)
             .setMergedResourcesOut(mergedResourcesOut);
 
@@ -178,7 +178,8 @@ public class ProcessedAndroidData {
       AndroidResources resources,
       AndroidAssets assets,
       ResourceDependencies resourceDeps,
-      AssetDependencies assetDeps)
+      AssetDependencies assetDeps,
+      List<String> noCompressExtensions)
       throws InterruptedException {
 
     return builderForNonIncrementalTopLevelTarget(
@@ -193,6 +194,7 @@ public class ProcessedAndroidData {
         .setCrunchPng(false)
         .withResourceDependencies(resourceDeps)
         .withAssetDependencies(assetDeps)
+        .setUncompressedExtensions(noCompressExtensions)
         .build(dataContext, resources, assets, manifest, dataBindingContext);
   }
 
@@ -266,7 +268,7 @@ public class ProcessedAndroidData {
         .setApplicationId(manifestValues.get("applicationId"))
         .setVersionCode(manifestValues.get("versionCode"))
         .setVersionName(manifestValues.get("versionName"))
-        .setThrowOnResourceConflict(dataContext.getAndroidConfig().throwOnResourceConflict())
+        .setThrowOnResourceConflict(dataContext.throwOnResourceConflict())
 
         // Output
         .setProguardOut(

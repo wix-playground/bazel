@@ -14,8 +14,12 @@
 
 package com.google.devtools.build.lib.analysis;
 
+import static java.util.stream.Collectors.toSet;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Supplier;
+import com.google.common.base.Suppliers;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -37,7 +41,7 @@ import com.google.devtools.build.lib.analysis.config.InvalidConfigurationExcepti
 import com.google.devtools.build.lib.analysis.constraints.TopLevelConstraintSemantics;
 import com.google.devtools.build.lib.analysis.test.CoverageReportActionFactory;
 import com.google.devtools.build.lib.analysis.test.CoverageReportActionFactory.CoverageReportActionsWrapper;
-import com.google.devtools.build.lib.analysis.test.InstrumentedFilesProvider;
+import com.google.devtools.build.lib.analysis.test.InstrumentedFilesInfo;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
@@ -60,6 +64,7 @@ import com.google.devtools.build.lib.profiler.SilentCloseable;
 import com.google.devtools.build.lib.skyframe.AspectValue;
 import com.google.devtools.build.lib.skyframe.AspectValue.AspectKey;
 import com.google.devtools.build.lib.skyframe.AspectValue.AspectValueKey;
+import com.google.devtools.build.lib.skyframe.BuildConfigurationValue;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetKey;
 import com.google.devtools.build.lib.skyframe.CoverageReportValue;
 import com.google.devtools.build.lib.skyframe.PrepareAnalysisPhaseValue;
@@ -76,9 +81,11 @@ import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.WalkableGraph;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -155,9 +162,17 @@ public class BuildView {
     this.skyframeBuildView = skyframeExecutor.getSkyframeBuildView();
   }
 
-  /** The number of targets freshly evaluated in the last analysis run. */
-  public int getTargetsVisited() {
+  /** The number of configured targets freshly evaluated in the last analysis run. */
+  public int getTargetsConfigured() {
     return skyframeBuildView.getEvaluatedTargetKeys().size();
+  }
+
+  /** The number of targets (not configured targets) loaded in the last analysis run. */
+  public int getTargetsLoaded() {
+    return skyframeBuildView.getEvaluatedTargetKeys().stream()
+        .map(key -> ((ConfiguredTargetKey) key).getLabel())
+        .collect(toSet())
+        .size();
   }
 
   public int getActionsConstructed() {
@@ -214,7 +229,7 @@ public class BuildView {
       try (SilentCloseable c = Profiler.instance().profile("Prepare analysis phase")) {
         prepareAnalysisPhaseValue = skyframeExecutor.prepareAnalysisPhase(
             eventHandler, targetOptions, multiCpu, loadingResult.getTargetLabels());
-  
+
         // Determine the configurations
         configurations =
             prepareAnalysisPhaseValue.getConfigurations(eventHandler, skyframeExecutor);
@@ -241,7 +256,8 @@ public class BuildView {
       }
     }
 
-    skyframeBuildView.setConfigurations(eventHandler, configurations);
+    skyframeBuildView.setConfigurations(
+        eventHandler, configurations, viewOptions.maxConfigChangesToShow);
 
     if (configurations.getTargetConfigurations().size() == 1) {
       eventBus
@@ -351,11 +367,29 @@ public class BuildView {
               target.getFirst(), target.getSecond(), aspectConfigurations.get(target)));
     }
 
+    getArtifactFactory().noteAnalysisStarting();
     SkyframeAnalysisResult skyframeAnalysisResult;
     try {
+      Supplier<Map<BuildConfigurationValue.Key, BuildConfiguration>> configurationLookupSupplier =
+          () -> {
+            Map<BuildConfigurationValue.Key, BuildConfiguration> result = new HashMap<>();
+            for (TargetAndConfiguration node : topLevelTargetsWithConfigs) {
+              if (node.getConfiguration() != null) {
+                result.put(
+                    BuildConfigurationValue.key(node.getConfiguration()), node.getConfiguration());
+              }
+            }
+            return result;
+          };
       skyframeAnalysisResult =
           skyframeBuildView.configureTargets(
-              eventHandler, topLevelCtKeys, aspectKeys, eventBus, keepGoing, loadingPhaseThreads);
+              eventHandler,
+              topLevelCtKeys,
+              aspectKeys,
+              Suppliers.memoize(configurationLookupSupplier),
+              eventBus,
+              keepGoing,
+              loadingPhaseThreads);
       setArtifactRoots(skyframeAnalysisResult.getPackageRoots());
     } finally {
       skyframeBuildView.clearInvalidatedConfiguredTargets();
@@ -380,6 +414,7 @@ public class BuildView {
     AnalysisResult result =
         createResult(
             eventHandler,
+            eventBus,
             loadingResult,
             configurations,
             topLevelOptions,
@@ -393,6 +428,7 @@ public class BuildView {
 
   private AnalysisResult createResult(
       ExtendedEventHandler eventHandler,
+      EventBus eventBus,
       TargetPatternPhaseValue loadingResult,
       BuildConfigurationCollection configurations,
       TopLevelArtifactContext topLevelOptions,
@@ -435,6 +471,7 @@ public class BuildView {
       actionsWrapper =
           coverageReportActionFactory.createCoverageReportActionsWrapper(
               eventHandler,
+              eventBus,
               directories,
               allTargetsToTest,
               baselineCoverageArtifacts,
@@ -516,7 +553,7 @@ public class BuildView {
       ArtifactsToOwnerLabels.Builder topLevelArtifactsToOwnerLabels) {
     NestedSetBuilder<Artifact> baselineCoverageArtifacts = NestedSetBuilder.stableOrder();
     for (ConfiguredTarget target : configuredTargets) {
-      InstrumentedFilesProvider provider = target.getProvider(InstrumentedFilesProvider.class);
+      InstrumentedFilesInfo provider = target.get(InstrumentedFilesInfo.SKYLARK_CONSTRUCTOR);
       if (provider != null) {
         TopLevelArtifactHelper.addArtifactsWithOwnerLabel(
             provider.getBaselineCoverageArtifacts(),

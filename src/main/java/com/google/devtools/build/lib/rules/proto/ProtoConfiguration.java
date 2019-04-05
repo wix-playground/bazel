@@ -25,7 +25,6 @@ import com.google.devtools.build.lib.analysis.config.FragmentOptions;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.skylarkbuildapi.ProtoConfigurationApi;
 import com.google.devtools.common.options.Converters;
 import com.google.devtools.common.options.Option;
@@ -35,7 +34,6 @@ import com.google.devtools.common.options.OptionMetadataTag;
 import java.util.List;
 
 /** Configuration for Protocol Buffer Libraries. */
-@AutoCodec
 @Immutable
 // This module needs to be exported to Skylark so it can be passed as a mandatory host/target
 // configuration fragment in aspect definitions.
@@ -114,16 +112,15 @@ public class ProtoConfiguration extends Fragment implements ProtoConfigurationAp
     public Label protoToolchainForCc;
 
     @Option(
-      name = "strict_proto_deps",
-      defaultValue = "strict",
-      converter = BuildConfiguration.StrictDepsConverter.class,
-      documentationCategory = OptionDocumentationCategory.INPUT_STRICTNESS,
-      effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS, OptionEffectTag.EAGERNESS_TO_EXIT},
-      metadataTags = {OptionMetadataTag.INCOMPATIBLE_CHANGE},
-      help =
-          "If true, checks that a proto_library target explicitly declares all directly "
-              + "used targets as dependencies."
-    )
+        name = "strict_proto_deps",
+        defaultValue = "error",
+        converter = BuildConfiguration.StrictDepsConverter.class,
+        documentationCategory = OptionDocumentationCategory.INPUT_STRICTNESS,
+        effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS, OptionEffectTag.EAGERNESS_TO_EXIT},
+        metadataTags = {OptionMetadataTag.INCOMPATIBLE_CHANGE},
+        help =
+            "Unless OFF, checks that a proto_library target explicitly declares all directly "
+                + "used targets as dependencies.")
     public StrictDepsMode strictProtoDeps;
 
     @Option(
@@ -155,9 +152,39 @@ public class ProtoConfiguration extends Fragment implements ProtoConfigurationAp
         help = "If true, add --allowed_public_imports to the java compile actions.")
     public boolean experimentalJavaProtoAddAllowedPublicImports;
 
+    @Option(
+        name = "incompatible_disable_legacy_proto_provider",
+        defaultValue = "false",
+        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+        effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
+        metadataTags = {
+          OptionMetadataTag.INCOMPATIBLE_CHANGE,
+          OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+        },
+        help =
+            "If true, proto_library will no longer have the legacy provider accessible by "
+                + " 'dep.proto.' and it must be accessed by 'dep[ProtoInfo].")
+    public boolean disableLegacyProvider;
+
+    @Option(
+        name = "incompatible_disable_proto_source_root",
+        defaultValue = "false",
+        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+        effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
+        metadataTags = {
+          OptionMetadataTag.INCOMPATIBLE_CHANGE,
+          OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+        },
+        help =
+            "If true, proto_library will no longer allow the proto_source_root= attribute. It has "
+                + "been superseded by the strip_import_prefix= and import_prefix= attributes")
+    public boolean disableProtoSourceRoot;
+
     @Override
     public FragmentOptions getHost() {
       Options host = (Options) super.getHost();
+      host.disableLegacyProvider = disableLegacyProvider;
+      host.disableProtoSourceRoot = disableProtoSourceRoot;
       host.protoCompiler = protoCompiler;
       host.protocOpts = protocOpts;
       host.experimentalProtoExtraActions = experimentalProtoExtraActions;
@@ -201,12 +228,19 @@ public class ProtoConfiguration extends Fragment implements ProtoConfigurationAp
   private final ImmutableList<String> ccProtoLibrarySourceSuffixes;
   private final Options options;
 
-  @AutoCodec.Instantiator
-  public ProtoConfiguration(Options options) {
+  private ProtoConfiguration(Options options) {
     this.protocOpts = ImmutableList.copyOf(options.protocOpts);
     this.ccProtoLibraryHeaderSuffixes = ImmutableList.copyOf(options.ccProtoLibraryHeaderSuffixes);
     this.ccProtoLibrarySourceSuffixes = ImmutableList.copyOf(options.ccProtoLibrarySourceSuffixes);
     this.options = options;
+  }
+
+  public boolean enableLegacyProvider() {
+    return !options.disableLegacyProvider;
+  }
+
+  public boolean enableProtoSourceroot() {
+    return !options.disableProtoSourceRoot;
   }
 
   public ImmutableList<String> protocOpts() {

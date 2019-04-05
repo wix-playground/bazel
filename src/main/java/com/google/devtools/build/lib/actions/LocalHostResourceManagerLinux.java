@@ -49,7 +49,6 @@ public class LocalHostResourceManagerLinux {
       return ResourceSet.create(
           ramMb,
           logicalCpuCount,
-          1.0,
           Integer.MAX_VALUE);
     } catch (IOException | ProcMeminfoParser.KeywordNotFoundException e) {
       return null;
@@ -64,7 +63,7 @@ public class LocalHostResourceManagerLinux {
   }
 
   private static String readContent(String filename) throws IOException {
-    return Files.toString(new File(filename), Charset.defaultCharset());
+    return Files.asCharSource(new File(filename), Charset.defaultCharset()).read();
   }
 
   /**

@@ -22,8 +22,10 @@ import static org.junit.Assert.fail;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Splitter;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.MoreCollectors;
 import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.Artifact;
@@ -37,6 +39,7 @@ import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.rules.android.deployinfo.AndroidDeployInfoOuterClass.AndroidDeployInfo;
 import com.google.devtools.build.lib.rules.java.JavaCompileAction;
+import com.google.devtools.build.lib.rules.java.JavaCompileActionTestHelper;
 import com.google.devtools.build.lib.rules.java.JavaInfo;
 import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetAndData;
@@ -46,6 +49,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
 
@@ -215,11 +219,15 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
     return null;
   }
 
+  protected List<String> getProcessorNames(JavaCompileAction compileAction) throws Exception {
+    return JavaCompileActionTestHelper.getProcessorNames(compileAction);
+  }
+
   protected List<String> getProcessorNames(String outputTarget) throws Exception {
     OutputFileConfiguredTarget out = (OutputFileConfiguredTarget)
         getFileConfiguredTarget(outputTarget);
     JavaCompileAction compileAction = (JavaCompileAction) getGeneratingAction(out.getArtifact());
-    return compileAction.getProcessorNames();
+    return getProcessorNames(compileAction);
   }
 
   // Returns an artifact that will be generated when a rule has resources.
@@ -227,6 +235,54 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
     // the last provider is the provider from the target.
     return Iterables.getLast(target.get(AndroidResourcesInfo.PROVIDER).getDirectAndroidResources())
         .getJavaClassJar();
+  }
+
+  protected Map<String, String> getBinaryMergeeManifests(ConfiguredTarget target) throws Exception {
+    return getMergeeManifests(target.get(ApkInfo.PROVIDER).getMergedManifest());
+  }
+
+  protected Map<String, String> getLocalTestMergeeManifests(ConfiguredTarget target)
+      throws Exception {
+    return getMergeeManifests(
+        ImmutableList.copyOf(collectRunfiles(target)).stream()
+            .filter(
+                (artifact) ->
+                    artifact.getFilename().equals("AndroidManifest.xml")
+                        && artifact.getOwnerLabel().equals(target.getLabel()))
+            .collect(MoreCollectors.onlyElement()));
+  }
+
+  /** Gets the map of mergee manifests in the order specified on the command line. */
+  protected Map<String, String> getMergeeManifests(Artifact processedManifest) throws Exception {
+    List<String> processingActionArgs = getGeneratingSpawnActionArgs(processedManifest);
+    assertThat(processingActionArgs).contains("--primaryData");
+    String primaryData =
+        processingActionArgs.get(processingActionArgs.indexOf("--primaryData") + 1);
+    String mergedManifestExecPathString = Splitter.on(":").splitToList(primaryData).get(2);
+    SpawnAction processingAction = getGeneratingSpawnAction(processedManifest);
+    Artifact mergedManifest =
+        Iterables.find(
+            processingAction.getInputs(),
+            (artifact) -> artifact.getExecPath().toString().equals(mergedManifestExecPathString));
+    List<String> mergeArgs = getGeneratingSpawnActionArgs(mergedManifest);
+    assertThat(mergeArgs).contains("--mergeeManifests");
+    Map<String, String> splitData =
+        Splitter.on(",")
+            .withKeyValueSeparator(Splitter.onPattern("(?<!\\\\):"))
+            .split(mergeArgs.get(mergeArgs.indexOf("--mergeeManifests") + 1));
+    ImmutableMap.Builder<String, String> results = new ImmutableMap.Builder<>();
+    for (Map.Entry<String, String> manifestAndLabel : splitData.entrySet()) {
+      results.put(manifestAndLabel.getKey(), manifestAndLabel.getValue().replace("\\:", ":"));
+    }
+    return results.build();
+  }
+
+  /** Gets the processed manifest exported by the given library. */
+  protected Artifact getLibraryManifest(ConfiguredTarget target) throws Exception {
+    if (target.get(AndroidManifestInfo.PROVIDER) != null) {
+      return target.get(AndroidManifestInfo.PROVIDER).getManifest();
+    }
+    return null;
   }
 
   // Returns an artifact that will be generated when a rule has assets that are processed seperately
@@ -241,30 +297,32 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
 
   protected void checkDebugKey(String debugKeyFile, boolean hasDebugKeyTarget) throws Exception {
     ConfiguredTarget binary = getConfiguredTarget("//java/com/google/android/hello:b");
-    String defaultKeyStoreFile =
-        ruleClassProvider.getToolsRepository() + "//tools/android:debug_keystore";
+    Label defaultKeyStoreFile =
+        Label.parseAbsoluteUnchecked(
+            ruleClassProvider.getToolsRepository() + "//tools/android:debug_keystore");
+    Label debugKeyFileLabel = Label.parseAbsolute(debugKeyFile, ImmutableMap.of());
 
     if (hasDebugKeyTarget) {
       assertWithMessage("Debug key file target missing.")
-          .that(checkKeyPresence(binary, debugKeyFile, defaultKeyStoreFile))
+          .that(checkKeyPresence(binary, debugKeyFileLabel, defaultKeyStoreFile))
           .isTrue();
     } else {
       assertWithMessage("Debug key file is default, although different target specified.")
-          .that(checkKeyPresence(binary, defaultKeyStoreFile, debugKeyFile))
+          .that(checkKeyPresence(binary, defaultKeyStoreFile, debugKeyFileLabel))
           .isTrue();
     }
   }
 
   private boolean checkKeyPresence(
-      ConfiguredTarget binary, String shouldHaveKey, String shouldNotHaveKey) throws Exception {
+      ConfiguredTarget binary, Label shouldHaveKey, Label shouldNotHaveKey) throws Exception {
     boolean hasKey = false;
     boolean doesNotHaveKey = false;
 
     for (ConfiguredTarget debugKeyTarget : getDirectPrerequisites(binary)) {
-      if (debugKeyTarget.getLabel().toString().equals(shouldHaveKey)) {
+      if (debugKeyTarget.getLabel().equals(shouldHaveKey)) {
         hasKey = true;
       }
-      if (debugKeyTarget.getLabel().toString().equals(shouldNotHaveKey)) {
+      if (debugKeyTarget.getLabel().equals(shouldNotHaveKey)) {
         doesNotHaveKey = true;
       }
     }
@@ -280,7 +338,7 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
     return getAndroidSdk().getProguard().getExecutable();
   }
 
-  private AndroidSdkProvider getAndroidSdk() {
+  private AndroidSdkProvider getAndroidSdk() throws Exception {
     Label sdk = targetConfig.getFragment(AndroidConfiguration.class).getSdk();
     return getConfiguredTarget(sdk, targetConfig).get(AndroidSdkProvider.PROVIDER);
   }
@@ -411,6 +469,8 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
         "    main_dex_list_creator = 'main_dex_list_creator',",
         "    proguard = 'proguard',",
         "    shrinked_android_jar = 'shrinked_android_jar',",
-        "    zipalign = 'zipalign')");
+        "    zipalign = 'zipalign',",
+        "    tags = ['__ANDROID_RULES_MIGRATION__'],",
+        ")");
   }
 }

@@ -24,6 +24,7 @@ import com.google.devtools.build.lib.events.EventKind;
 import com.google.devtools.build.lib.events.Reporter;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Path;
+import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem;
 import java.util.Set;
 import org.junit.After;
@@ -43,6 +44,7 @@ public abstract class FoundationTestCase {
   protected EventCollector eventCollector;
   protected FileSystem fileSystem;
   protected Scratch scratch;
+  protected Root root;
 
   /** Returns the Scratch instance for this test case. */
   public Scratch getScratch() {
@@ -75,6 +77,7 @@ public abstract class FoundationTestCase {
     outputBase = scratch.dir("/usr/local/google/_blaze_jrluser/FAKEMD5/");
     rootDirectory = scratch.dir("/workspace");
     scratch.file(rootDirectory.getRelative("WORKSPACE").getPathString());
+    root = Root.fromPath(rootDirectory);
   }
 
   @Before
@@ -158,7 +161,20 @@ public abstract class FoundationTestCase {
         "    ijar = ['ijar'],",
         "    genclass = ['GenClass_deploy.jar'],",
         "    timezone_data = 'tzdata.jar',",
-        ")"
-    );
+        ")",
+        "constraint_value(",
+        "    name = 'constraint',",
+        "    constraint_setting = '" + TestConstants.PLATFORM_BASE + "/java/constraints:runtime',",
+        ")",
+        "toolchain(",
+        "    name = 'java_toolchain',",
+        "    toolchain = ':toolchain',",
+        "    toolchain_type = '" + TestConstants.TOOLS_REPOSITORY + "//tools/jdk:toolchain_type',",
+        "    target_compatible_with = [':constraint'],",
+        ")",
+        "platform(",
+        "    name = 'platform',",
+        "    constraint_values = [':constraint'],",
+        ")");
   }
 }

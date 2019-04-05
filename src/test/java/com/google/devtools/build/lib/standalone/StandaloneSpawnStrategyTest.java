@@ -39,7 +39,7 @@ import com.google.devtools.build.lib.analysis.ServerDirectories;
 import com.google.devtools.build.lib.clock.BlazeClock;
 import com.google.devtools.build.lib.events.PrintingEventHandler;
 import com.google.devtools.build.lib.events.Reporter;
-import com.google.devtools.build.lib.exec.ActionContextProvider;
+import com.google.devtools.build.lib.exec.BinTools;
 import com.google.devtools.build.lib.exec.BlazeExecutor;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
 import com.google.devtools.build.lib.exec.SingleBuildFileCache;
@@ -53,7 +53,6 @@ import com.google.devtools.build.lib.testutil.TestUtils;
 import com.google.devtools.build.lib.util.OS;
 import com.google.devtools.build.lib.util.io.FileOutErr;
 import com.google.devtools.build.lib.vfs.FileSystem;
-import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.util.FileSystems;
 import com.google.devtools.common.options.Options;
@@ -89,7 +88,7 @@ public class StandaloneSpawnStrategyTest {
     fileSystem = FileSystems.getNativeFileSystem();
     Path testRoot = fileSystem.getPath(TestUtils.tmpDir());
     try {
-      FileSystemUtils.deleteTreesBelow(testRoot);
+      testRoot.deleteTreesBelow();
     } catch (IOException e) {
       System.err.println("Failed to remove directory " + testRoot + ": " + e.getMessage());
       throw e;
@@ -115,8 +114,7 @@ public class StandaloneSpawnStrategyTest {
             /* defaultSystemJavabase= */ null,
             "mock-product-name");
     // This call implicitly symlinks the integration bin tools into the exec root.
-    IntegrationMock.get()
-        .getIntegrationBinTools(fileSystem, directories, TestConstants.WORKSPACE_NAME);
+    IntegrationMock.get().getIntegrationBinTools(fileSystem, directories);
     OptionsParser optionsParser = OptionsParser.newOptionsParser(ExecutionOptions.class);
     optionsParser.parse("--verbose_failures");
     LocalExecutionOptions localExecutionOptions = Options.getDefaults(LocalExecutionOptions.class);
@@ -125,7 +123,7 @@ public class StandaloneSpawnStrategyTest {
 
     ResourceManager resourceManager = ResourceManager.instanceForTestingOnly();
     resourceManager.setAvailableResources(
-        ResourceSet.create(/*memoryMb=*/1, /*cpuUsage=*/1, /*ioUsage=*/1, /*localTestCount=*/1));
+        ResourceSet.create(/*memoryMb=*/1, /*cpuUsage=*/1, /*localTestCount=*/1));
     Path execRoot = directories.getExecRoot(TestConstants.WORKSPACE_NAME);
     this.executor =
         new BlazeExecutor(
@@ -137,16 +135,19 @@ public class StandaloneSpawnStrategyTest {
             optionsParser,
             SpawnActionContextMaps.createStub(
                 ImmutableList.of(),
-                ImmutableMap.<String, SpawnActionContext>of(
+                ImmutableMap.of(
                     "",
-                    new StandaloneSpawnStrategy(
-                        execRoot,
-                        new LocalSpawnRunner(
+                    ImmutableList.of(
+                        new StandaloneSpawnStrategy(
                             execRoot,
-                            localExecutionOptions,
-                            resourceManager,
-                            LocalEnvProvider.UNMODIFIED)))),
-            ImmutableList.<ActionContextProvider>of());
+                            new LocalSpawnRunner(
+                                execRoot,
+                                localExecutionOptions,
+                                resourceManager,
+                                LocalEnvProvider.UNMODIFIED,
+                                BinTools.forIntegrationTesting(
+                                    directories, ImmutableList.of())))))),
+            ImmutableList.of());
 
     executor.getExecRoot().createDirectoryAndParents();
   }
@@ -191,7 +192,8 @@ public class StandaloneSpawnStrategyTest {
         new ActionKeyContext(),
         null,
         outErr,
-        ImmutableMap.<String, String>of(),
+        executor.getEventHandler(),
+        ImmutableMap.of(),
         ImmutableMap.of(),
         SIMPLE_ARTIFACT_EXPANDER,
         /*actionFileSystem=*/ null,

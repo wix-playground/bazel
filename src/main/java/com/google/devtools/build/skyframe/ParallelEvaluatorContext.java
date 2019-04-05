@@ -24,7 +24,6 @@ import com.google.devtools.build.lib.events.ExtendedEventHandler.Postable;
 import com.google.devtools.build.skyframe.MemoizingEvaluator.EmittedEventState;
 import com.google.devtools.build.skyframe.QueryableGraph.Reason;
 import java.util.Map;
-import java.util.concurrent.ForkJoinPool;
 import javax.annotation.Nullable;
 
 /**
@@ -62,63 +61,6 @@ class ParallelEvaluatorContext {
    */
   private final Supplier<NodeEntryVisitor> visitorSupplier;
 
-  ParallelEvaluatorContext(
-      QueryableGraph graph,
-      Version graphVersion,
-      ImmutableMap<SkyFunctionName, ? extends SkyFunction> skyFunctions,
-      ExtendedEventHandler reporter,
-      EmittedEventState emittedEventState,
-      boolean keepGoing,
-      final DirtyTrackingProgressReceiver progressReceiver,
-      EventFilter storedEventFilter,
-      ErrorInfoManager errorInfoManager,
-      RunnableMaker runnableMaker,
-      GraphInconsistencyReceiver graphInconsistencyReceiver,
-      final int threadCount) {
-    this(
-        graph,
-        graphVersion,
-        skyFunctions,
-        reporter,
-        emittedEventState,
-        keepGoing,
-        progressReceiver,
-        storedEventFilter,
-        errorInfoManager,
-        graphInconsistencyReceiver,
-        () -> new NodeEntryVisitor(threadCount, progressReceiver, runnableMaker),
-        EvaluationVersionBehavior.MAX_CHILD_VERSIONS);
-  }
-
-  ParallelEvaluatorContext(
-      QueryableGraph graph,
-      Version graphVersion,
-      ImmutableMap<SkyFunctionName, ? extends SkyFunction> skyFunctions,
-      ExtendedEventHandler reporter,
-      EmittedEventState emittedEventState,
-      boolean keepGoing,
-      final DirtyTrackingProgressReceiver progressReceiver,
-      EventFilter storedEventFilter,
-      ErrorInfoManager errorInfoManager,
-      RunnableMaker runnableMaker,
-      GraphInconsistencyReceiver graphInconsistencyReceiver,
-      final ForkJoinPool forkJoinPool,
-      EvaluationVersionBehavior evaluationVersionBehavior) {
-    this(
-        graph,
-        graphVersion,
-        skyFunctions,
-        reporter,
-        emittedEventState,
-        keepGoing,
-        progressReceiver,
-        storedEventFilter,
-        errorInfoManager,
-        graphInconsistencyReceiver,
-        () -> new NodeEntryVisitor(forkJoinPool, progressReceiver, runnableMaker),
-        evaluationVersionBehavior);
-  }
-
   /**
    * Returns a {@link Runnable} given a {@code key} to evaluate and an {@code evaluationPriority}
    * indicating whether it should be scheduled for evaluation soon (higher is better). The returned
@@ -131,7 +73,7 @@ class ParallelEvaluatorContext {
 
   interface ComparableRunnable extends Runnable, Comparable<ComparableRunnable> {}
 
-  private ParallelEvaluatorContext(
+  public ParallelEvaluatorContext(
       QueryableGraph graph,
       Version graphVersion,
       ImmutableMap<SkyFunctionName, ? extends SkyFunction> skyFunctions,
@@ -163,7 +105,8 @@ class ParallelEvaluatorContext {
   }
 
   Map<SkyKey, ? extends NodeEntry> getBatchValues(
-      @Nullable SkyKey parent, Reason reason, Iterable<SkyKey> keys) throws InterruptedException {
+      @Nullable SkyKey parent, Reason reason, Iterable<? extends SkyKey> keys)
+      throws InterruptedException {
     return graph.getBatch(parent, reason, keys);
   }
 
@@ -184,7 +127,7 @@ class ParallelEvaluatorContext {
       case ENQUEUE:
         for (SkyKey key : keys) {
           NodeEntry entry = Preconditions.checkNotNull(batch.get(key), key);
-          if (entry.signalDep(version)) {
+          if (entry.signalDep(version, skyKey)) {
             getVisitor().enqueueEvaluation(key, Integer.MAX_VALUE);
           }
         }
@@ -194,7 +137,7 @@ class ParallelEvaluatorContext {
           NodeEntry entry = Preconditions.checkNotNull(batch.get(key), key);
           if (!entry.isDone()) {
             // In cycles, we can have parents that are already done.
-            entry.signalDep(version);
+            entry.signalDep(version, skyKey);
           }
         }
         return;

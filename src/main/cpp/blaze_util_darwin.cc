@@ -21,7 +21,9 @@
 #include <sys/un.h>
 
 #include <libproc.h>
+#include <pthread/spawn.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdlib.h>
 #include <unistd.h>
 
@@ -32,10 +34,12 @@
 #include <cstring>
 
 #include "src/main/cpp/blaze_util.h"
+#include "src/main/cpp/startup_options.h"
 #include "src/main/cpp/util/errors.h"
 #include "src/main/cpp/util/exit_code.h"
 #include "src/main/cpp/util/file.h"
 #include "src/main/cpp/util/logging.h"
+#include "src/main/cpp/util/path.h"
 #include "src/main/cpp/util/strings.h"
 
 namespace blaze {
@@ -160,12 +164,18 @@ bool IsSharedLibrary(const string &filename) {
 }
 
 string GetSystemJavabase() {
-  string java_home = GetEnv("JAVA_HOME");
+  string java_home = GetPathEnv("JAVA_HOME");
   if (!java_home.empty()) {
-    return java_home;
+    string javac = blaze_util::JoinPath(java_home, "bin/javac");
+    if (access(javac.c_str(), X_OK) == 0) {
+      return java_home;
+    }
+    BAZEL_LOG(WARNING)
+        << "Ignoring JAVA_HOME, because it must point to a JDK, not a JRE.";
   }
 
-  FILE *output = popen("/usr/libexec/java_home -v 1.7+", "r");
+  // java_home will print a warning if no JDK could be found
+  FILE *output = popen("/usr/libexec/java_home -v 1.8+ 2> /dev/null", "r");
   if (output == NULL) {
     return "";
   }
@@ -184,6 +194,11 @@ string GetSystemJavabase() {
 
   // The output ends with a \n, trim it off.
   return javabase.substr(0, javabase.length()-1);
+}
+
+int ConfigureDaemonProcess(posix_spawnattr_t *attrp,
+                           const StartupOptions *options) {
+  return posix_spawnattr_set_qos_class_np(attrp, options->macos_qos_class);
 }
 
 void WriteSystemSpecificProcessIdentifier(

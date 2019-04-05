@@ -59,9 +59,6 @@ public final class AndroidLibraryBaseRule implements RuleDefinition {
         compiled. (This is useful if you need to generate a set of .java files with
         a genrule or build extension.)
         </p>
-        <p>This rule currently forces source and class compatibility with Java 7,
-        although try with resources is not supported.
-        </p>
         <p>If <code>srcs</code> is omitted, then any dependency specified in
         <code>deps</code> is exported from this rule (see
         <a href="${link java_library.exports}">java_library's exports</a> for more
@@ -96,7 +93,7 @@ public final class AndroidLibraryBaseRule implements RuleDefinition {
         .add(
             attr("exports", LABEL_LIST)
                 .allowedRuleClasses(AndroidRuleClasses.ALLOWED_DEPENDENCIES)
-                .allowedFileTypes(/*May not have files in exports!*/)
+                .allowedFileTypes(/*May not have files in exports!*/ )
                 .mandatoryProviders(JavaRuleClasses.CONTAINS_JAVA_PROVIDER)
                 .aspect(androidNeverlinkAspect))
         /* <!-- #BLAZE_RULE(android_library).ATTRIBUTE(exports_manifest) -->
@@ -115,7 +112,7 @@ public final class AndroidLibraryBaseRule implements RuleDefinition {
         <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
         .add(
             attr("exported_plugins", LABEL_LIST)
-                .cfg(HostTransition.INSTANCE)
+                .cfg(HostTransition.createFactory())
                 .allowedRuleClasses("java_plugin")
                 .allowedFileTypes(FileTypeSet.NO_FILE))
         .add(attr("alwayslink", BOOLEAN).undocumented("purely informational for now"))

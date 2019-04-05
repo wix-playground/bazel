@@ -26,22 +26,33 @@ import com.google.devtools.build.lib.syntax.EvalException;
 /** A target that can provide a proguard obfuscation mapping to Android binaries or tests. */
 @SkylarkModule(
     name = "ProguardMappingProvider",
-    doc = "Information about the Proguard mapping provided by a rule.",
+    doc =
+        "Do not use this module. It is intended for migration purposes only. If you depend on it, "
+            + "you will be broken when it is removed."
+            + "Information about the Proguard mapping provided by a rule.",
+    documented = false,
     category = SkylarkModuleCategory.PROVIDER)
 public interface ProguardMappingProviderApi<FileT extends FileApi> extends StructApi {
 
-  public static final String NAME = "ProguardMappingInfo";
+  /** The name of the provider for this info object. */
+  String NAME = "ProguardMappingInfo";
 
   @SkylarkCallable(name = "proguard_mapping", structField = true, doc = "", documented = false)
   FileT getProguardMapping();
 
   /** The provider implementing this can construct the ProguardMappingProvider provider. */
-  @SkylarkModule(name = "Provider", doc = "", documented = false)
+  @SkylarkModule(
+      name = "Provider",
+      doc =
+          "Do not use this module. It is intended for migration purposes only. If you depend on "
+              + "it, you will be broken when it is removed.",
+      documented = false)
   public interface Provider<FileT extends FileApi> extends ProviderApi {
 
     @SkylarkCallable(
         name = NAME,
         doc = "The <code>ProguardMappingInfo</code> constructor.",
+        documented = false,
         parameters = {
           @Param(
               name = "proguard_mapping",

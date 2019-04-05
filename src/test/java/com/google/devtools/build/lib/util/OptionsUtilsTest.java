@@ -14,9 +14,8 @@
 package com.google.devtools.build.lib.util;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.fail;
+import static com.google.devtools.build.lib.testutil.MoreAsserts.assertThrows;
 
-import com.google.common.collect.Lists;
 import com.google.devtools.build.lib.util.OptionsUtils.PathFragmentConverter;
 import com.google.devtools.build.lib.util.OptionsUtils.PathFragmentListConverter;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -27,58 +26,52 @@ import com.google.devtools.common.options.OptionMetadataTag;
 import com.google.devtools.common.options.OptionPriority.PriorityCategory;
 import com.google.devtools.common.options.OptionsBase;
 import com.google.devtools.common.options.OptionsParser;
+import com.google.devtools.common.options.OptionsParsingException;
 import java.util.Arrays;
 import java.util.List;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
 
-/**
- * Test for {@link OptionsUtils}.
- */
+/** Test for {@link OptionsUtils}. */
 @RunWith(JUnit4.class)
 public class OptionsUtilsTest {
 
   public static class IntrospectionExample extends OptionsBase {
     @Option(
-      name = "alpha",
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.NO_OP},
-      defaultValue = "alpha"
-    )
+        name = "alpha",
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.NO_OP},
+        defaultValue = "alpha")
     public String alpha;
 
     @Option(
-      name = "beta",
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.NO_OP},
-      defaultValue = "beta"
-    )
+        name = "beta",
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.NO_OP},
+        defaultValue = "beta")
     public String beta;
 
     @Option(
-      name = "gamma",
-      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-      effectTags = {OptionEffectTag.NO_OP},
-      defaultValue = "gamma"
-    )
+        name = "gamma",
+        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+        effectTags = {OptionEffectTag.NO_OP},
+        defaultValue = "gamma")
     public String gamma;
 
     @Option(
-      name = "delta",
-      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-      effectTags = {OptionEffectTag.NO_OP},
-      defaultValue = "delta"
-    )
+        name = "delta",
+        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+        effectTags = {OptionEffectTag.NO_OP},
+        defaultValue = "delta")
     public String delta;
 
     @Option(
-      name = "echo",
-      metadataTags = {OptionMetadataTag.HIDDEN},
-      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-      effectTags = {OptionEffectTag.NO_OP},
-      defaultValue = "echo"
-    )
+        name = "echo",
+        metadataTags = {OptionMetadataTag.HIDDEN},
+        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+        effectTags = {OptionEffectTag.NO_OP},
+        defaultValue = "echo")
     public String echo;
   }
 
@@ -105,19 +98,17 @@ public class OptionsUtilsTest {
 
   public static class BooleanOpts extends OptionsBase {
     @Option(
-      name = "b_one",
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.NO_OP},
-      defaultValue = "true"
-    )
+        name = "b_one",
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.NO_OP},
+        defaultValue = "true")
     public boolean bOne;
 
     @Option(
-      name = "b_two",
-      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
-      effectTags = {OptionEffectTag.NO_OP},
-      defaultValue = "false"
-    )
+        name = "b_two",
+        documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+        effectTags = {OptionEffectTag.NO_OP},
+        defaultValue = "false")
     public boolean bTwo;
   }
 
@@ -151,10 +142,6 @@ public class OptionsUtilsTest {
         .inOrder();
   }
 
-  private static List<PathFragment> list(PathFragment... fragments) {
-    return Lists.newArrayList(fragments);
-  }
-
   private PathFragment fragment(String string) {
     return PathFragment.create(string);
   }
@@ -169,7 +156,7 @@ public class OptionsUtilsTest {
 
   @Test
   public void emptyStringYieldsEmptyList() throws Exception {
-    assertThat(convert("")).isEqualTo(list());
+    assertThat(convert("")).isEmpty();
   }
 
   @Test
@@ -202,10 +189,23 @@ public class OptionsUtilsTest {
   }
 
   @Test
-  public void valueisUnmodifiable() throws Exception {
-    try {
-      new PathFragmentListConverter().convert("value").add(PathFragment.create("other"));
-      fail("could modify value");
-    } catch (UnsupportedOperationException expected) {}
+  public void emptyPathFragmentToNull() throws Exception {
+    assertThat(new OptionsUtils.EmptyToNullRelativePathFragmentConverter().convert("")).isNull();
+  }
+
+  @Test
+  public void absolutePathFragmentThrows() throws Exception {
+    OptionsParsingException exception =
+        assertThrows(
+            OptionsParsingException.class,
+            () -> new OptionsUtils.EmptyToNullRelativePathFragmentConverter().convert("/abs"));
+
+    assertThat(exception).hasMessageThat().contains("/abs");
+  }
+
+  @Test
+  public void relativePathFragment() throws Exception {
+    assertThat(new OptionsUtils.EmptyToNullRelativePathFragmentConverter().convert("path/to/me"))
+        .isEqualTo(PathFragment.create("path/to/me"));
   }
 }

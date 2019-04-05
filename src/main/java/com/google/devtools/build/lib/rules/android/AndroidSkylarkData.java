@@ -32,8 +32,12 @@ import com.google.devtools.build.lib.packages.Provider;
 import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
 import com.google.devtools.build.lib.rules.android.AndroidConfiguration.AndroidAaptVersion;
 import com.google.devtools.build.lib.rules.android.AndroidLibraryAarInfo.Aar;
+import com.google.devtools.build.lib.rules.android.databinding.DataBinding;
+import com.google.devtools.build.lib.rules.java.JavaCompilationArgsProvider;
 import com.google.devtools.build.lib.rules.java.JavaCompilationInfoProvider;
 import com.google.devtools.build.lib.rules.java.JavaInfo;
+import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider;
+import com.google.devtools.build.lib.rules.java.JavaSourceJarsProvider;
 import com.google.devtools.build.lib.rules.java.ProguardSpecProvider;
 import com.google.devtools.build.lib.skylarkbuildapi.android.AndroidBinaryDataSettingsApi;
 import com.google.devtools.build.lib.skylarkbuildapi.android.AndroidDataProcessingApi;
@@ -59,7 +63,8 @@ public abstract class AndroidSkylarkData
         AndroidResourcesInfo,
         AndroidManifestInfo,
         AndroidLibraryAarInfo,
-        AndroidBinaryDataInfo> {
+        AndroidBinaryDataInfo,
+        ValidatedAndroidResources> {
 
   public abstract AndroidSemantics getAndroidSemantics();
 
@@ -88,7 +93,7 @@ public abstract class AndroidSkylarkData
       }
       return ResourceApk.processFromTransitiveLibraryData(
               ctx,
-              DataBinding.asDisabledDataBindingContext(),
+              DataBinding.getDisabledDataBindingContext(ctx),
               ResourceDependencies.fromProviders(deps, /* neverlink = */ neverlink),
               AssetDependencies.empty(),
               StampedAndroidManifest.createEmpty(
@@ -160,7 +165,8 @@ public abstract class AndroidSkylarkData
       throws EvalException, InterruptedException {
     try (SkylarkErrorReporter errorReporter =
         SkylarkErrorReporter.from(ctx.getActionConstructionContext(), location, env)) {
-      AndroidAaptVersion aaptVersion = ctx.getAndroidConfig().getAndroidAaptVersion();
+      AndroidAaptVersion aaptVersion =
+          ctx.getSdk().getAapt2() != null ? AndroidAaptVersion.AAPT2 : AndroidAaptVersion.AAPT;
 
       ValidatedAndroidResources validated =
           AndroidResources.from(errorReporter, getFileProviders(resources), "resources")
@@ -174,7 +180,8 @@ public abstract class AndroidSkylarkData
                       ctx.getAndroidConfig()),
                   aaptVersion);
 
-      JavaInfo javaInfo = getJavaInfoForRClassJar(validated.getClassJar());
+      JavaInfo javaInfo =
+          getJavaInfoForRClassJar(validated.getClassJar(), validated.getJavaSourceJar());
 
       return SkylarkDict.of(
           /* env = */ null,
@@ -194,7 +201,7 @@ public abstract class AndroidSkylarkData
       AndroidResourcesInfo resourcesInfo,
       AndroidAssetsInfo assetsInfo,
       Artifact libraryClassJar,
-      SkylarkList<ConfiguredTarget> proguardSpecs,
+      SkylarkList<Artifact> localProguardSpecs,
       SkylarkList<AndroidLibraryAarInfo> deps,
       boolean neverlink)
       throws EvalException, InterruptedException {
@@ -251,7 +258,7 @@ public abstract class AndroidSkylarkData
             resourcesInfo.getManifest(),
             resourcesInfo.getRTxt(),
             libraryClassJar,
-            filesFromConfiguredTargets(proguardSpecs))
+            localProguardSpecs.getImmutableList())
         .toProvider(deps, definesLocalResources);
   }
 
@@ -267,7 +274,7 @@ public abstract class AndroidSkylarkData
       Object customPackage,
       boolean neverlink,
       boolean enableDataBinding,
-      SkylarkList<ConfiguredTarget> proguardSpecs,
+      SkylarkList<Artifact> localProguardSpecs,
       SkylarkList<ConfiguredTarget> deps,
       Location location,
       Environment env)
@@ -327,7 +334,7 @@ public abstract class AndroidSkylarkData
             resourcesInfo,
             assetsInfo,
             libraryClassJar,
-            proguardSpecs,
+            localProguardSpecs,
             getProviders(deps, AndroidLibraryAarInfo.PROVIDER),
             neverlink);
 
@@ -339,7 +346,7 @@ public abstract class AndroidSkylarkData
     // Expose the updated manifest that was changed by resource processing
     // TODO(b/30817309): Use the base manifest once manifests are no longer changed in resource
     // processing
-    AndroidManifestInfo manifestInfo = resourcesInfo.getManifest().toProvider();
+    AndroidManifestInfo manifestInfo = resourcesInfo.getManifest();
 
     return SkylarkDict.copyOf(
         /* env = */ null,
@@ -367,7 +374,7 @@ public abstract class AndroidSkylarkData
                 AndroidManifest.forAarImport(androidManifestArtifact),
                 ResourceDependencies.fromProviders(
                     getProviders(deps, AndroidResourcesInfo.PROVIDER), /* neverlink = */ false),
-                DataBinding.asDisabledDataBindingContext(),
+                DataBinding.getDisabledDataBindingContext(ctx),
                 aaptVersion);
 
     MergedAndroidAssets mergedAssets =
@@ -394,6 +401,7 @@ public abstract class AndroidSkylarkData
       String aaptVersionString,
       SkylarkDict<String, String> manifestValues,
       SkylarkList<ConfiguredTarget> deps,
+      SkylarkList<String> noCompressExtensions,
       Location location,
       Environment env)
       throws InterruptedException, EvalException {
@@ -413,7 +421,7 @@ public abstract class AndroidSkylarkData
               ctx,
               getAndroidSemantics(),
               errorReporter,
-              DataBinding.asDisabledDataBindingContext(),
+              DataBinding.getDisabledDataBindingContext(ctx),
               rawManifest,
               AndroidResources.from(errorReporter, getFileProviders(resources), "resource_files"),
               AndroidAssets.from(
@@ -427,9 +435,20 @@ public abstract class AndroidSkylarkData
               AssetDependencies.fromProviders(
                   getProviders(deps, AndroidAssetsInfo.PROVIDER), /* neverlink = */ false),
               manifestValues,
-              AndroidAaptVersion.chooseTargetAaptVersion(ctx, errorReporter, aaptVersionString));
+              AndroidAaptVersion.chooseTargetAaptVersion(ctx, errorReporter, aaptVersionString),
+              noCompressExtensions);
 
-      return getNativeInfosFrom(resourceApk, ctx.getLabel());
+      ImmutableMap.Builder<Provider, NativeInfo> builder = ImmutableMap.builder();
+      builder.putAll(getNativeInfosFrom(resourceApk, ctx.getLabel()));
+      builder.put(
+          AndroidBinaryDataInfo.PROVIDER,
+          AndroidBinaryDataInfo.of(
+              resourceApk.getArtifact(),
+              resourceApk.getResourceProguardConfig(),
+              resourceApk.toResourceInfo(ctx.getLabel()),
+              resourceApk.toAssetsInfo(ctx.getLabel()),
+              resourceApk.toManifestInfo().get()));
+      return SkylarkDict.copyOf(/* env = */ null, builder.build());
     } catch (RuleErrorException e) {
       throw new EvalException(Location.BUILTIN, e);
     }
@@ -462,6 +481,11 @@ public abstract class AndroidSkylarkData
             shrinkResources, Boolean.class, ctx.getAndroidConfig().useAndroidResourceShrinking()),
         ResourceFilterFactory.from(aaptVersion, resourceConfigurationFilters, densities),
         noCompressExtensions.getImmutableList());
+  }
+
+  @Override
+  public Artifact resourcesFromValidatedRes(ValidatedAndroidResources resources) {
+    return resources.getMergedResources();
   }
 
   /**
@@ -656,14 +680,30 @@ public abstract class AndroidSkylarkData
 
     resourceApk.toManifestInfo().ifPresent(info -> builder.put(AndroidManifestInfo.PROVIDER, info));
 
-    builder.put(JavaInfo.PROVIDER, getJavaInfoForRClassJar(resourceApk.getResourceJavaClassJar()));
+    builder.put(
+        JavaInfo.PROVIDER,
+        getJavaInfoForRClassJar(
+            resourceApk.getResourceJavaClassJar(), resourceApk.getResourceJavaSrcJar()));
 
     return SkylarkDict.copyOf(/* env = */ null, builder.build());
   }
 
-  private static JavaInfo getJavaInfoForRClassJar(Artifact rClassJar) {
+  private static JavaInfo getJavaInfoForRClassJar(Artifact rClassJar, Artifact rClassSrcJar) {
     return JavaInfo.Builder.create()
         .setNeverlink(true)
+        .addProvider(
+            JavaSourceJarsProvider.class,
+            JavaSourceJarsProvider.builder().addSourceJar(rClassSrcJar).build())
+        .addProvider(
+            JavaRuleOutputJarsProvider.class,
+            JavaRuleOutputJarsProvider.builder()
+                .addOutputJar(rClassJar, null, null, ImmutableList.of(rClassSrcJar))
+                .build())
+        .addProvider(
+            JavaCompilationArgsProvider.class,
+            JavaCompilationArgsProvider.builder()
+                .addDirectCompileTimeJar(rClassJar, rClassJar)
+                .build())
         .addProvider(
             JavaCompilationInfoProvider.class,
             new JavaCompilationInfoProvider.Builder()

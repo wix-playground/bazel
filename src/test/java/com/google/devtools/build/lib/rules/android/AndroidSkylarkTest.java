@@ -59,6 +59,7 @@ public class AndroidSkylarkTest extends BuildViewTestCase {
 
   @Test
   public void testAndroidSplitTransition() throws Exception {
+    getAnalysisMock().ccSupport().setupCcToolchainConfigForCpu(mockToolsConfig, "armeabi-v7a");
     writeAndroidSplitTransitionTestFiles();
 
     useConfiguration("--fat_apk_cpu=k8,armeabi-v7a");

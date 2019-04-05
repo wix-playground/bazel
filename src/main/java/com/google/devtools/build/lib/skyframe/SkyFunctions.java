@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.skyframe;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Predicate;
 import com.google.devtools.build.lib.actions.ActionLookupData;
 import com.google.devtools.build.skyframe.FunctionHermeticity;
@@ -20,9 +21,7 @@ import com.google.devtools.build.skyframe.ShareabilityOfValue;
 import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyKey;
 
-/**
- * Value types in Skyframe.
- */
+/** Value types in Skyframe. */
 public final class SkyFunctions {
   public static final SkyFunctionName PRECOMPUTED =
       SkyFunctionName.createNonHermetic("PRECOMPUTED");
@@ -38,26 +37,26 @@ public final class SkyFunctions {
       SkyFunctionName.createHermetic("FILE_SYMLINK_INFINITE_EXPANSION_UNIQUENESS");
   public static final SkyFunctionName DIRECTORY_LISTING =
       SkyFunctionName.createHermetic("DIRECTORY_LISTING");
-  // Non-hermetic because unfortunately package lookups secretly access the set of deleted packages.
+  // Hermetic even though package lookups secretly access the set of deleted packages, because
+  // SequencedSkyframeExecutor deletes any affected PACKAGE_LOOKUP nodes when that set changes.
   public static final SkyFunctionName PACKAGE_LOOKUP =
-      SkyFunctionName.createNonHermetic("PACKAGE_LOOKUP");
+      SkyFunctionName.createHermetic("PACKAGE_LOOKUP");
   public static final SkyFunctionName CONTAINING_PACKAGE_LOOKUP =
       SkyFunctionName.createHermetic("CONTAINING_PACKAGE_LOOKUP");
-  // Non-hermetic because accesses the package locator. Also does disk access.
   public static final SkyFunctionName AST_FILE_LOOKUP =
-      SkyFunctionName.createNonHermetic("AST_FILE_LOOKUP");
+      SkyFunctionName.createHermetic("AST_FILE_LOOKUP");
   public static final SkyFunctionName SKYLARK_IMPORTS_LOOKUP =
       SkyFunctionName.createHermetic("SKYLARK_IMPORTS_LOOKUP");
   public static final SkyFunctionName GLOB = SkyFunctionName.createHermetic("GLOB");
   public static final SkyFunctionName PACKAGE = SkyFunctionName.createHermetic("PACKAGE");
   static final SkyFunctionName PACKAGE_ERROR = SkyFunctionName.createHermetic("PACKAGE_ERROR");
-  static final SkyFunctionName PACKAGE_ERROR_MESSAGE =
+  public static final SkyFunctionName PACKAGE_ERROR_MESSAGE =
       SkyFunctionName.createHermetic("PACKAGE_ERROR_MESSAGE");
   public static final SkyFunctionName TARGET_MARKER =
       SkyFunctionName.createHermetic("TARGET_MARKER");
-  // Non-hermetic because accesses package locator
+  // Semi-hermetic because accesses package locator
   public static final SkyFunctionName TARGET_PATTERN =
-      SkyFunctionName.createNonHermetic("TARGET_PATTERN");
+      SkyFunctionName.createSemiHermetic("TARGET_PATTERN");
   static final SkyFunctionName TARGET_PATTERN_ERROR =
       SkyFunctionName.createHermetic("TARGET_PATTERN_ERROR");
   public static final SkyFunctionName PREPARE_DEPS_OF_PATTERNS =
@@ -67,8 +66,12 @@ public final class SkyFunctions {
       SkyFunctionName.createNonHermetic("PREPARE_DEPS_OF_PATTERN");
   public static final SkyFunctionName PREPARE_DEPS_OF_TARGETS_UNDER_DIRECTORY =
       SkyFunctionName.createHermetic("PREPARE_DEPS_OF_TARGETS_UNDER_DIRECTORY");
+  public static final SkyFunctionName PREPARE_TEST_SUITES_UNDER_DIRECTORY =
+      SkyFunctionName.createHermetic("PREPARE_TEST_SUITES_UNDER_DIRECTORY");
   public static final SkyFunctionName COLLECT_TARGETS_IN_PACKAGE =
       SkyFunctionName.createHermetic("COLLECT_TARGETS_IN_PACKAGE");
+  public static final SkyFunctionName COLLECT_TEST_SUITES_IN_PACKAGE =
+      SkyFunctionName.createHermetic("COLLECT_TEST_SUITES_IN_PACKAGE");
   public static final SkyFunctionName COLLECT_PACKAGES_UNDER_DIRECTORY =
       SkyFunctionName.createHermetic("COLLECT_PACKAGES_UNDER_DIRECTORY");
   public static final SkyFunctionName BLACKLISTED_PACKAGE_PREFIXES =
@@ -100,13 +103,14 @@ public final class SkyFunctions {
   static final SkyFunctionName TEST_COMPLETION =
       SkyFunctionName.create(
           "TEST_COMPLETION", ShareabilityOfValue.NEVER, FunctionHermeticity.HERMETIC);
-  static final SkyFunctionName BUILD_CONFIGURATION =
+  public static final SkyFunctionName BUILD_CONFIGURATION =
       SkyFunctionName.createHermetic("BUILD_CONFIGURATION");
-  public static final SkyFunctionName CONFIGURATION_FRAGMENT =
-      SkyFunctionName.createHermetic("CONFIGURATION_FRAGMENT");
   public static final SkyFunctionName ACTION_EXECUTION = ActionLookupData.NAME;
-  static final SkyFunctionName RECURSIVE_FILESYSTEM_TRAVERSAL =
+
+  @VisibleForTesting
+  public static final SkyFunctionName RECURSIVE_FILESYSTEM_TRAVERSAL =
       SkyFunctionName.createHermetic("RECURSIVE_DIRECTORY_TRAVERSAL");
+
   public static final SkyFunctionName FILESET_ENTRY =
       SkyFunctionName.createHermetic("FILESET_ENTRY");
   static final SkyFunctionName BUILD_INFO_COLLECTION =
@@ -114,19 +118,17 @@ public final class SkyFunctions {
   public static final SkyFunctionName BUILD_INFO = SkyFunctionName.createHermetic("BUILD_INFO");
   public static final SkyFunctionName WORKSPACE_NAME =
       SkyFunctionName.createHermetic("WORKSPACE_NAME");
-  // Non-hermetic because accesses package locator
-  public static final SkyFunctionName WORKSPACE_FILE =
-      SkyFunctionName.createNonHermetic("WORKSPACE_FILE");
+  public static final SkyFunctionName PLATFORM_MAPPING =
+      SkyFunctionName.createHermetic("PLATFORM_MAPPING");
   static final SkyFunctionName COVERAGE_REPORT = SkyFunctionName.createHermetic("COVERAGE_REPORT");
   public static final SkyFunctionName REPOSITORY = SkyFunctionName.createHermetic("REPOSITORY");
   public static final SkyFunctionName REPOSITORY_DIRECTORY =
       SkyFunctionName.createNonHermetic("REPOSITORY_DIRECTORY");
   public static final SkyFunctionName WORKSPACE_AST =
       SkyFunctionName.createHermetic("WORKSPACE_AST");
-  // Non-hermetic because accesses package locator
   public static final SkyFunctionName EXTERNAL_PACKAGE =
-      SkyFunctionName.createNonHermetic("EXTERNAL_PACKAGE");
-  static final SkyFunctionName ACTION_TEMPLATE_EXPANSION =
+      SkyFunctionName.createHermetic("EXTERNAL_PACKAGE");
+  public static final SkyFunctionName ACTION_TEMPLATE_EXPANSION =
       SkyFunctionName.createHermetic("ACTION_TEMPLATE_EXPANSION");
   public static final SkyFunctionName LOCAL_REPOSITORY_LOOKUP =
       SkyFunctionName.createHermetic("LOCAL_REPOSITORY_LOOKUP");
@@ -138,8 +140,12 @@ public final class SkyFunctions {
       SkyFunctionName.createHermetic("TOOLCHAIN_RESOLUTION");
   public static final SkyFunctionName REPOSITORY_MAPPING =
       SkyFunctionName.createHermetic("REPOSITORY_MAPPING");
+  public static final SkyFunctionName RESOLVED_FILE =
+      SkyFunctionName.createHermetic("RESOLVED_FILE");
   public static final SkyFunctionName RESOLVED_HASH_VALUES =
       SkyFunctionName.createHermetic("RESOLVED_HASH_VALUES");
+  public static final SkyFunctionName LOCAL_CONFIG_PLATFORM =
+      SkyFunctionName.createHermetic("LOCAL_CONFIG_PLATFORM");
 
   public static Predicate<SkyKey> isSkyFunction(final SkyFunctionName functionName) {
     return new Predicate<SkyKey>() {

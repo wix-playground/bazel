@@ -18,11 +18,14 @@ import static java.util.stream.Collectors.joining;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.analysis.PlatformOptions;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
-import com.google.devtools.build.lib.analysis.platform.ConstraintValueInfo;
+import com.google.devtools.build.lib.analysis.platform.ConstraintCollection;
+import com.google.devtools.build.lib.analysis.platform.ConstraintSettingInfo;
 import com.google.devtools.build.lib.analysis.platform.DeclaredToolchainInfo;
 import com.google.devtools.build.lib.analysis.platform.PlatformInfo;
+import com.google.devtools.build.lib.analysis.platform.ToolchainTypeInfo;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
@@ -73,24 +76,13 @@ public class ToolchainResolutionFunction implements SkyFunction {
 
     // Find the right one.
     boolean debug = configuration.getOptions().get(PlatformOptions.class).toolchainResolutionDebug;
-    ImmutableMap<ConfiguredTargetKey, Label> resolvedToolchainLabels =
-        resolveConstraints(
-            key.toolchainType(),
-            key.availableExecutionPlatformKeys(),
-            key.targetPlatformKey(),
-            toolchains.registeredToolchains(),
-            env,
-            debug ? env.getListener() : null);
-    if (resolvedToolchainLabels == null) {
-      return null;
-    }
-
-    if (resolvedToolchainLabels.isEmpty()) {
-      throw new ToolchainResolutionFunctionException(
-          new NoToolchainFoundException(key.toolchainType()));
-    }
-
-    return ToolchainResolutionValue.create(resolvedToolchainLabels);
+    return resolveConstraints(
+        key.toolchainTypeLabel(),
+        key.availableExecutionPlatformKeys(),
+        key.targetPlatformKey(),
+        toolchains.registeredToolchains(),
+        env,
+        debug ? env.getListener() : null);
   }
 
   /**
@@ -99,8 +91,8 @@ public class ToolchainResolutionFunction implements SkyFunction {
    * platform.
    */
   @Nullable
-  private static ImmutableMap<ConfiguredTargetKey, Label> resolveConstraints(
-      Label toolchainType,
+  private static ToolchainResolutionValue resolveConstraints(
+      Label toolchainTypeLabel,
       List<ConfiguredTargetKey> availableExecutionPlatformKeys,
       ConfiguredTargetKey targetPlatformKey,
       ImmutableList<DeclaredToolchainInfo> toolchains,
@@ -132,11 +124,12 @@ public class ToolchainResolutionFunction implements SkyFunction {
     // check whether a platform has already been seen during processing.
     Set<ConfiguredTargetKey> platformKeysSeen = new HashSet<>();
     ImmutableMap.Builder<ConfiguredTargetKey, Label> builder = ImmutableMap.builder();
+    ToolchainTypeInfo toolchainType = null;
 
-    debugMessage(eventHandler, "Looking for toolchain of type %s...", toolchainType);
+    debugMessage(eventHandler, "Looking for toolchain of type %s...", toolchainTypeLabel);
     for (DeclaredToolchainInfo toolchain : toolchains) {
       // Make sure the type matches.
-      if (!toolchain.toolchainType().equals(toolchainType)) {
+      if (!toolchain.toolchainType().typeLabel().equals(toolchainTypeLabel)) {
         continue;
       }
       debugMessage(eventHandler, "  Considering toolchain %s...", toolchain.toolchainLabel());
@@ -161,6 +154,7 @@ public class ToolchainResolutionFunction implements SkyFunction {
 
         // Only add the toolchains if this is a new platform.
         if (!platformKeysSeen.contains(executionPlatformKey)) {
+          toolchainType = toolchain.toolchainType();
           builder.put(executionPlatformKey, toolchain.toolchainLabel());
           platformKeysSeen.add(executionPlatformKey);
         }
@@ -174,15 +168,18 @@ public class ToolchainResolutionFunction implements SkyFunction {
       debugMessage(
           eventHandler,
           "  For toolchain type %s, possible execution platforms and toolchains: {%s}",
-          toolchainType,
-          resolvedToolchainLabels
-              .entrySet()
-              .stream()
+          toolchainTypeLabel,
+          resolvedToolchainLabels.entrySet().stream()
               .map(e -> String.format("%s -> %s", e.getKey().getLabel(), e.getValue()))
               .collect(joining(", ")));
     }
 
-    return resolvedToolchainLabels;
+    if (toolchainType == null || resolvedToolchainLabels.isEmpty()) {
+      throw new ToolchainResolutionFunctionException(
+          new NoToolchainFoundException(toolchainTypeLabel));
+    }
+
+    return ToolchainResolutionValue.create(toolchainType, resolvedToolchainLabels);
   }
 
   /**
@@ -199,31 +196,34 @@ public class ToolchainResolutionFunction implements SkyFunction {
   }
 
   /**
-   * Returns {@code true} iff all constraints set by the toolchain are present in the {@link
-   * PlatformInfo}.
+   * Returns {@code true} iff all constraints set by the toolchain and in the {@link PlatformInfo}
+   * match.
    */
   private static boolean checkConstraints(
       @Nullable EventHandler eventHandler,
-      Iterable<ConstraintValueInfo> toolchainConstraints,
+      ConstraintCollection toolchainConstraints,
       String platformType,
       PlatformInfo platform) {
 
-    for (ConstraintValueInfo constraint : toolchainConstraints) {
-      ConstraintValueInfo found = platform.getConstraint(constraint.constraint());
-      if (!constraint.equals(found)) {
-        debugMessage(
-            eventHandler,
-            "    Toolchain constraint %s has value %s, "
-                + "which does not match value %s from the %s platform %s",
-            constraint.constraint().label(),
-            constraint.label(),
-            found != null ? found.label() : "<missing>",
-            platformType,
-            platform.label());
-        return false;
-      }
+    // Check every constraint_setting in either the toolchain or the platform.
+    ImmutableSet<ConstraintSettingInfo> mismatchSettings =
+        toolchainConstraints.diff(platform.constraints());
+    for (ConstraintSettingInfo mismatchSetting : mismatchSettings) {
+      debugMessage(
+          eventHandler,
+          "    Toolchain constraint %s has value %s, "
+              + "which does not match value %s from the %s platform %s",
+          mismatchSetting.label(),
+          toolchainConstraints.has(mismatchSetting)
+              ? toolchainConstraints.get(mismatchSetting).label()
+              : "<missing>",
+          platform.constraints().has(mismatchSetting)
+              ? platform.constraints().get(mismatchSetting).label()
+              : "<missing>",
+          platformType,
+          platform.label());
     }
-    return true;
+    return mismatchSettings.isEmpty();
   }
 
   @Nullable
@@ -234,15 +234,15 @@ public class ToolchainResolutionFunction implements SkyFunction {
 
   /** Used to indicate that a toolchain was not found for the current request. */
   public static final class NoToolchainFoundException extends NoSuchThingException {
-    private final Label missingToolchainType;
+    private final Label missingToolchainTypeLabel;
 
-    public NoToolchainFoundException(Label missingToolchainType) {
-      super(String.format("no matching toolchain found for %s", missingToolchainType));
-      this.missingToolchainType = missingToolchainType;
+    public NoToolchainFoundException(Label missingToolchainTypeLabel) {
+      super(String.format("no matching toolchain found for %s", missingToolchainTypeLabel));
+      this.missingToolchainTypeLabel = missingToolchainTypeLabel;
     }
 
-    public Label missingToolchainType() {
-      return missingToolchainType;
+    public Label missingToolchainTypeLabel() {
+      return missingToolchainTypeLabel;
     }
   }
 

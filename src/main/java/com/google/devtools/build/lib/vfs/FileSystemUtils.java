@@ -31,11 +31,8 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
 
-/**
- * Helper functions that implement often-used complex operations on file
- * systems.
- */
-@ConditionallyThreadSafe // ThreadSafe except for deleteTree.
+/** Helper functions that implement often-used complex operations on file systems. */
+@ConditionallyThreadSafe
 public class FileSystemUtils {
 
   private FileSystemUtils() {}
@@ -348,7 +345,7 @@ public class FileSystemUtils {
       /* fallthru and do the work below */
     }
     if (link.isSymbolicLink()) {
-      link.delete();  // Remove the symlink since it is pointing somewhere else.
+      link.delete(); // Remove the symlink since it is pointing somewhere else.
     } else {
       createDirectoryAndParents(link.getParentDirectory());
     }
@@ -411,21 +408,40 @@ public class FileSystemUtils {
     to.setExecutable(from.isExecutable()); // Copy executable bit.
   }
 
+  /** Describes the behavior of a {@link #moveFile(Path, Path)} operation. */
+  public enum MoveResult {
+    /** The file was moved at the file system level. */
+    FILE_MOVED,
+
+    /** The file had to be copied and then deleted because the move failed. */
+    FILE_COPIED,
+  }
+
   /**
    * Moves the file from location "from" to location "to", while overwriting a potentially existing
    * "to". If "from" is a regular file, its last modified time, executable and writable bits are
    * also preserved. Symlinks are also supported but not directories or special files.
    *
+   * <p>If the move fails (usually because the "from" and "to" live in different file systems), this
+   * falls back to copying the file. Note that these two operations have very different performance
+   * characteristics and is why this operation reports back to the caller what actually happened.
+   *
    * <p>If no error occurs, the method returns normally. If a parent directory does not exist, a
    * FileNotFoundException is thrown. {@link IOException} is thrown when other erroneous situations
    * occur. (e.g. read errors)
+   *
+   * @param from location of the file to move
+   * @param to destination to where to move the file
+   * @return a description of how the move was performed
+   * @throws IOException if the move fails
    */
   @ThreadSafe // but not atomic
-  public static void moveFile(Path from, Path to) throws IOException {
+  public static MoveResult moveFile(Path from, Path to) throws IOException {
     // We don't try-catch here for better performance.
     to.delete();
     try {
       from.renameTo(to);
+      return MoveResult.FILE_MOVED;
     } catch (IOException e) {
       // Fallback to a copy.
       FileStatus stat = from.stat(Symlinks.NOFOLLOW);
@@ -450,6 +466,7 @@ public class FileSystemUtils {
         }
         throw new IOException("Unable to delete " + from);
       }
+      return MoveResult.FILE_COPIED;
     }
   }
 
@@ -513,36 +530,6 @@ public class FileSystemUtils {
       }
       if (p.isDirectory(Symlinks.NOFOLLOW)) {
         traverseTree(paths, p, predicate);
-      }
-    }
-  }
-
-  /**
-   * Deletes 'p', and everything recursively beneath it if it's a directory.
-   * Does not follow any symbolic links.
-   *
-   * @throws IOException if any file could not be removed.
-   */
-  @ThreadSafe
-  public static void deleteTree(Path p) throws IOException {
-    deleteTreesBelow(p);
-    p.delete();
-  }
-
-  /**
-   * Deletes all dir trees recursively beneath 'dir' if it's a directory,
-   * nothing otherwise. Does not follow any symbolic links.
-   *
-   * @throws IOException if any file could not be removed.
-   */
-  @ThreadSafe
-  public static void deleteTreesBelow(Path dir) throws IOException {
-    if (dir.isDirectory(Symlinks.NOFOLLOW)) {  // real directories (not symlinks)
-      dir.setReadable(true);
-      dir.setWritable(true);
-      dir.setExecutable(true);
-      for (Path child : dir.getDirectoryEntries()) {
-        deleteTree(child);
       }
     }
   }

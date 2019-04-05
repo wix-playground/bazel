@@ -201,7 +201,7 @@ def _PruneFile(file_queue, reachable_files, objc_file_path, file_open=open,
       file_shutil.copy(input_file, output_file)
     else:
       with file_open(output_file, 'w') as f:
-        # Use a static variable scoped to the source file to supress
+        # Use a static variable scoped to the source file to suppress
         # the "has no symbols" linker warning for empty object files.
         f.write(PRUNED_SRC_CONTENT)
     file_queue.task_done()
@@ -214,7 +214,7 @@ def _DuplicatedFiles(archive_source_file_mapping):
     archive_source_file_mapping: A dict mapping source files to the associated
         archive file that contains them.
   Returns:
-    A list containg files with duplicated base names.
+    A list containing files with duplicated base names.
   """
   duplicated_files = []
   dict_with_duplicates = dict()
@@ -399,8 +399,12 @@ def PruneArchiveFile(input_archive, output_archive, dummy_archive,
     j2objc_cmd = 'cp %s %s' % (pipes.quote(input_archive),
                                pipes.quote(output_archive))
 
-  subprocess.check_output(
-      j2objc_cmd, stderr=subprocess.STDOUT, shell=True, env=cmd_env)
+  try:
+    subprocess.check_output(
+        j2objc_cmd, stderr=subprocess.STDOUT, shell=True, env=cmd_env)
+  except OSError as e:
+    raise Exception(
+        'executing command failed: %s (%s)' % (j2objc_cmd, e.strerror))
 
   # "Touch" the output file.
   # Prevents a pre-Xcode-8 bug in which passing zero-date archive files to ld

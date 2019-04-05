@@ -44,19 +44,16 @@ import com.google.devtools.build.lib.analysis.PlatformConfiguration;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
 import com.google.devtools.build.lib.analysis.config.HostTransition;
-import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.packages.Attribute;
-import com.google.devtools.build.lib.packages.Attribute.LabelLateBoundDefault;
 import com.google.devtools.build.lib.packages.AttributeMap;
-import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.ImplicitOutputsFunction.SafeImplicitOutputsFunction;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
 import com.google.devtools.build.lib.packages.SkylarkProviderIdentifier;
 import com.google.devtools.build.lib.packages.TriState;
-import com.google.devtools.build.lib.rules.cpp.CcModule.CcSkylarkInfo;
+import com.google.devtools.build.lib.rules.cpp.CcInfo;
 import com.google.devtools.build.lib.rules.cpp.CcToolchain;
-import com.google.devtools.build.lib.rules.cpp.CppConfiguration;
+import com.google.devtools.build.lib.rules.cpp.CcToolchainProvider;
 import com.google.devtools.build.lib.rules.cpp.CppFileTypes;
 import com.google.devtools.build.lib.rules.cpp.CppRuleClasses;
 import com.google.devtools.build.lib.rules.cpp.CppRuleClasses.CcIncludeScanningRule;
@@ -71,31 +68,6 @@ public class BazelCppRuleClasses {
 
   static final SafeImplicitOutputsFunction CC_BINARY_IMPLICIT_OUTPUTS =
       fromFunctions(CppRuleClasses.CC_BINARY_STRIPPED, CppRuleClasses.CC_BINARY_DEBUG_PACKAGE);
-
-  /**
-   * Returns the STL prerequisite of the rule.
-   *
-   * <p>If rule has an implicit $stl_default attribute returns STL version set on the command line
-   * or if not set, the value of the $stl_default attribute. Returns {@code null} otherwise.
-   */
-  public static final LabelLateBoundDefault<?> STL =
-      LabelLateBoundDefault.fromTargetConfiguration(
-          CppConfiguration.class,
-          null,
-          (rule, attributes, cppConfig) -> {
-            Label stl = null;
-            if (attributes.has("$stl_default", BuildType.LABEL)) {
-              Label stlConfigLabel = cppConfig.getStl();
-              Label stlRuleLabel = attributes.get("$stl_default", BuildType.LABEL);
-              if (stlConfigLabel == null) {
-                stl = stlRuleLabel;
-              } else if (!stlConfigLabel.equals(rule.getLabel()) && stlRuleLabel != null) {
-                // prevents self-reference and a cycle through standard STL in the dependency graph
-                stl = stlConfigLabel;
-              }
-            }
-            return stl;
-          });
 
   static final FileTypeSet ALLOWED_SRC_FILES =
       FileTypeSet.of(
@@ -118,17 +90,15 @@ public class BazelCppRuleClasses {
         "cc_library", "objc_library", "cc_proto_library", "cc_import",
       };
 
-  /**
-   * Common attributes for all rules that create C++ links. This may
-   * include non-cc_* rules (e.g. py_binary).
-   */
-  public static final class CcLinkingRule implements RuleDefinition {
+  /** Common attributes for all rules that need a C++ toolchain. */
+  public static final class CcToolchainRequiringRule implements RuleDefinition {
     @Override
     @SuppressWarnings("unchecked")
     public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
       return builder
           .add(
               attr(CcToolchain.CC_TOOLCHAIN_DEFAULT_ATTRIBUTE_NAME, LABEL)
+                  .mandatoryProviders(CcToolchainProvider.PROVIDER.id())
                   .value(CppRuleClasses.ccToolchainAttribute(env)))
           .add(
               attr(CcToolchain.CC_TOOLCHAIN_TYPE_ATTRIBUTE_NAME, NODEP_LABEL)
@@ -142,7 +112,7 @@ public class BazelCppRuleClasses {
     @Override
     public Metadata getMetadata() {
       return RuleDefinition.Metadata.builder()
-          .name("$cc_linking_rule")
+          .name("$cc_toolchain_requiring_rule")
           .ancestors(CcIncludeScanningRule.class)
           .type(RuleClassType.ABSTRACT)
           .build();
@@ -173,8 +143,6 @@ public class BazelCppRuleClasses {
           </p>
           <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
           .add(attr("copts", STRING_LIST))
-          .add(attr("$stl_default", LABEL).value(env.getToolsLabel("//tools/cpp:stl")))
-          .add(attr(":stl", LABEL).value(STL))
           .build();
     }
 
@@ -183,7 +151,7 @@ public class BazelCppRuleClasses {
       return RuleDefinition.Metadata.builder()
           .name("$cc_base_rule")
           .type(RuleClassType.ABSTRACT)
-          .ancestors(CcLinkingRule.class)
+          .ancestors(CcToolchainRequiringRule.class)
           .build();
     }
   }
@@ -241,51 +209,8 @@ public class BazelCppRuleClasses {
    * Helper rule class.
    */
   public static final class CcRule implements RuleDefinition {
-
-    /**
-     * The label points to the Windows object file parser. In bazel, it should be
-     * //tools/def_parser:def_parser, otherwise it should be null.
-     *
-     * <p>TODO(pcloudy): Remove this after Bazel rule definitions are not used internally anymore.
-     * Related bug b/63658220
-     */
-    private final String defParserLabel;
-
-    public CcRule(String defParserLabel) {
-      this.defParserLabel = defParserLabel;
-    }
-
-    public CcRule() {
-      this.defParserLabel = null;
-    }
-
     @Override
     public RuleClass build(RuleClass.Builder builder, final RuleDefinitionEnvironment env) {
-      if (defParserLabel != null) {
-        builder.add(
-            attr("$def_parser", LABEL)
-                .cfg(HostTransition.INSTANCE)
-                .singleArtifact()
-                .value(
-                    new Attribute.ComputedDefault() {
-                      @Override
-                      public Object getDefault(AttributeMap rule) {
-                        // Every cc_rule depends implicitly on def_parser tool.
-                        // The only exceptions are the rules for building def_parser itself.
-                        // To avoid cycles in the dependency graph, return null for rules under
-                        // @bazel_tools//third_party/def_parser and @bazel_tools//tools/cpp
-                        String label = rule.getLabel().toString();
-                        String toolsRepository = env.getToolsRepository();
-                        return label.startsWith(toolsRepository + "//third_party/def_parser")
-                                // @bazel_tools//tools/cpp:malloc and @bazel_tools//tools/cpp:stl
-                                // are implicit dependency of all cc rules,
-                                // thus a dependency of def_parser.
-                                || label.startsWith(toolsRepository + "//tools/cpp")
-                            ? null
-                            : Label.parseAbsoluteUnchecked(defParserLabel);
-                      }
-                    }));
-      }
       return builder
           /*<!-- #BLAZE_RULE($cc_rule).ATTRIBUTE(srcs) -->
           The list of C and C++ files that are processed to create the target.
@@ -324,7 +249,7 @@ public class BazelCppRuleClasses {
             <li>C and C++ source files: <code>.c</code>, <code>.cc</code>, <code>.cpp</code>,
               <code>.cxx</code>, <code>.c++</code>, <code>.C</code></li>
             <li>C and C++ header files: <code>.h</code>, <code>.hh</code>, <code>.hpp</code>,
-              <code>.hxx</code>, <code>.inc</code></li>
+              <code>.hxx</code>, <code>.inc</code>, <code>.inl</code>, <code>.H</code></li>
             <li>Assembler with C preprocessor: <code>.S</code></li>
             <li>Archive: <code>.a</code>, <code>.pic.a</code></li>
             <li>"Always link" library: <code>.lo</code>, <code>.pic.lo</code></li>
@@ -352,8 +277,7 @@ public class BazelCppRuleClasses {
                   .allowedRuleClasses(DEPS_ALLOWED_RULES)
                   .allowedFileTypes(CppFileTypes.LINKER_SCRIPT)
                   .skipAnalysisTimeFileTypeCheck()
-                  .mandatoryProviders(
-                      SkylarkProviderIdentifier.forKey(CcSkylarkInfo.PROVIDER.getKey())))
+                  .mandatoryProviders(SkylarkProviderIdentifier.forKey(CcInfo.PROVIDER.getKey())))
           /*<!-- #BLAZE_RULE($cc_rule).ATTRIBUTE(win_def_file) -->
           The Windows DEF file to be passed to linker.
           <p>This attribute should only be used when Windows is the target platform.
@@ -435,18 +359,27 @@ public class BazelCppRuleClasses {
            </p>
           <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
           .add(attr("linkstatic", BOOLEAN).value(true))
-          .override(
-              attr("$stl_default", LABEL)
+          .add(
+              attr("$def_parser", LABEL)
+                  .cfg(HostTransition.createFactory())
+                  .singleArtifact()
                   .value(
                       new Attribute.ComputedDefault() {
                         @Override
                         public Object getDefault(AttributeMap rule) {
-                          // Every cc_rule depends implicitly on STL to make
-                          // sure that the correct headers are used for inclusion.
-                          // The only exception is STL itself,
-                          // to avoid cycles in the dependency graph.
-                          Label stl = env.getToolsLabel("//tools/cpp:stl");
-                          return rule.getLabel().equals(stl) ? null : stl;
+                          // Every cc_rule depends implicitly on the def_parser tool.
+                          // The only exceptions are the rules for building def_parser itself.
+                          // To avoid cycles in the dependency graph, return null for rules under
+                          // @bazel_tools//third_party/def_parser and @bazel_tools//tools/cpp
+                          String label = rule.getLabel().toString();
+                          String toolsRepository = env.getToolsRepository();
+                          return label.startsWith(toolsRepository + "//third_party/def_parser")
+                                  // @bazel_tools//tools/cpp:malloc and @bazel_tools//tools/cpp:stl
+                                  // are implicit dependencies of all cc rules,
+                                  // thus a dependency of the def_parser.
+                                  || label.startsWith(toolsRepository + "//tools/cpp")
+                              ? null
+                              : env.getToolsLabel("//tools/def_parser:def_parser");
                         }
                       }))
           .build();

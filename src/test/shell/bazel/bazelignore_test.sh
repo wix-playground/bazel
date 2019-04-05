@@ -39,7 +39,69 @@ test_broken_BUILD_files_ignored() {
     echo; echo
     echo ignoreme > .bazelignore
     bazel build ... \
-        || fail "directory mentioned in .bazelrc not ignored as it should"
+        || fail "directory mentioned in .bazelignore not ignored as it should"
+}
+
+test_symlink_loop_ignored() {
+    rm -rf work && mkdir work && cd work
+    touch WORKSPACE
+    mkdir -p ignoreme/deep
+    (cd ignoreme/deep && ln -s . loop)
+    touch BUILD
+    bazel build ... && fail "Expected failure" || :
+
+    echo; echo
+    echo ignoreme > .bazelignore
+    bazel build ... \
+        || fail "directory mentioned in .bazelignore not ignored as it should"
+}
+
+test_build_specific_target() {
+    rm -rf work && mkdir work && cd work
+    touch WORKSPACE
+    mkdir -p ignoreme
+    echo Not a valid BUILD file > ignoreme/BUILD
+    mkdir -p foo/bar
+    cat > foo/bar/BUILD <<'EOI'
+genrule(
+  name = "out",
+  outs = ["out.txt"],
+  cmd = "echo Hello World > $@",
+)
+EOI
+    echo ignoreme > .bazelignore
+    bazel build //foo/bar/... || fail "Could not build valid target"
+}
+
+test_aquery_specific_target() {
+    rm -rf work && mkdir work && cd work
+    touch WORKSPACE
+    mkdir -p foo/ignoreme
+    cat > foo/ignoreme/BUILD <<'EOI'
+genrule(
+  name = "ignoreme",
+  outs = ["ignore.txt"],
+  cmd = "echo Hello World > $@",
+)
+EOI
+    mkdir -p foo
+    cat > foo/BUILD <<'EOI'
+genrule(
+  name = "out",
+  outs = ["out.txt"],
+  cmd = "echo Hello World > $@",
+)
+EOI
+    bazel aquery ... > output 2> "$TEST_log" \
+        || fail "Aquery should complete without error."
+    cat output >> "$TEST_log"
+    assert_contains "ignoreme" output
+
+    echo foo/ignoreme > .bazelignore
+    bazel aquery ... > output 2> "$TEST_log" \
+        || fail "Aquery should complete without error."
+    cat output >> "$TEST_log"
+    assert_not_contains "ignoreme" output
 }
 
 run_suite "Integration tests for .bazelignore"

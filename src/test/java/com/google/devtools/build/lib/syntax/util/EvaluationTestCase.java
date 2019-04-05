@@ -17,7 +17,10 @@ import static com.google.common.truth.Truth.assertThat;
 import static org.junit.Assert.fail;
 
 import com.google.common.base.Joiner;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.truth.Ordered;
+import com.google.devtools.build.lib.analysis.skylark.BazelStarlarkContext;
+import com.google.devtools.build.lib.analysis.skylark.SymbolGenerator;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventCollector;
 import com.google.devtools.build.lib.events.EventKind;
@@ -27,18 +30,19 @@ import com.google.devtools.build.lib.packages.BazelLibrary;
 import com.google.devtools.build.lib.syntax.BuildFileAST;
 import com.google.devtools.build.lib.syntax.Environment;
 import com.google.devtools.build.lib.syntax.Environment.FailFastException;
-import com.google.devtools.build.lib.syntax.Environment.Phase;
 import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.syntax.Expression;
 import com.google.devtools.build.lib.syntax.Mutability;
 import com.google.devtools.build.lib.syntax.Parser;
 import com.google.devtools.build.lib.syntax.ParserInputSource;
 import com.google.devtools.build.lib.syntax.SkylarkUtils;
+import com.google.devtools.build.lib.syntax.SkylarkUtils.Phase;
 import com.google.devtools.build.lib.syntax.Statement;
 import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.build.lib.testutil.TestMode;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 import org.junit.Before;
 
 /**
@@ -61,14 +65,19 @@ public class EvaluationTestCase {
    * No PythonPreprocessing, mostly empty mutable Environment.
    */
   public Environment newBuildEnvironment() {
+    BazelStarlarkContext context =
+        new BazelStarlarkContext(
+            TestConstants.TOOLS_REPOSITORY,
+            /* repoMapping= */ ImmutableMap.of(),
+            new SymbolGenerator<>(new Object()));
     Environment env =
         Environment.builder(mutability)
             .useDefaultSemantics()
             .setGlobals(BazelLibrary.GLOBALS)
             .setEventHandler(getEventHandler())
-            .setPhase(Phase.LOADING)
+            .setStarlarkContext(context)
             .build();
-    SkylarkUtils.setToolsRepository(env, TestConstants.TOOLS_REPOSITORY);
+    SkylarkUtils.setPhase(env, Phase.LOADING);
     return env;
   }
 
@@ -98,12 +107,17 @@ public class EvaluationTestCase {
 
   protected Environment newEnvironmentWithSkylarkOptions(String... skylarkOptions)
       throws Exception {
+    return newEnvironmentWithBuiltinsAndSkylarkOptions(ImmutableMap.of(), skylarkOptions);
+  }
+
+  protected Environment newEnvironmentWithBuiltinsAndSkylarkOptions(Map<String, Object> builtins,
+      String... skylarkOptions) throws Exception {
     if (testMode == null) {
       throw new IllegalArgumentException(
           "TestMode is null. Please set a Testmode via setMode() or set the "
               + "Environment manually by overriding newEnvironment()");
     }
-    return testMode.createEnvironment(getEventHandler(), skylarkOptions);
+    return testMode.createEnvironment(getEventHandler(), builtins, skylarkOptions);
   }
 
   /**
@@ -115,6 +129,17 @@ public class EvaluationTestCase {
   protected void setMode(TestMode testMode, String... skylarkOptions) throws Exception {
     this.testMode = testMode;
     env = newEnvironmentWithSkylarkOptions(skylarkOptions);
+  }
+
+  protected void setMode(TestMode testMode, Map<String, Object> builtins,
+      String... skylarkOptions) throws Exception {
+    this.testMode = testMode;
+    env = newEnvironmentWithBuiltinsAndSkylarkOptions(builtins, skylarkOptions);
+  }
+
+  protected void enableSkylarkMode(Map<String, Object> builtins,
+      String... skylarkOptions) throws Exception {
+    setMode(TestMode.SKYLARK, builtins, skylarkOptions);
   }
 
   protected void enableSkylarkMode(String... skylarkOptions) throws Exception {
@@ -167,7 +192,7 @@ public class EvaluationTestCase {
   }
 
   public Object lookup(String varname) throws Exception {
-    return env.lookup(varname);
+    return env.moduleLookup(varname);
   }
 
   public Object eval(String... input) throws Exception {
@@ -589,14 +614,20 @@ public class EvaluationTestCase {
    */
   protected class SkylarkTest extends ModalTestCase {
     private final String[] skylarkOptions;
+    private final Map<String, Object> builtins;
 
     public SkylarkTest(String... skylarkOptions) {
+      this(ImmutableMap.of(), skylarkOptions);
+    }
+
+    public SkylarkTest(Map<String, Object> builtins, String... skylarkOptions) {
+      this.builtins = builtins;
       this.skylarkOptions = skylarkOptions;
     }
 
     @Override
     protected void run(Testable testable) throws Exception {
-      enableSkylarkMode(skylarkOptions);
+      enableSkylarkMode(builtins, skylarkOptions);
       testable.run();
     }
   }

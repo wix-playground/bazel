@@ -18,9 +18,12 @@ import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.buildtool.BuildRequest;
+import com.google.devtools.build.lib.buildtool.BuildRequestOptions;
 import com.google.devtools.build.lib.buildtool.BuildResult;
 import com.google.devtools.build.lib.buildtool.BuildTool;
 import com.google.devtools.build.lib.buildtool.InstrumentationFilterSupport;
+import com.google.devtools.build.lib.buildtool.OutputDirectoryLinksUtils;
+import com.google.devtools.build.lib.buildtool.PathPrettyPrinter;
 import com.google.devtools.build.lib.buildtool.buildevent.TestingCompleteEvent;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
@@ -37,12 +40,14 @@ import com.google.devtools.build.lib.runtime.TerminalTestResultNotifier;
 import com.google.devtools.build.lib.runtime.TerminalTestResultNotifier.TestSummaryOptions;
 import com.google.devtools.build.lib.runtime.TestResultAnalyzer;
 import com.google.devtools.build.lib.runtime.TestResultNotifier;
+import com.google.devtools.build.lib.runtime.TestSummaryPrinter.TestLogPathFormatter;
 import com.google.devtools.build.lib.util.ExitCode;
 import com.google.devtools.build.lib.util.io.AnsiTerminalPrinter;
+import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.common.options.OptionPriority.PriorityCategory;
 import com.google.devtools.common.options.OptionsParser;
 import com.google.devtools.common.options.OptionsParsingException;
-import com.google.devtools.common.options.OptionsProvider;
+import com.google.devtools.common.options.OptionsParsingResult;
 import java.util.Collection;
 import java.util.List;
 
@@ -82,7 +87,7 @@ public class TestCommand implements BlazeCommand {
   }
 
   @Override
-  public BlazeCommandResult exec(CommandEnvironment env, OptionsProvider options) {
+  public BlazeCommandResult exec(CommandEnvironment env, OptionsParsingResult options) {
     TestOutputFormat testOutput = options.getOptions(ExecutionOptions.class).testOutput;
     if (testOutput == TestStrategy.TestOutputFormat.STREAMED) {
       env.getReporter().handle(Event.warn(
@@ -107,7 +112,7 @@ public class TestCommand implements BlazeCommand {
   }
 
   private BlazeCommandResult doTest(CommandEnvironment env,
-      OptionsProvider options,
+      OptionsParsingResult options,
       AggregatingTestListener testListener) {
     BlazeRuntime runtime = env.getRuntime();
     // Run simultaneous build and test.
@@ -152,7 +157,7 @@ public class TestCommand implements BlazeCommand {
 
     boolean buildSuccess = buildResult.getSuccess();
     boolean testSuccess = analyzeTestResults(
-        testTargets, buildResult.getSkippedTargets(), testListener, options);
+        testTargets, buildResult.getSkippedTargets(), testListener, options, env);
 
     if (testSuccess && !buildSuccess) {
       // If all tests run successfully, test summary should include warning if
@@ -173,12 +178,37 @@ public class TestCommand implements BlazeCommand {
    * Analyzes test results and prints summary information.
    * Returns true if and only if all tests were successful.
    */
-  private boolean analyzeTestResults(Collection<ConfiguredTarget> testTargets,
-                                     Collection<ConfiguredTarget> skippedTargets,
-                                     AggregatingTestListener listener,
-                                     OptionsProvider options) {
-    TestResultNotifier notifier = new TerminalTestResultNotifier(printer, options);
+  private boolean analyzeTestResults(
+      Collection<ConfiguredTarget> testTargets,
+      Collection<ConfiguredTarget> skippedTargets,
+      AggregatingTestListener listener,
+      OptionsParsingResult options,
+      CommandEnvironment env) {
+    TestResultNotifier notifier = new TerminalTestResultNotifier(
+        printer,
+        makeTestLogPathFormatter(options, env),
+        options);
     return listener.getAnalyzer().differentialAnalyzeAndReport(
         testTargets, skippedTargets, listener, notifier);
+  }
+
+  private static TestLogPathFormatter makeTestLogPathFormatter(
+      OptionsParsingResult options,
+      CommandEnvironment env) {
+    TestSummaryOptions summaryOptions = options.getOptions(TestSummaryOptions.class);
+    if (!summaryOptions.printRelativeTestLogPaths) {
+      return Path::getPathString;
+    }
+    String productName = env.getRuntime().getProductName();
+    BuildRequestOptions requestOptions = env.getOptions().getOptions(BuildRequestOptions.class);
+    // requestOptions.printWorkspaceInOutputPathsIfNeeded is antithetical with
+    // summaryOptions.printRelativeTestLogPaths, so we completely ignore it.
+    PathPrettyPrinter pathPrettyPrinter =
+        OutputDirectoryLinksUtils.getPathPrettyPrinter(
+            requestOptions.getSymlinkPrefix(productName),
+            productName,
+            env.getWorkspace(),
+            env.getWorkspace());
+    return path -> pathPrettyPrinter.getPrettyPath(path).getPathString();
   }
 }

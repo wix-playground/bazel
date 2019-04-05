@@ -19,7 +19,7 @@ import static com.google.devtools.build.lib.syntax.Parser.ParsingLevel.LOCAL_LEV
 import static com.google.devtools.build.lib.syntax.Parser.ParsingLevel.TOP_LEVEL;
 
 import com.google.common.base.Joiner;
-import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.syntax.util.EvaluationTestCase;
 import java.io.IOException;
 import org.junit.Test;
@@ -147,7 +147,7 @@ public class ASTPrettyPrintTest extends EvaluationTestCase {
   public void funcallExpression() {
     assertExprBothRoundTrip("f()");
     assertExprBothRoundTrip("f(a)");
-    assertExprBothRoundTrip("f(a, b = B, *c, d = D, **e)");
+    assertExprBothRoundTrip("f(a, b = B, c = C, *d, **e)");
     assertExprBothRoundTrip("o.f()");
   }
 
@@ -376,7 +376,9 @@ public class ASTPrettyPrintTest extends EvaluationTestCase {
     ASTNode loadStatement =
         new LoadStatement(
             new StringLiteral("foo.bzl"),
-            ImmutableMap.of(Identifier.of("a"), "A", Identifier.of("B"), "B"));
+            ImmutableList.of(
+                new LoadStatement.Binding(Identifier.of("a"), Identifier.of("A")),
+                new LoadStatement.Binding(Identifier.of("B"), Identifier.of("B"))));
     assertIndentedPrettyMatches(
         loadStatement,
         "  load(\"foo.bzl\", a=\"A\", \"B\")\n");

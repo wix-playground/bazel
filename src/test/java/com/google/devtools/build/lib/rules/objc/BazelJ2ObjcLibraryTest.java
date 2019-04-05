@@ -47,7 +47,7 @@ import com.google.devtools.build.lib.rules.apple.DottedVersion;
 import com.google.devtools.build.lib.rules.cpp.CppCompileActionTemplate;
 import com.google.devtools.build.lib.rules.cpp.CppModuleMapAction;
 import com.google.devtools.build.lib.rules.cpp.UmbrellaHeaderAction;
-import com.google.devtools.build.lib.syntax.SkylarkSemantics;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -791,6 +791,7 @@ public class BazelJ2ObjcLibraryTest extends J2ObjcLibraryTest {
             actionKeyContext,
             null,
             null,
+            null,
             ImmutableMap.<String, String>of(),
             ImmutableMap.of(),
             DUMMY_ARTIFACT_EXPANDER,
@@ -843,7 +844,8 @@ public class BazelJ2ObjcLibraryTest extends J2ObjcLibraryTest {
             actionKeyContext,
             null,
             null,
-            ImmutableMap.<String, String>of(),
+            null,
+            ImmutableMap.of(),
             ImmutableMap.of(),
             DUMMY_ARTIFACT_EXPANDER,
             null,
@@ -1171,7 +1173,7 @@ public class BazelJ2ObjcLibraryTest extends J2ObjcLibraryTest {
 
   @Test
   public void testCompileActionTemplateFromGenJar() throws Exception {
-    useConfiguration("--cpu=ios_i386", "--ios_minimum_os=1.0");
+    useConfiguration("--apple_platform_type=ios", "--cpu=ios_i386", "--ios_minimum_os=1.0");
     addSimpleJ2ObjcLibraryWithJavaPlugin();
     Artifact archive = j2objcArchive("//java/com/google/app/test:transpile", "test");
     CommandAction archiveAction = (CommandAction) getGeneratingAction(archive);
@@ -1228,7 +1230,9 @@ public class BazelJ2ObjcLibraryTest extends J2ObjcLibraryTest {
             .add("-F")
             .add(AppleToolchain.sdkDir() + "/Developer/Library/Frameworks")
             .add("-F")
-            .add(AppleToolchain.platformDeveloperFrameworkDir(appleConfiguration))
+            .add(
+                AppleToolchain.platformDeveloperFrameworkDir(
+                    appleConfiguration.getSingleArchPlatform()))
             .add("-O0")
             .add("-DDEBUG=1")
             .add("-iquote")
@@ -1313,7 +1317,7 @@ public class BazelJ2ObjcLibraryTest extends J2ObjcLibraryTest {
     // building a transitive provider from the target-to-build's deps. We duplicate that behavior
     // here to make sure we're testing the provider set that the eventual target library would see.
     ObjcProvider newProvider =
-        new ObjcProvider.Builder(SkylarkSemantics.DEFAULT_SEMANTICS)
+        new ObjcProvider.Builder(StarlarkSemantics.DEFAULT_SEMANTICS)
             .addTransitiveAndPropagate(ImmutableList.of(provider))
             .build();
     return getFirstArtifactEndingWith(newProvider.get(ObjcProvider.MODULE_MAP), nameSuffix);

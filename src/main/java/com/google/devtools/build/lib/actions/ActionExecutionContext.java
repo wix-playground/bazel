@@ -17,7 +17,6 @@ package com.google.devtools.build.lib.actions;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.eventbus.EventBus;
 import com.google.devtools.build.lib.actions.Artifact.ArtifactExpander;
 import com.google.devtools.build.lib.actions.cache.MetadataHandler;
 import com.google.devtools.build.lib.clock.Clock;
@@ -28,11 +27,9 @@ import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.util.io.FileOutErr;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Path;
-import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
-import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunction.Environment;
-import com.google.devtools.common.options.OptionsClassProvider;
+import com.google.devtools.common.options.OptionsProvider;
 import java.io.Closeable;
 import java.io.IOException;
 import java.util.Map;
@@ -50,7 +47,7 @@ public class ActionExecutionContext implements Closeable {
     private final boolean shouldShowSubcommands;
     private final boolean prettyPrintArgs;
 
-    private ShowSubcommands(boolean shouldShowSubcommands, boolean prettyPrintArgs) {
+    ShowSubcommands(boolean shouldShowSubcommands, boolean prettyPrintArgs) {
       this.shouldShowSubcommands = shouldShowSubcommands;
       this.prettyPrintArgs = prettyPrintArgs;
     }
@@ -62,8 +59,9 @@ public class ActionExecutionContext implements Closeable {
   private final ActionKeyContext actionKeyContext;
   private final MetadataHandler metadataHandler;
   private final FileOutErr fileOutErr;
+  private final ExtendedEventHandler eventHandler;
   private final ImmutableMap<String, String> clientEnv;
-  private final ImmutableMap<PathFragment, ImmutableList<FilesetOutputSymlink>> topLevelFilesets;
+  private final ImmutableMap<Artifact, ImmutableList<FilesetOutputSymlink>> topLevelFilesets;
   @Nullable private final ArtifactExpander artifactExpander;
   @Nullable private final Environment env;
 
@@ -81,10 +79,11 @@ public class ActionExecutionContext implements Closeable {
       ActionKeyContext actionKeyContext,
       MetadataHandler metadataHandler,
       FileOutErr fileOutErr,
+      ExtendedEventHandler eventHandler,
       Map<String, String> clientEnv,
-      ImmutableMap<PathFragment, ImmutableList<FilesetOutputSymlink>> topLevelFilesets,
+      ImmutableMap<Artifact, ImmutableList<FilesetOutputSymlink>> topLevelFilesets,
       @Nullable ArtifactExpander artifactExpander,
-      @Nullable SkyFunction.Environment env,
+      @Nullable Environment env,
       @Nullable FileSystem actionFileSystem,
       @Nullable Object skyframeDepsResult) {
     this.actionInputFileCache = actionInputFileCache;
@@ -92,6 +91,7 @@ public class ActionExecutionContext implements Closeable {
     this.actionKeyContext = actionKeyContext;
     this.metadataHandler = metadataHandler;
     this.fileOutErr = fileOutErr;
+    this.eventHandler = eventHandler;
     this.clientEnv = ImmutableMap.copyOf(clientEnv);
     this.topLevelFilesets = topLevelFilesets;
     this.executor = executor;
@@ -111,8 +111,9 @@ public class ActionExecutionContext implements Closeable {
       ActionKeyContext actionKeyContext,
       MetadataHandler metadataHandler,
       FileOutErr fileOutErr,
+      ExtendedEventHandler eventHandler,
       Map<String, String> clientEnv,
-      ImmutableMap<PathFragment, ImmutableList<FilesetOutputSymlink>> topLevelFilesets,
+      ImmutableMap<Artifact, ImmutableList<FilesetOutputSymlink>> topLevelFilesets,
       ArtifactExpander artifactExpander,
       @Nullable FileSystem actionFileSystem,
       @Nullable Object skyframeDepsResult) {
@@ -123,6 +124,7 @@ public class ActionExecutionContext implements Closeable {
         actionKeyContext,
         metadataHandler,
         fileOutErr,
+        eventHandler,
         clientEnv,
         topLevelFilesets,
         artifactExpander,
@@ -138,6 +140,7 @@ public class ActionExecutionContext implements Closeable {
       ActionKeyContext actionKeyContext,
       MetadataHandler metadataHandler,
       FileOutErr fileOutErr,
+      ExtendedEventHandler eventHandler,
       Map<String, String> clientEnv,
       Environment env,
       @Nullable FileSystem actionFileSystem) {
@@ -148,6 +151,7 @@ public class ActionExecutionContext implements Closeable {
         actionKeyContext,
         metadataHandler,
         fileOutErr,
+        eventHandler,
         clientEnv,
         ImmutableMap.of(),
         /*artifactExpander=*/ null,
@@ -187,8 +191,8 @@ public class ActionExecutionContext implements Closeable {
    * <p>Notably, in the future, we want any action-scoped artifacts to resolve paths using this
    * method instead of {@link Artifact#getPath} because that does not allow filesystem injection.
    *
-   * <p>TODO(shahan): cleanup {@link Action}-scoped references to {@link Artifact.getPath} and
-   * {@link Artifact.getRoot}.
+   * <p>TODO(shahan): cleanup {@link Action}-scoped references to {@link Artifact#getPath} and
+   * {@link Artifact#getRoot}.
    */
   public Path getInputPath(ActionInput input) {
     return pathResolver.toPath(input);
@@ -212,7 +216,7 @@ public class ActionExecutionContext implements Closeable {
   /**
    * Returns the command line options of the Blaze command being executed.
    */
-  public OptionsClassProvider getOptions() {
+  public OptionsProvider getOptions() {
     return executor.getOptions();
   }
 
@@ -220,15 +224,11 @@ public class ActionExecutionContext implements Closeable {
     return executor.getClock();
   }
 
-  public EventBus getEventBus() {
-    return executor.getEventBus();
-  }
-
   public ExtendedEventHandler getEventHandler() {
-    return executor.getEventHandler();
+    return eventHandler;
   }
 
-  public ImmutableMap<PathFragment, ImmutableList<FilesetOutputSymlink>> getTopLevelFilesets() {
+  public ImmutableMap<Artifact, ImmutableList<FilesetOutputSymlink>> getTopLevelFilesets() {
     return topLevelFilesets;
   }
 
@@ -324,6 +324,7 @@ public class ActionExecutionContext implements Closeable {
         actionKeyContext,
         metadataHandler,
         fileOutErr,
+        eventHandler,
         clientEnv,
         topLevelFilesets,
         artifactExpander,

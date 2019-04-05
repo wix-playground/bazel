@@ -16,7 +16,7 @@ package com.google.devtools.build.lib.rules.java.proto;
 
 import static com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode.TARGET;
 import static com.google.devtools.build.lib.collect.nestedset.Order.STABLE_ORDER;
-import static com.google.devtools.build.lib.rules.java.proto.JplCcLinkParams.createCcLinkParamsStore;
+import static com.google.devtools.build.lib.rules.java.proto.JplCcLinkParams.createCcLinkingInfo;
 import static com.google.devtools.build.lib.rules.java.proto.StrictDepsUtils.constructJcapFromAspectDeps;
 
 import com.google.common.collect.ImmutableList;
@@ -29,7 +29,6 @@ import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
-import com.google.devtools.build.lib.analysis.WrappingProvider;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.rules.java.JavaCompilationArgsProvider;
 import com.google.devtools.build.lib.rules.java.JavaConfiguration;
@@ -46,6 +45,13 @@ public class JavaProtoLibrary implements RuleConfiguredTargetFactory {
   @Override
   public ConfiguredTarget create(final RuleContext ruleContext)
       throws InterruptedException, RuleErrorException, ActionConflictException {
+
+    if (ruleContext.getFragment(JavaConfiguration.class).isDisallowStrictDepsForJpl()
+        && ruleContext.attributes().has("strict_deps")
+        && ruleContext.attributes().isAttributeValueExplicitlySpecified("strict_deps")) {
+      ruleContext.attributeError("strict_deps", "The strict_deps attribute has been removed.");
+      return null;
+    }
 
     Iterable<JavaProtoLibraryAspectProvider> javaProtoLibraryAspectProviders =
         ruleContext.getPrerequisites("deps", TARGET, JavaProtoLibraryAspectProvider.class);
@@ -66,8 +72,7 @@ public class JavaProtoLibrary implements RuleConfiguredTargetFactory {
 
     JavaSourceJarsProvider sourceJarsProvider =
         JavaSourceJarsProvider.merge(
-            WrappingProvider.Helper.unwrapProviders(
-                javaProtoLibraryAspectProviders, JavaSourceJarsProvider.class));
+            ruleContext.getPrerequisites("deps", TARGET, JavaSourceJarsProvider.class));
 
     NestedSetBuilder<Artifact> filesToBuild = NestedSetBuilder.stableOrder();
 
@@ -99,7 +104,7 @@ public class JavaProtoLibrary implements RuleConfiguredTargetFactory {
             .addNativeDeclaredProvider(javaInfo);
 
     if (ruleContext.getFragment(JavaConfiguration.class).jplPropagateCcLinkParamsStore()) {
-      result.addProvider(createCcLinkParamsStore(ruleContext, ImmutableList.of()));
+      result.addNativeDeclaredProvider(createCcLinkingInfo(ruleContext, ImmutableList.of()));
     }
 
     return result.build();

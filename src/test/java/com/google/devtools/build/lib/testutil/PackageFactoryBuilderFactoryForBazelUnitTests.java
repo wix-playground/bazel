@@ -14,11 +14,13 @@
 package com.google.devtools.build.lib.testutil;
 
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
+import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider;
 import com.google.devtools.build.lib.packages.BuilderFactoryForTesting;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.packages.PackageFactory;
 import com.google.devtools.build.lib.packages.RuleClassProvider;
 import com.google.devtools.build.lib.skyframe.packages.PackageFactoryBuilderWithSkyframeForTesting;
+import com.google.devtools.build.lib.vfs.FileSystem;
 
 /**
  * A {@link BuilderFactoryForTesting} implementation that injects a {@link
@@ -46,10 +48,11 @@ class PackageFactoryBuilderFactoryForBazelUnitTests implements BuilderFactoryFor
     }
 
     @Override
-    public PackageFactory build(RuleClassProvider ruleClassProvider) {
+    public PackageFactory build(RuleClassProvider ruleClassProvider, FileSystem fs) {
       Package.Builder.Helper packageBuilderHelperForTesting =
           doChecksForTesting
-              ? new BazelPackageBuilderHelperForTesting(ruleClassProvider, directories)
+              ? new BazelPackageBuilderHelperForTesting(
+                  (ConfiguredRuleClassProvider) ruleClassProvider, directories)
               : Package.Builder.DefaultHelper.INSTANCE;
       return new PackageFactory(
           ruleClassProvider,
@@ -60,4 +63,3 @@ class PackageFactoryBuilderFactoryForBazelUnitTests implements BuilderFactoryFor
     }
   }
 }
-

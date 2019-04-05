@@ -24,7 +24,6 @@ import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.buildjar.javac.JavacOptions;
 import com.google.devtools.build.buildjar.javac.plugins.dependency.DependencyModule;
 import com.google.devtools.build.buildjar.javac.plugins.dependency.StrictJavaDepsPlugin;
-import com.google.turbine.binder.ClassPathBinder;
 import com.google.turbine.options.TurbineOptions;
 import com.google.turbine.options.TurbineOptionsParser;
 import com.sun.tools.javac.util.Context;
@@ -71,6 +70,12 @@ public class JavacTurbine implements AutoCloseable {
   static final String MANIFEST_NAME = JarFile.MANIFEST_NAME;
   static final Attributes.Name TARGET_LABEL = new Attributes.Name("Target-Label");
   static final Attributes.Name INJECTING_RULE_KIND = new Attributes.Name("Injecting-Rule-Kind");
+
+  /**
+   * The prefix for repackaged transitive dependencies; see {@link
+   * com.google.turbine.deps.Transitive}.
+   */
+  public static final String TRANSITIVE_PREFIX = "META-INF/TRANSITIVE/";
 
   public static void main(String[] args) throws IOException {
     System.exit(compile(TurbineOptionsParser.parse(Arrays.asList(args))).exitCode());
@@ -121,7 +126,7 @@ public class JavacTurbine implements AutoCloseable {
       emitClassJar(
           turbineOptions, /* files= */ ImmutableMap.of(), /* transitive= */ ImmutableMap.of());
       dependencyModule.emitDependencyInformation(
-          /*classpath=*/ ImmutableList.of(), /*successful=*/ true);
+          /*classpath=*/ ImmutableList.of(), /*successful=*/ true, /*requiresFallback=*/ false);
       return Result.OK_WITH_REDUCED_CLASSPATH;
     }
 
@@ -165,7 +170,8 @@ public class JavacTurbine implements AutoCloseable {
     if (result.ok()) {
       emitClassJar(
           turbineOptions, compileResult.files(), transitive.collectTransitiveDependencies());
-      dependencyModule.emitDependencyInformation(actualClasspath, compileResult.success());
+      dependencyModule.emitDependencyInformation(
+          actualClasspath, compileResult.success(), /*requiresFallback=*/ false);
     } else {
       for (FormattedDiagnostic diagnostic : compileResult.diagnostics()) {
         out.println(diagnostic.message());
@@ -263,7 +269,7 @@ public class JavacTurbine implements AutoCloseable {
     DependencyModule.Builder dependencyModuleBuilder =
         new DependencyModule.Builder()
             .setReduceClasspath()
-            .setTargetLabel(turbineOptions.targetLabel().orNull())
+            .setTargetLabel(getTargetLabel(turbineOptions.targetLabel()))
             .addDepsArtifacts(asPaths(turbineOptions.depsArtifacts()))
             .setPlatformJars(platformJars);
     ImmutableSet.Builder<Path> directJars = ImmutableSet.builder();
@@ -278,6 +284,18 @@ public class JavacTurbine implements AutoCloseable {
     return dependencyModuleBuilder.build();
   }
 
+  // TODO(cushon): remove this after the next turbine release
+  @SuppressWarnings("unchecked")
+  private static String getTargetLabel(Object targetLabel) {
+    if (targetLabel instanceof java.util.Optional) {
+      return ((java.util.Optional<String>) targetLabel).orElse(null);
+    }
+    if (targetLabel instanceof com.google.common.base.Optional) {
+      return ((com.google.common.base.Optional<String>) targetLabel).orNull();
+    }
+    throw new AssertionError(targetLabel);
+  }
+
   /** Write the class output from a successful compilation to the output jar. */
   private static void emitClassJar(
       TurbineOptions turbineOptions, Map<String, byte[]> files, Map<String, byte[]> transitive)
@@ -289,7 +307,7 @@ public class JavacTurbine implements AutoCloseable {
       for (Map.Entry<String, byte[]> entry : transitive.entrySet()) {
         String name = entry.getKey();
         byte[] bytes = entry.getValue();
-        ZipUtil.storeEntry(ClassPathBinder.TRANSITIVE_PREFIX + name + ".class", bytes, zipOut);
+        ZipUtil.storeEntry(TRANSITIVE_PREFIX + name + ".class", bytes, zipOut);
       }
       for (Map.Entry<String, byte[]> entry : files.entrySet()) {
         String name = entry.getKey();
@@ -360,7 +378,7 @@ public class JavacTurbine implements AutoCloseable {
    */
   static class PrivateMemberPruner extends ClassVisitor {
     public PrivateMemberPruner(ClassVisitor cv) {
-      super(Opcodes.ASM6, cv);
+      super(Opcodes.ASM7, cv);
     }
 
     @Override

@@ -37,6 +37,7 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
@@ -51,6 +52,7 @@ public class GlobTest {
   private Path tmpPath;
   private FileSystem fs;
   private Path throwOnReaddir = null;
+  private Path throwOnStat = null;
 
   @Before
   public final void initializeFileSystem() throws Exception  {
@@ -62,6 +64,14 @@ public class GlobTest {
         }
         return super.readdir(path, followSymlinks);
       }
+
+      @Override
+      public FileStatus statIfFound(Path path, boolean followSymlinks) throws IOException {
+        if (path.equals(throwOnStat)) {
+          throw new FileNotFoundException(path.getPathString());
+        }
+        return super.statIfFound(path, followSymlinks);
+      }
     };
     tmpPath = fs.getPath("/globtmp");
     for (String dir : ImmutableList.of("foo/bar/wiz",
@@ -71,6 +81,11 @@ public class GlobTest {
       FileSystemUtils.createDirectoryAndParents(tmpPath.getRelative(dir));
     }
     FileSystemUtils.createEmptyFile(tmpPath.getRelative("foo/bar/wiz/file"));
+  }
+
+  @After
+  public void resetInteruppt() {
+    Thread.interrupted();
   }
 
   @Test
@@ -182,17 +197,23 @@ public class GlobTest {
 
   @Test
   public void testIOFailureOnStat() throws Exception {
-    UnixGlob.FilesystemCalls syscalls = new UnixGlob.FilesystemCalls() {
-      @Override
-      public FileStatus statIfFound(Path path, Symlinks symlinks) throws IOException {
-        throw new IOException("EIO");
-      }
+    UnixGlob.FilesystemCalls syscalls =
+        new UnixGlob.FilesystemCalls() {
+          @Override
+          public FileStatus statIfFound(Path path, Symlinks symlinks) throws IOException {
+            throw new IOException("EIO");
+          }
 
-      @Override
-      public Collection<Dirent> readdir(Path path, Symlinks symlinks) {
-        throw new IllegalStateException();
-      }
-    };
+          @Override
+          public Collection<Dirent> readdir(Path path, Symlinks symlinks) {
+            throw new IllegalStateException();
+          }
+
+          @Override
+          public Dirent.Type getType(Path path, Symlinks symlinks) {
+            throw new IllegalStateException();
+          }
+        };
 
     try {
       new UnixGlob.Builder(tmpPath)
@@ -207,17 +228,23 @@ public class GlobTest {
 
   @Test
   public void testGlobWithoutWildcardsDoesNotCallReaddir() throws Exception {
-    UnixGlob.FilesystemCalls syscalls = new UnixGlob.FilesystemCalls() {
-      @Override
-      public FileStatus statIfFound(Path path, Symlinks symlinks) throws IOException {
-        return UnixGlob.DEFAULT_SYSCALLS.statIfFound(path, symlinks);
-      }
+    UnixGlob.FilesystemCalls syscalls =
+        new UnixGlob.FilesystemCalls() {
+          @Override
+          public FileStatus statIfFound(Path path, Symlinks symlinks) throws IOException {
+            return UnixGlob.DEFAULT_SYSCALLS.statIfFound(path, symlinks);
+          }
 
-      @Override
-      public Collection<Dirent> readdir(Path path, Symlinks symlinks) {
-        throw new IllegalStateException();
-      }
-    };
+          @Override
+          public Collection<Dirent> readdir(Path path, Symlinks symlinks) {
+            throw new IllegalStateException();
+          }
+
+          @Override
+          public Dirent.Type getType(Path path, Symlinks symlinks) {
+            throw new IllegalStateException();
+          }
+        };
 
     assertThat(
             new UnixGlob.Builder(tmpPath)
@@ -328,6 +355,18 @@ public class GlobTest {
   }
 
   @Test
+  public void testFastFailureithInterrupt() throws Exception {
+    Thread.currentThread().interrupt();
+    throwOnStat = tmpPath;
+    try {
+      new UnixGlob.Builder(tmpPath).glob();
+      fail();
+    } catch (FileNotFoundException e) {
+      assertThat(e).hasMessageThat().contains("globtmp");
+    }
+  }
+
+  @Test
   public void testCheckCanBeInterrupted() throws Exception {
     final Thread mainThread = Thread.currentThread();
     final ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(10);
@@ -347,8 +386,8 @@ public class GlobTest {
           new UnixGlob.Builder(tmpPath)
               .addPattern("**")
               .setDirectoryFilter(interrupterPredicate)
-              .setThreadPool(executor)
-              .globAsync(true);
+              .setExecutor(executor)
+              .globAsync();
       globResult.get();
       fail(); // Should have received InterruptedException
     } catch (InterruptedException e) {
@@ -386,9 +425,12 @@ public class GlobTest {
       }
     };
 
-    List<Path> result = new UnixGlob.Builder(tmpPath)
-        .addPatterns("**", "*")
-        .setDirectoryFilter(interrupterPredicate).setThreadPool(executor).glob();
+    List<Path> result =
+        new UnixGlob.Builder(tmpPath)
+            .addPatterns("**", "*")
+            .setDirectoryFilter(interrupterPredicate)
+            .setExecutor(executor)
+            .glob();
 
     // In the non-interruptible case, the interrupt bit should be set, but the
     // glob should return the correct set of full results.
@@ -414,5 +456,30 @@ public class GlobTest {
     executor.shutdown();
     assertThat(executor.awaitTermination(TestUtils.WAIT_TIMEOUT_SECONDS, TimeUnit.SECONDS))
         .isTrue();
+  }
+
+  private Collection<String> removeExcludes(ImmutableList<String> paths, String... excludes) {
+    HashSet<String> pathSet = new HashSet<>(paths);
+    UnixGlob.removeExcludes(pathSet, ImmutableList.copyOf(excludes));
+    return pathSet;
+  }
+
+  @Test
+  public void testExcludeFiltering() {
+    ImmutableList<String> paths = ImmutableList.of("a/A.java", "a/B.java", "a/b/C.java", "c.cc");
+    assertThat(removeExcludes(paths, "**/*.java")).containsExactly("c.cc");
+    assertThat(removeExcludes(paths, "a/**/*.java")).containsExactly("c.cc");
+    assertThat(removeExcludes(paths, "**/nomatch.*")).containsAllIn(paths);
+    assertThat(removeExcludes(paths, "a/A.java")).containsExactly("a/B.java", "a/b/C.java", "c.cc");
+    assertThat(removeExcludes(paths, "a/?.java")).containsExactly("a/b/C.java", "c.cc");
+    assertThat(removeExcludes(paths, "a/*/C.java")).containsExactly("a/A.java", "a/B.java", "c.cc");
+    assertThat(removeExcludes(paths, "**")).isEmpty();
+    assertThat(removeExcludes(paths, "**/**")).isEmpty();
+
+    // Test filenames that look like code patterns.
+    paths = ImmutableList.of("a/A.java", "a/B.java", "a/b/*.java", "a/b/C.java", "c.cc");
+    assertThat(removeExcludes(paths, "**/*.java")).containsExactly("c.cc");
+    assertThat(removeExcludes(paths, "**/A.java", "**/B.java", "**/C.java"))
+        .containsExactly("a/b/*.java", "c.cc");
   }
 }

@@ -28,7 +28,7 @@ public final class MockProtoSupport {
    */
   public static void setup(MockToolsConfig config) throws IOException {
     createNetProto2(config);
-    createJavascriptClosureProto2(config);
+    createJavascriptJspb(config);
   }
 
   /**
@@ -36,9 +36,10 @@ public final class MockProtoSupport {
    * and versions.
    */
   private static void createNetProto2(MockToolsConfig config) throws IOException {
-    config.create("net/proto2/compiler/public/BUILD",
+    config.create(
+        "net/proto2/compiler/public/BUILD",
         "package(default_visibility=['//visibility:public'])",
-        "exports_files(['protocol_compiler'])");
+        "sh_binary(name='protocol_compiler', srcs=['protocol_compiler.sh'])");
 
     if (config.isRealFileSystem()) {
       // when using a "real" file system, import the jars and link to ensure compilation
@@ -91,10 +92,11 @@ public final class MockProtoSupport {
         "          srcs = [ 'composite_cc_plugin.cc' ])");
 
     // Fake targets for proto API libs of all languages and versions.
-    config.create("net/proto2/public/BUILD",
+    config.create(
+        "net/proto2/public/BUILD",
         "package(default_visibility=['//visibility:public'])",
-        "cc_library(name = 'proto2',",
-        "           srcs = [ 'proto2.cc' ])");
+        "cc_library(name = 'cc_proto_library_blaze_internal_deps',",
+        "           srcs = [ 'cc_proto_library_blaze_internal_deps.cc' ])");
     config.create("net/proto2/python/public/BUILD",
         "package(default_visibility=['//visibility:public'])",
          "py_library(name = 'public',",
@@ -117,7 +119,8 @@ public final class MockProtoSupport {
     config.create(
         "net/rpc/BUILD",
         "package(default_visibility=['//visibility:public'])",
-        "cc_library(name = 'stubby12_proto_rpc_libs')");
+        "cc_library(name = 'stubby12_proto_rpc_libs')",
+        "cc_library(name = 'no_stubby_rpc_libs_please_dont_depend_on_this')");
     config.create("net/rpc4/public/core/BUILD",
         "package(default_visibility=['//visibility:public'])",
         "cc_library(name = 'stubby4_rpc_libs')");
@@ -185,18 +188,37 @@ public final class MockProtoSupport {
         "third_party/golang/grpc/metadata/BUILD",
         "package(default_visibility=['//visibility:public'])",
         "licenses(['notice'])",
-        "exports_files(['metadata'])");
+        "go_library(name = 'metadata',",
+        "           srcs = [ 'metadata.go' ])");
   }
 
-  /**
-   * Create a dummy "javascript/closure/proto2" package.
-   */
-  private static void createJavascriptClosureProto2(MockToolsConfig config) throws IOException {
+  /** Create a dummy jspb support package. */
+  private static void createJavascriptJspb(MockToolsConfig config) throws IOException {
     config.create(
-        "javascript/closure/proto2/BUILD",
+        "net/proto2/compiler/js/internal/BUILD",
         "package(default_visibility=['//visibility:public'])",
-        "js_library(name = 'message',",
-        "           srcs = ['message.js'],",
-        "           deps_mgmt = 'legacy')");
+        "cc_binary(name = 'protoc-gen-js',",
+        "    srcs = ['plugin.cc'])");
+    config.create(
+        "javascript/apps/jspb/BUILD",
+        "load('//tools/build_defs/js:rules.bzl', 'js_lib')",
+        "package(default_visibility=['//visibility:public'])",
+        "js_lib(name = 'message',",
+        "       srcs = ['message.js'],",
+        "       deps_mgmt = 'legacy')");
+    config.create(
+        "javascript/closure/array/BUILD",
+        "load('//tools/build_defs/js:rules.bzl', 'js_lib')",
+        "package(default_visibility=['//visibility:public'])",
+        "js_lib(name = 'array',",
+        "       srcs = ['array.js'],",
+        "       deps_mgmt = 'legacy')");
+    config.create(
+        "javascript/apps/xid/BUILD",
+        "load('//tools/build_defs/js:rules.bzl', 'js_lib')",
+        "package(default_visibility=['//visibility:public'])",
+        "js_lib(name = 'xid',",
+        "       srcs = ['xid.js'],",
+        "       deps_mgmt = 'legacy')");
   }
 }

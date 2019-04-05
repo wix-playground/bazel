@@ -20,16 +20,17 @@ import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.transitions.TransitionFactory;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.TargetParsingException;
 import com.google.devtools.build.lib.cmdline.TargetPattern;
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
-import com.google.devtools.build.lib.events.Reporter;
-import com.google.devtools.build.lib.packages.RuleTransitionFactory;
+import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.pkgcache.PackageManager;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
+import com.google.devtools.build.lib.query2.ProtoOutputFormatterCallback.OutputType;
 import com.google.devtools.build.lib.query2.engine.Callback;
 import com.google.devtools.build.lib.query2.engine.KeyExtractor;
 import com.google.devtools.build.lib.query2.engine.QueryEnvironment;
@@ -74,6 +75,8 @@ public class ConfiguredTargetQueryEnvironment
 
   private final KeyExtractor<ConfiguredTarget, ConfiguredTargetKey> configuredTargetKeyExtractor;
 
+  private final ConfiguredTargetAccessor accessor;
+
   @Override
   protected KeyExtractor<ConfiguredTarget, ConfiguredTargetKey> getConfiguredTargetKeyExtractor() {
     return configuredTargetKeyExtractor;
@@ -83,7 +86,7 @@ public class ConfiguredTargetQueryEnvironment
       boolean keepGoing,
       ExtendedEventHandler eventHandler,
       Iterable<QueryFunction> extraFunctions,
-      BuildConfiguration defaultTargetConfiguration,
+      TopLevelConfigurations topLevelConfigurations,
       BuildConfiguration hostConfiguration,
       String parserPrefix,
       PathPackageLocator pkgPath,
@@ -93,13 +96,13 @@ public class ConfiguredTargetQueryEnvironment
         keepGoing,
         eventHandler,
         extraFunctions,
-        defaultTargetConfiguration,
+        topLevelConfigurations,
         hostConfiguration,
         parserPrefix,
         pkgPath,
         walkableGraphSupplier,
-        settings,
-        new ConfiguredTargetAccessor(walkableGraphSupplier.get()));
+        settings);
+    this.accessor = new ConfiguredTargetAccessor(walkableGraphSupplier.get(), this);
     this.configuredTargetKeyExtractor =
         element -> {
           try {
@@ -110,7 +113,7 @@ public class ConfiguredTargetQueryEnvironment
                     : ((BuildConfigurationValue) graph.getValue(element.getConfigurationKey()))
                         .getConfiguration());
           } catch (InterruptedException e) {
-            throw new IllegalStateException("Interruption unexpected in configured query");
+            throw new IllegalStateException("Interruption unexpected in configured query", e);
           }
         };
   }
@@ -119,14 +122,22 @@ public class ConfiguredTargetQueryEnvironment
       boolean keepGoing,
       ExtendedEventHandler eventHandler,
       Iterable<QueryFunction> extraFunctions,
-      BuildConfiguration defaultTargetConfiguration,
+      TopLevelConfigurations topLevelConfigurations,
       BuildConfiguration hostConfiguration,
       String parserPrefix,
       PathPackageLocator pkgPath,
       Supplier<WalkableGraph> walkableGraphSupplier,
       CqueryOptions cqueryOptions) {
-    this(keepGoing, eventHandler, extraFunctions, defaultTargetConfiguration, hostConfiguration,
-        parserPrefix, pkgPath, walkableGraphSupplier, cqueryOptions.toSettings());
+    this(
+        keepGoing,
+        eventHandler,
+        extraFunctions,
+        topLevelConfigurations,
+        hostConfiguration,
+        parserPrefix,
+        pkgPath,
+        walkableGraphSupplier,
+        cqueryOptions.toSettings());
     this.cqueryOptions = cqueryOptions;
   }
 
@@ -145,21 +156,21 @@ public class ConfiguredTargetQueryEnvironment
   public ImmutableList<NamedThreadSafeOutputFormatterCallback<ConfiguredTarget>>
       getDefaultOutputFormatters(
           TargetAccessor<ConfiguredTarget> accessor,
-          Reporter reporter,
+          ExtendedEventHandler eventHandler,
+          OutputStream out,
           SkyframeExecutor skyframeExecutor,
           BuildConfiguration hostConfiguration,
-          @Nullable RuleTransitionFactory trimmingTransitionFactory,
+          @Nullable TransitionFactory<Rule> trimmingTransitionFactory,
           PackageManager packageManager) {
     AspectResolver aspectResolver =
-        cqueryOptions.aspectDeps.createResolver(packageManager, reporter);
-    OutputStream out = reporter.getOutErr().getOutputStream();
+        cqueryOptions.aspectDeps.createResolver(packageManager, eventHandler);
     return new ImmutableList.Builder<NamedThreadSafeOutputFormatterCallback<ConfiguredTarget>>()
         .add(
             new LabelAndConfigurationOutputFormatterCallback(
-                reporter, cqueryOptions, out, skyframeExecutor, accessor))
+                eventHandler, cqueryOptions, out, skyframeExecutor, accessor))
         .add(
             new TransitionsOutputFormatterCallback(
-                reporter,
+                eventHandler,
                 cqueryOptions,
                 out,
                 skyframeExecutor,
@@ -168,12 +179,32 @@ public class ConfiguredTargetQueryEnvironment
                 trimmingTransitionFactory))
         .add(
             new ProtoOutputFormatterCallback(
-                reporter, cqueryOptions, out, skyframeExecutor, accessor, aspectResolver))
+                eventHandler,
+                cqueryOptions,
+                out,
+                skyframeExecutor,
+                accessor,
+                aspectResolver,
+                OutputType.BINARY))
+        .add(
+            new ProtoOutputFormatterCallback(
+                eventHandler,
+                cqueryOptions,
+                out,
+                skyframeExecutor,
+                accessor,
+                aspectResolver,
+                OutputType.TEXT))
         .build();
   }
 
   public String getOutputFormat() {
     return cqueryOptions.outputFormat;
+  }
+
+  @Override
+  public ConfiguredTargetAccessor getAccessor() {
+    return accessor;
   }
 
   @Override
@@ -195,27 +226,33 @@ public class ConfiguredTargetQueryEnvironment
           reportBuildFileError(owner, exn.getMessage());
           return Futures.immediateFuture(null);
         };
-    return QueryTaskFutureImpl.ofDelegate(
-        Futures.catchingAsync(
-            patternToEval.evalAdaptedForAsync(
-                resolver,
-                ImmutableSet.of(),
-                ImmutableSet.of(),
-                (Callback<Target>)
-                    partialResult -> {
-                      List<ConfiguredTarget> transformedResult = new ArrayList<>();
-                      for (Target target : partialResult) {
-                        ConfiguredTarget configuredTarget = getConfiguredTarget(target.getLabel());
-                        if (configuredTarget != null) {
-                          transformedResult.add(configuredTarget);
+
+    try {
+      return QueryTaskFutureImpl.ofDelegate(
+          Futures.catchingAsync(
+              patternToEval.evalAdaptedForAsync(
+                  resolver,
+                  getBlacklistedPackagePrefixesPathFragments(),
+                  /* excludedSubdirectories= */ ImmutableSet.of(),
+                  (Callback<Target>)
+                      partialResult -> {
+                        List<ConfiguredTarget> transformedResult = new ArrayList<>();
+                        for (Target target : partialResult) {
+                          ConfiguredTarget configuredTarget =
+                              getConfiguredTarget(target.getLabel());
+                          if (configuredTarget != null) {
+                            transformedResult.add(configuredTarget);
+                          }
                         }
-                      }
-                      callback.process(transformedResult);
-                    },
-                QueryException.class),
-            TargetParsingException.class,
-            reportBuildFileErrorAsyncFunction,
-            MoreExecutors.directExecutor()));
+                        callback.process(transformedResult);
+                      },
+                  QueryException.class),
+              TargetParsingException.class,
+              reportBuildFileErrorAsyncFunction,
+              MoreExecutors.directExecutor()));
+    } catch (InterruptedException e) {
+      return immediateCancelledFuture();
+    }
   }
 
   private ConfiguredTarget getConfiguredTarget(Label label) throws InterruptedException {
@@ -318,7 +355,20 @@ public class ConfiguredTargetQueryEnvironment
   @Nullable
   @Override
   protected ConfiguredTarget getTargetConfiguredTarget(Label label) throws InterruptedException {
-    return getValueFromKey(ConfiguredTargetValue.key(label, defaultTargetConfiguration));
+    if (topLevelConfigurations.isTopLevelTarget(label)) {
+      return getValueFromKey(
+          ConfiguredTargetValue.key(
+              label, topLevelConfigurations.getConfigurationForTopLevelTarget(label)));
+    } else {
+      ConfiguredTarget toReturn;
+      for (BuildConfiguration configuration : topLevelConfigurations.getConfigurations()) {
+        toReturn = getValueFromKey(ConfiguredTargetValue.key(label, configuration));
+        if (toReturn != null) {
+          return toReturn;
+        }
+      }
+      return null;
+    }
   }
 
   @Nullable
@@ -345,7 +395,7 @@ public class ConfiguredTargetQueryEnvironment
           : ((BuildConfigurationValue) graph.getValue(target.getConfigurationKey()))
               .getConfiguration();
     } catch (InterruptedException e) {
-      throw new IllegalStateException("Unexpected interruption during configured target query");
+      throw new IllegalStateException("Unexpected interruption during configured target query", e);
     }
   }
 

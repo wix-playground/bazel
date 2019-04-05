@@ -17,10 +17,52 @@
 # Test git_repository and new_git_repository workspace rules.
 #
 
-# Load the test setup defined in the parent directory
-CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${CURRENT_DIR}/../integration_test_setup.sh" \
+set -euo pipefail
+# --- begin runfiles.bash initialization ---
+if [[ ! -d "${RUNFILES_DIR:-/dev/null}" && ! -f "${RUNFILES_MANIFEST_FILE:-/dev/null}" ]]; then
+  if [[ -f "$0.runfiles_manifest" ]]; then
+    export RUNFILES_MANIFEST_FILE="$0.runfiles_manifest"
+  elif [[ -f "$0.runfiles/MANIFEST" ]]; then
+    export RUNFILES_MANIFEST_FILE="$0.runfiles/MANIFEST"
+  elif [[ -f "$0.runfiles/bazel_tools/tools/bash/runfiles/runfiles.bash" ]]; then
+    export RUNFILES_DIR="$0.runfiles"
+  fi
+fi
+if [[ -f "${RUNFILES_DIR:-/dev/null}/bazel_tools/tools/bash/runfiles/runfiles.bash" ]]; then
+  source "${RUNFILES_DIR}/bazel_tools/tools/bash/runfiles/runfiles.bash"
+elif [[ -f "${RUNFILES_MANIFEST_FILE:-/dev/null}" ]]; then
+  source "$(grep -m1 "^bazel_tools/tools/bash/runfiles/runfiles.bash " \
+            "$RUNFILES_MANIFEST_FILE" | cut -d ' ' -f 2-)"
+else
+  echo >&2 "ERROR: cannot find @bazel_tools//tools/bash/runfiles:runfiles.bash"
+  exit 1
+fi
+# --- end runfiles.bash initialization ---
+
+source "$(rlocation "io_bazel/src/test/shell/integration_test_setup.sh")" \
   || { echo "integration_test_setup.sh not found!" >&2; exit 1; }
+
+# `uname` returns the current platform, e.g "MSYS_NT-10.0" or "Linux".
+# `tr` converts all upper case letters to lower case.
+# `case` matches the result if the `uname | tr` expression to string prefixes
+# that use the same wildcards as names do in Bash, i.e. "msys*" matches strings
+# starting with "msys", and "*" matches everything (it's the default case).
+case "$(uname -s | tr [:upper:] [:lower:])" in
+msys*)
+  # As of 2019-01-15, Bazel on Windows only supports MSYS Bash.
+  declare -r is_windows=true
+  ;;
+*)
+  declare -r is_windows=false
+  ;;
+esac
+
+if $is_windows; then
+  export MSYS_NO_PATHCONV=1
+  export MSYS2_ARG_CONV_EXCL="*"
+  # Enable symlink runfiles tree to make bazel run work
+  add_to_bazelrc "build --enable_runfiles"
+fi
 
 # Global test setup.
 #
@@ -33,9 +75,9 @@ function set_up() {
   fi
 
   mkdir -p $repos_dir
-  cp $testdata_path/pluto-repo.tar.gz $repos_dir
-  cp $testdata_path/outer-planets-repo.tar.gz $repos_dir
-  cp $testdata_path/refetch-repo.tar.gz $repos_dir
+  cp "$(rlocation io_bazel/src/test/shell/bazel/testdata/pluto-repo.tar.gz)" $repos_dir
+  cp "$(rlocation io_bazel/src/test/shell/bazel/testdata/outer-planets-repo.tar.gz)" $repos_dir
+  cp "$(rlocation io_bazel/src/test/shell/bazel/testdata/refetch-repo.tar.gz)" $repos_dir
   cd $repos_dir
   tar zxf pluto-repo.tar.gz
   tar zxf outer-planets-repo.tar.gz
@@ -69,6 +111,7 @@ function test_git_repository() {
   # Create a workspace that clones the repository at the first commit.
   cd $WORKSPACE_DIR
   cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 git_repository(
     name = "pluto",
     remote = "$pluto_repo_dir",
@@ -130,6 +173,7 @@ function do_new_git_repository_test() {
 
   if [ "$1" == "build_file" ] ; then
     cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
 new_git_repository(
     name = "pluto",
     remote = "$pluto_repo_dir",
@@ -150,6 +194,7 @@ filegroup(
 EOF
   else
     cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
 new_git_repository(
     name = "pluto",
     remote = "$pluto_repo_dir",
@@ -213,6 +258,7 @@ function test_new_git_repository_submodules() {
   # Create a workspace that clones the outer_planets repository.
   cd $WORKSPACE_DIR
   cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
 new_git_repository(
     name = "outer_planets",
     remote = "$outer_planets_repo_dir",
@@ -269,61 +315,59 @@ function test_git_repository_not_refetched_on_server_restart() {
 
   cd $WORKSPACE_DIR
   cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 git_repository(name='g', remote='$repo_dir', commit='22095302abaf776886879efa5129aa4d44c53017')
 EOF
 
   # Use batch to force server restarts.
-  bazel --batch build --noexperimental_ui @g//:g >& $TEST_log || fail "Build failed"
-  expect_log "Cloning"
+  bazel --batch build @g//:g >& $TEST_log || fail "Build failed"
   assert_contains "GIT 1" bazel-genfiles/external/g/go
 
   # Without changing anything, restart the server, which should not cause the checkout to be re-cloned.
-  bazel --batch build --noexperimental_ui @g//:g >& $TEST_log || fail "Build failed"
-  expect_not_log "Cloning"
+  bazel --batch build @g//:g >& $TEST_log || fail "Build failed"
   assert_contains "GIT 1" bazel-genfiles/external/g/go
 
   # Change the commit id, which should cause the checkout to be re-cloned.
   cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 git_repository(name='g', remote='$repo_dir', commit='db134ae9b644d8237954a8e6f1ef80fcfd85d521')
 EOF
 
-  bazel --batch build --noexperimental_ui @g//:g >& $TEST_log || fail "Build failed"
-  expect_log "Cloning"
+  bazel --batch build @g//:g >& $TEST_log || fail "Build failed"
   assert_contains "GIT 2" bazel-genfiles/external/g/go
 
   # Change the WORKSPACE but not the commit id, which should not cause the checkout to be re-cloned.
   cat > WORKSPACE <<EOF
 # This comment line is to change the line numbers, which should not cause Bazel
 # to refetch the repository
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 git_repository(name='g', remote='$repo_dir', commit='db134ae9b644d8237954a8e6f1ef80fcfd85d521')
 EOF
 
-  bazel --batch build --noexperimental_ui @g//:g >& $TEST_log || fail "Build failed"
-  expect_not_log "Cloning"
+  bazel --batch build @g//:g >& $TEST_log || fail "Build failed"
   assert_contains "GIT 2" bazel-genfiles/external/g/go
 }
-
 
 function test_git_repository_refetched_when_commit_changes() {
   local repo_dir=$TEST_TMPDIR/repos/refetch
 
   cd $WORKSPACE_DIR
   cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 git_repository(name='g', remote='$repo_dir', commit='22095302abaf776886879efa5129aa4d44c53017')
 EOF
 
-  bazel build --noexperimental_ui @g//:g >& $TEST_log || fail "Build failed"
-  expect_log "Cloning"
+  bazel build @g//:g >& $TEST_log || fail "Build failed"
   assert_contains "GIT 1" bazel-genfiles/external/g/go
 
   # Change the commit id, which should cause the checkout to be re-cloned.
   cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 git_repository(name='g', remote='$repo_dir', commit='db134ae9b644d8237954a8e6f1ef80fcfd85d521')
 EOF
 
 
-  bazel build --noexperimental_ui @g//:g >& $TEST_log || fail "Build failed"
-  expect_log "Cloning"
+  bazel build @g//:g >& $TEST_log || fail "Build failed"
   assert_contains "GIT 2" bazel-genfiles/external/g/go
 }
 
@@ -332,6 +376,7 @@ function test_git_repository_and_nofetch() {
 
   cd $WORKSPACE_DIR
   cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 git_repository(name='g', remote='$repo_dir', commit='22095302abaf776886879efa5129aa4d44c53017')
 EOF
 
@@ -341,9 +386,9 @@ EOF
   assert_contains "GIT 1" bazel-genfiles/external/g/go
 
   cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 git_repository(name='g', remote='$repo_dir', commit='db134ae9b644d8237954a8e6f1ef80fcfd85d521')
 EOF
-
 
   bazel build --nofetch @g//:g >& $TEST_log || fail "Build failed"
   expect_log "External repository 'g' is not up-to-date"
@@ -393,6 +438,7 @@ function test_git_repository_both_commit_tag_error() {
 
   cd $WORKSPACE_DIR
   cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 git_repository(
     name = "pluto",
     remote = "$pluto_repo_dir",
@@ -403,7 +449,7 @@ EOF
 
   bazel fetch //planets:planet-info >& $TEST_log \
     || echo "Expect run to fail."
-  expect_log "One of either commit or tag must be defined"
+  expect_log "Exactly one of commit"
 }
 
 # Verifies that rule fails if neither tag or commit are set.
@@ -421,6 +467,7 @@ function test_git_repository_no_commit_tag_error() {
 
   cd $WORKSPACE_DIR
   cat > WORKSPACE <<EOF
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 git_repository(
     name = "pluto",
     remote = "$pluto_repo_dir",
@@ -429,7 +476,7 @@ EOF
 
   bazel fetch //planets:planet-info >& $TEST_log \
     || echo "Expect run to fail."
-  expect_log "One of either commit or tag must be defined"
+  expect_log "Exactly one of commit"
 }
 
 run_suite "git_repository tests"

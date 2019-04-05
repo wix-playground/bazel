@@ -25,7 +25,6 @@ import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.analysis.config.transitions.NoTransition;
 import com.google.devtools.build.lib.analysis.skylark.SkylarkAttr;
 import com.google.devtools.build.lib.analysis.skylark.SkylarkAttr.Descriptor;
-import com.google.devtools.build.lib.analysis.skylark.SkylarkFileType;
 import com.google.devtools.build.lib.analysis.skylark.SkylarkRuleClassFunctions.SkylarkRuleFunction;
 import com.google.devtools.build.lib.analysis.skylark.SkylarkRuleContext;
 import com.google.devtools.build.lib.cmdline.Label;
@@ -34,7 +33,6 @@ import com.google.devtools.build.lib.packages.AspectParameters;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.ImplicitOutputsFunction;
-import com.google.devtools.build.lib.packages.Info;
 import com.google.devtools.build.lib.packages.PredicateWithMessage;
 import com.google.devtools.build.lib.packages.RequiredProviders;
 import com.google.devtools.build.lib.packages.RuleClass;
@@ -45,6 +43,7 @@ import com.google.devtools.build.lib.packages.SkylarkDefinedAspect;
 import com.google.devtools.build.lib.packages.SkylarkInfo;
 import com.google.devtools.build.lib.packages.SkylarkProvider;
 import com.google.devtools.build.lib.packages.SkylarkProviderIdentifier;
+import com.google.devtools.build.lib.packages.StructImpl;
 import com.google.devtools.build.lib.packages.StructProvider;
 import com.google.devtools.build.lib.skyframe.SkylarkImportLookupFunction;
 import com.google.devtools.build.lib.skylark.util.SkylarkTestCase;
@@ -57,7 +56,7 @@ import com.google.devtools.build.lib.syntax.SkylarkDict;
 import com.google.devtools.build.lib.syntax.SkylarkList.MutableList;
 import com.google.devtools.build.lib.syntax.SkylarkList.Tuple;
 import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
-import com.google.devtools.build.lib.syntax.SkylarkSemantics;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import com.google.devtools.build.lib.syntax.Type;
 import com.google.devtools.build.lib.testutil.MoreAsserts;
 import com.google.devtools.build.lib.util.FileTypeSet;
@@ -200,11 +199,12 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
 
   @Test
   public void testDisableDeprecatedParams() throws Exception {
-    ev = createEvaluationTestCase(
-        SkylarkSemantics.DEFAULT_SEMANTICS
-            .toBuilder()
-            .incompatibleDisableDeprecatedAttrParams(true)
-            .build());
+    ev =
+        createEvaluationTestCase(
+            StarlarkSemantics.DEFAULT_SEMANTICS
+                .toBuilder()
+                .incompatibleDisableDeprecatedAttrParams(true)
+                .build());
     ev.initialize();
 
     // Verify 'single_file' deprecation.
@@ -245,13 +245,6 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
     assertThat(attr.getAllowedFileTypesPredicate().apply("a.xml")).isTrue();
     assertThat(attr.getAllowedFileTypesPredicate().apply("a.txt")).isFalse();
     assertThat(attr.isSingleArtifact()).isTrue();
-  }
-
-  @Test
-  public void testAttrWithSkylarkFileType() throws Exception {
-    Attribute attr = buildAttribute("a1", "attr.label_list(allow_files = FileType(['.xml']))");
-    assertThat(attr.getAllowedFileTypesPredicate().apply("a.xml")).isTrue();
-    assertThat(attr.getAllowedFileTypesPredicate().apply("a.txt")).isFalse();
   }
 
   private static SkylarkProviderIdentifier legacy(String legacyId) {
@@ -460,7 +453,9 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
   @Test
   public void testNonLabelAttrWithProviders() throws Exception {
     checkErrorContains(
-        "unexpected keyword 'providers', in method call string(list providers)",
+        "unexpected keyword 'providers', for call to method "
+            + "string(default = '', doc = '', mandatory = False, values = []) "
+            + "of 'attr (a language module)'",
         "attr.string(providers = ['a'])");
   }
 
@@ -488,13 +483,13 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
   @Test
   public void testAttrDefaultValue() throws Exception {
     Attribute attr = buildAttribute("a1", "attr.string(default = 'some value')");
-    assertThat(attr.getDefaultValueForTesting()).isEqualTo("some value");
+    assertThat(attr.getDefaultValueUnchecked()).isEqualTo("some value");
   }
 
   @Test
   public void testLabelAttrDefaultValueAsString() throws Exception {
     Attribute sligleAttr = buildAttribute("a1", "attr.label(default = '//foo:bar')");
-    assertThat(sligleAttr.getDefaultValueForTesting())
+    assertThat(sligleAttr.getDefaultValueUnchecked())
         .isEqualTo(
             Label.parseAbsolute(
                 "//foo:bar",
@@ -503,7 +498,7 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
 
     Attribute listAttr =
         buildAttribute("a2", "attr.label_list(default = ['//foo:bar', '//bar:foo'])");
-    assertThat(listAttr.getDefaultValueForTesting())
+    assertThat(listAttr.getDefaultValueUnchecked())
         .isEqualTo(
             ImmutableList.of(
                 Label.parseAbsolute(
@@ -517,7 +512,7 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
 
     Attribute dictAttr =
         buildAttribute("a3", "attr.label_keyed_string_dict(default = {'//foo:bar': 'my value'})");
-    assertThat(dictAttr.getDefaultValueForTesting())
+    assertThat(dictAttr.getDefaultValueUnchecked())
         .isEqualTo(
             ImmutableMap.of(
                 Label.parseAbsolute(
@@ -547,8 +542,9 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
   @Test
   public void testAttrDefaultValueBadType() throws Exception {
     checkErrorContains(
-        "expected value of type 'string' for parameter 'default', "
-            + "in method call string(int default) of 'attr (a language module)'",
+        "expected value of type 'string' for parameter 'default', for call to method "
+            + "string(default = '', doc = '', mandatory = False, values = []) "
+            + "of 'attr (a language module)'",
         "attr.string(default = 1)");
   }
 
@@ -576,35 +572,29 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
   @Test
   public void testAttrBadKeywordArguments() throws Exception {
     checkErrorContains(
-        "unexpected keyword 'bad_keyword', in method call string(string bad_keyword) "
-            + "of 'attr (a language module)'",
+        "unexpected keyword 'bad_keyword', for call to method "
+            + "string(default = '', doc = '', mandatory = False, values = []) of "
+            + "'attr (a language module)'",
         "attr.string(bad_keyword = '')");
   }
 
   @Test
   public void testAttrCfg() throws Exception {
     Attribute attr = buildAttribute("a1", "attr.label(cfg = 'host', allow_files = True)");
-    assertThat(attr.getConfigurationTransition().isHostTransition()).isTrue();
+    assertThat(attr.getTransitionFactory().isHost()).isTrue();
   }
 
   @Test
   public void testAttrCfgTarget() throws Exception {
     Attribute attr = buildAttribute("a1", "attr.label(cfg = 'target', allow_files = True)");
-    assertThat(attr.getConfigurationTransition()).isEqualTo(NoTransition.INSTANCE);
+    assertThat(NoTransition.isInstance(attr.getTransitionFactory())).isTrue();
   }
 
   @Test
   public void incompatibleDataTransition() throws Exception {
-    ev = createEvaluationTestCase(
-        SkylarkSemantics.DEFAULT_SEMANTICS
-            .toBuilder()
-            .incompatibleDisallowDataTransition(true)
-            .build());
-    ev.initialize();
     EvalException expected =
         assertThrows(EvalException.class, () -> eval("attr.label(cfg = 'data')"));
-    assertThat(expected).hasMessageThat().contains(
-        "Using cfg = \"data\" on an attribute is a noop and no longer supported");
+    assertThat(expected).hasMessageThat().contains("cfg must be either 'host' or 'target'");
   }
 
   @Test
@@ -634,7 +624,6 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
     buildAttribute("a4", "attr.label(doc='foo')");
     buildAttribute("a5", "attr.label_keyed_string_dict(doc='foo')");
     buildAttribute("a6", "attr.label_list(doc='foo')");
-    buildAttribute("a7", "attr.license(doc='foo')");
     buildAttribute("a8", "attr.output(doc='foo')");
     buildAttribute("a9", "attr.output_list(doc='foo')");
     buildAttribute("a10", "attr.string(doc='foo')");
@@ -644,10 +633,19 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
   }
 
   @Test
+  public void testNoAttrLicense() throws Exception {
+    EvalException expected = assertThrows(EvalException.class, () -> eval("attr.license()"));
+    assertThat(expected)
+        .hasMessageThat()
+        .contains("type 'attr (a language module)' has no method license()");
+  }
+
+  @Test
   public void testAttrDocValueBadType() throws Exception {
     checkErrorContains(
-        "expected value of type 'string' for parameter 'doc', "
-            + "in method call string(int doc) of 'attr (a language module)'",
+        "expected value of type 'string' for parameter 'doc', for call to method "
+            + "string(default = '', doc = '', mandatory = False, values = []) "
+            + "of 'attr (a language module)'",
         "attr.string(doc = 1)");
   }
 
@@ -666,8 +664,9 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
   @Test
   public void testLateBoundAttrWorksWithOnlyLabel() throws Exception {
     checkEvalError(
-        "expected value of type 'string' for parameter 'default', "
-            + "in method call string(function default) of 'attr (a language module)'",
+        "expected value of type 'string' for parameter 'default', for call to method "
+            + "string(default = '', doc = '', mandatory = False, values = []) "
+            + "of 'attr (a language module)'",
         "def attr_value(cfg): return 'a'",
         "attr.string(default=attr_value)");
   }
@@ -758,15 +757,14 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
   public void testRuleUnknownKeyword() throws Exception {
     registerDummyUserDefinedFunction();
     checkErrorContains(
-        "unexpected keyword 'bad_keyword' in call to " + "rule(implementation: function, ",
+        "unexpected keyword 'bad_keyword', for call to function rule(",
         "rule(impl, bad_keyword = 'some text')");
   }
 
   @Test
   public void testRuleImplementationMissing() throws Exception {
     checkErrorContains(
-        "missing mandatory positional argument 'implementation' while calling "
-            + "rule(implementation",
+        "parameter 'implementation' has no default value, for call to function rule(",
         "rule(attrs = {})");
   }
 
@@ -774,8 +772,8 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
   public void testRuleBadTypeForAdd() throws Exception {
     registerDummyUserDefinedFunction();
     checkErrorContains(
-        "expected dict or NoneType for 'attrs' while calling rule but got string instead: "
-            + "some text",
+        "expected value of type 'dict or NoneType' for parameter 'attrs', "
+            + "for call to function rule(",
         "rule(impl, attrs = 'some text')");
   }
 
@@ -791,7 +789,7 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
   public void testRuleBadTypeForDoc() throws Exception {
     registerDummyUserDefinedFunction();
     checkErrorContains(
-        "expected string for 'doc' while calling rule but got int instead",
+        "expected value of type 'string' for parameter 'doc', for call to function rule(",
         "rule(impl, doc = 1)");
   }
 
@@ -827,8 +825,8 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
             + "attr.label(default = Label('//foo:foo'), allow_files=True)})");
     RuleClass c = ((SkylarkRuleFunction) lookup("r1")).getRuleClass();
     Attribute a = c.getAttributeByName("a1");
-    assertThat(a.getDefaultValueForTesting()).isInstanceOf(Label.class);
-    assertThat(a.getDefaultValueForTesting().toString()).isEqualTo("//foo:foo");
+    assertThat(a.getDefaultValueUnchecked()).isInstanceOf(Label.class);
+    assertThat(a.getDefaultValueUnchecked().toString()).isEqualTo("//foo:foo");
   }
 
   @Test
@@ -838,20 +836,13 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
         "r1 = rule(impl, attrs = {'a1': attr.int(default = 40+2)})");
     RuleClass c = ((SkylarkRuleFunction) lookup("r1")).getRuleClass();
     Attribute a = c.getAttributeByName("a1");
-    assertThat(a.getDefaultValueForTesting()).isEqualTo(42);
-  }
-
-  @Test
-  public void testFileType() throws Exception {
-    Object result = evalRuleClassCode("FileType(['.css'])");
-    SkylarkFileType fts = (SkylarkFileType) result;
-    assertThat(fts.getExtensions()).isEqualTo(ImmutableList.of(".css"));
+    assertThat(a.getDefaultValueUnchecked()).isEqualTo(42);
   }
 
   @Test
   public void testFileTypeIsDisabled() throws Exception {
-    SkylarkSemantics semantics =
-        SkylarkSemantics.DEFAULT_SEMANTICS.toBuilder().incompatibleDisallowFileType(true).build();
+    StarlarkSemantics semantics =
+        StarlarkSemantics.DEFAULT_SEMANTICS.toBuilder().incompatibleDisallowFileType(true).build();
     EvalException expected =
         assertThrows(EvalException.class, () -> evalRuleClassCode(semantics, "FileType(['.css'])"));
     assertThat(expected).hasMessageThat().contains("FileType function is not available.");
@@ -1005,9 +996,8 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
   @Test
   public void testLabelAttrWrongDefault() throws Exception {
     checkErrorContains(
-        "expected value of type 'Label or string or LateBoundDefault or "
-            + "function or NoneType' for parameter 'default', in method call "
-            + "label(int default) of 'attr (a language module)'",
+        "expected value of type 'Label or string or LateBoundDefault or function or NoneType' "
+            + "for parameter 'default', for call to method label(",
         "attr.label(default = 123)");
   }
 
@@ -1022,29 +1012,6 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
     checkErrorContains(
         "invalid target name 'bad//syntax': target names may not contain '//' path separators",
         "Label('//foo:bar').relative('bad//syntax')");
-  }
-
-  @Test
-  public void testLicenseAttributesNonconfigurable() throws Exception {
-    scratch.file("test/BUILD");
-    scratch.file("test/rule.bzl",
-        "def _impl(ctx):",
-        "  return",
-        "some_rule = rule(",
-        "  implementation = _impl,",
-        "  attrs = {",
-        "    'licenses': attr.license()",
-        "  }",
-        ")");
-    scratch.file("third_party/foo/BUILD",
-        "load('//test:rule.bzl', 'some_rule')",
-        "some_rule(",
-        "    name='r',",
-        "    licenses = ['unencumbered']",
-        ")");
-    invalidatePackages();
-    // Should succeed without a "licenses attribute is potentially configurable" loading error:
-    createRuleContext("//third_party/foo:r");
   }
 
   @Test
@@ -1109,13 +1076,12 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
   @Test
   public void testStructAccessingUnknownFieldWithArgs() throws Exception {
     checkErrorContains(
-        "struct has no method 'c'", "x = struct(a = 1, b = 2)", "y = x.c()");
+        "type 'struct' has no method c()", "x = struct(a = 1, b = 2)", "y = x.c()");
   }
 
   @Test
   public void testStructAccessingNonFunctionFieldWithArgs() throws Exception {
-    checkErrorContains(
-        "struct field 'a' is not a function", "x = struct(a = 1, b = 2)", "x1 = x.a(1)");
+    checkErrorContains("'int' object is not callable", "x = struct(a = 1, b = 2)", "x1 = x.a(1)");
   }
 
   @Test
@@ -1127,7 +1093,7 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
   @Test
   public void testStructPosArgs() throws Exception {
     checkErrorContains(
-        "struct(**kwargs) does not accept positional arguments, but got 1", "x = struct(1, b = 2)");
+        "expected no more than 0 positional arguments, but got 1", "x = struct(1, b = 2)");
   }
 
   @Test
@@ -1136,7 +1102,7 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
     eval("x = struct(a = 1, b = 2)",
         "y = struct(c = 1, d = 2)",
         "z = x + y\n");
-    Info z = (Info) lookup("z");
+    StructImpl z = (StructImpl) lookup("z");
     assertThat(z.getFieldNames()).isEqualTo(ImmutableSet.of("a", "b", "c", "d"));
   }
 
@@ -1146,7 +1112,7 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
     eval("x = struct(a = 1, b = 2)",
         "y = struct(c = 1, d = 2)",
         "z = x + y\n");
-    Info z = (Info) lookup("z");
+    StructImpl z = (StructImpl) lookup("z");
     assertThat(z.getValue("a")).isEqualTo(1);
     assertThat(z.getValue("b")).isEqualTo(2);
     assertThat(z.getValue("c")).isEqualTo(1);
@@ -1168,7 +1134,7 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
         "    x += struct(c = 1, d = 2)",
         "  return x",
         "x = func()");
-    Info x = (Info) lookup("x");
+    StructImpl x = (StructImpl) lookup("x");
     assertThat(x.getValue("a")).isEqualTo(1);
     assertThat(x.getValue("b")).isEqualTo(2);
     assertThat(x.getValue("c")).isEqualTo(1);
@@ -1242,7 +1208,7 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
     eval(
         "s = struct(x = {'a' : 1})",
         "s.x['b'] = 2\n");
-    assertThat(((Info) lookup("s")).getValue("x")).isEqualTo(ImmutableMap.of("a", 1, "b", 2));
+    assertThat(((StructImpl) lookup("s")).getValue("x")).isEqualTo(ImmutableMap.of("a", 1, "b", 2));
   }
 
   @Test
@@ -1250,7 +1216,7 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
     eval("def func():", "  return depset([struct(a='a')])", "s = func()");
     Collection<Object> result = ((SkylarkNestedSet) lookup("s")).toCollection();
     assertThat(result).hasSize(1);
-    assertThat(result.iterator().next()).isInstanceOf(Info.class);
+    assertThat(result.iterator().next()).isInstanceOf(StructImpl.class);
   }
 
   @Test
@@ -1259,11 +1225,11 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
     checkEvalError("depsets cannot contain mutable items", "depset([struct(a=[])])");
   }
 
-  private static Info makeStruct(String field, Object value) {
+  private static StructImpl makeStruct(String field, Object value) {
     return StructProvider.STRUCT.create(ImmutableMap.of(field, value), "no field '%'");
   }
 
-  private static Info makeBigStruct(Environment env) {
+  private static StructImpl makeBigStruct(Environment env) {
     // struct(a=[struct(x={1:1}), ()], b=(), c={2:2})
     return StructProvider.STRUCT.create(
         ImmutableMap.<String, Object>of(
@@ -1311,7 +1277,7 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
     assertThat(lookup("d_x")).isEqualTo(1);
     assertThat(lookup("d_y")).isEqualTo("abc");
     SkylarkProvider dataConstructor = (SkylarkProvider) lookup("data");
-    Info data = (Info) lookup("d");
+    StructImpl data = (StructImpl) lookup("d");
     assertThat(data.getProvider()).isEqualTo(dataConstructor);
     assertThat(dataConstructor.isExported()).isTrue();
     assertThat(dataConstructor.getPrintableName()).isEqualTo("data");
@@ -1332,9 +1298,9 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
     assertThat(lookup("x")).isEqualTo(1);
     assertThat(lookup("y")).isEqualTo("abc");
     SkylarkProvider dataConstructor = (SkylarkProvider) lookup("data");
-    Info dx = (Info) lookup("dx");
+    StructImpl dx = (StructImpl) lookup("dx");
     assertThat(dx.getProvider()).isEqualTo(dataConstructor);
-    Info dy = (Info) lookup("dy");
+    StructImpl dy = (StructImpl) lookup("dy");
     assertThat(dy.getProvider()).isEqualTo(dataConstructor);
   }
 
@@ -1390,7 +1356,7 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
     evalAndExport(
         "data = struct(x = 1)"
     );
-    Info data = (Info) lookup("data");
+    StructImpl data = (StructImpl) lookup("data");
     assertThat(StructProvider.STRUCT.isExported()).isTrue();
     assertThat(data.getProvider()).isEqualTo(StructProvider.STRUCT);
     assertThat(data.getProvider().getKey()).isEqualTo(StructProvider.STRUCT.getKey());
@@ -1404,7 +1370,8 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
   @Test
   public void declaredProvidersBadTypeForDoc() throws Exception {
     checkErrorContains(
-        "expected string for 'doc' while calling provider but got int instead",
+        "expected value of type 'string' for parameter 'doc', for call to function "
+            + "provider(doc = '', fields = None)",
         "provider(doc = 1)");
   }
 
@@ -1416,9 +1383,7 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
         "my_aspect = aspect(_impl, attr_aspects=['*'])");
 
     SkylarkDefinedAspect myAspect = (SkylarkDefinedAspect) lookup("my_aspect");
-    assertThat(myAspect.getDefinition(AspectParameters.EMPTY).propagateAlong(
-        Attribute.attr("foo", BuildType.LABEL).allowedFileTypes().build()
-    )).isTrue();
+    assertThat(myAspect.getDefinition(AspectParameters.EMPTY).propagateAlong("foo")).isTrue();
   }
 
   @Test
@@ -1547,7 +1512,7 @@ public class SkylarkRuleClassFunctionsTest extends SkylarkTestCase {
   public void aspectBadTypeForDoc() throws Exception {
     registerDummyUserDefinedFunction();
     checkErrorContains(
-        "expected string for 'doc' while calling aspect but got int instead",
+        "expected value of type 'string' for parameter 'doc', for call to function aspect(",
         "aspect(impl, doc = 1)");
   }
 

@@ -96,7 +96,7 @@ public class TestSummaryTest {
     AnsiTerminalPrinter terminalPrinter = Mockito.mock(AnsiTerminalPrinter.class);
 
     TestSummary summaryStatus = createTestSummary(target, BlazeTestStatus.PASSED, CACHED);
-    TestSummaryPrinter.print(summaryStatus, terminalPrinter, true, false);
+    TestSummaryPrinter.print(summaryStatus, terminalPrinter, Path::getPathString, true, false);
     terminalPrinter.print(find(expectedString));
   }
 
@@ -106,9 +106,9 @@ public class TestSummaryTest {
     AnsiTerminalPrinter terminalPrinter = Mockito.mock(AnsiTerminalPrinter.class);
 
     TestSummary summary = createTestSummary(stubTarget, BlazeTestStatus.PASSED, NOT_CACHED);
-    TestSummaryPrinter.print(summary, terminalPrinter, true, false);
+    TestSummaryPrinter.print(summary, terminalPrinter, Path::getPathString, true, false);
 
-    terminalPrinter.print(find(expectedString));
+    verify(terminalPrinter).print(find(expectedString));
   }
 
   @Test
@@ -118,7 +118,7 @@ public class TestSummaryTest {
 
     TestSummary summary = createTestSummary(stubTarget, BlazeTestStatus.FAILED, NOT_CACHED);
 
-    TestSummaryPrinter.print(summary, terminalPrinter, true, false);
+    TestSummaryPrinter.print(summary, terminalPrinter, Path::getPathString, true, false);
 
     terminalPrinter.print(find(expectedString));
   }
@@ -126,7 +126,11 @@ public class TestSummaryTest {
   private void assertShouldNotPrint(BlazeTestStatus status) throws Exception {
     AnsiTerminalPrinter terminalPrinter = Mockito.mock(AnsiTerminalPrinter.class);
     TestSummaryPrinter.print(
-        createTestSummary(stubTarget, status, NOT_CACHED), terminalPrinter, true, false);
+        createTestSummary(stubTarget, status, NOT_CACHED),
+        terminalPrinter,
+        Path::getPathString,
+        true,
+        false);
     verify(terminalPrinter, never()).print(anyString());
   }
 
@@ -147,7 +151,7 @@ public class TestSummaryTest {
 
     TestSummary summary = createTestSummary(stubTarget, BlazeTestStatus.PASSED, CACHED);
 
-    TestSummaryPrinter.print(summary, terminalPrinter, true, false);
+    TestSummaryPrinter.print(summary, terminalPrinter, Path::getPathString, true, false);
 
     terminalPrinter.print(find(expectedString));
   }
@@ -158,7 +162,7 @@ public class TestSummaryTest {
     AnsiTerminalPrinter terminalPrinter = Mockito.mock(AnsiTerminalPrinter.class);
 
     TestSummary summary = createTestSummary(stubTarget, BlazeTestStatus.PASSED, CACHED - 1);
-    TestSummaryPrinter.print(summary, terminalPrinter, true, false);
+    TestSummaryPrinter.print(summary, terminalPrinter, Path::getPathString, true, false);
     terminalPrinter.print(find(expectedString));
   }
 
@@ -166,7 +170,7 @@ public class TestSummaryTest {
   public void testIncompleteCached() throws Exception {
     AnsiTerminalPrinter terminalPrinter = Mockito.mock(AnsiTerminalPrinter.class);
     TestSummary summary = createTestSummary(stubTarget, BlazeTestStatus.INCOMPLETE, CACHED - 1);
-    TestSummaryPrinter.print(summary, terminalPrinter, true, false);
+    TestSummaryPrinter.print(summary, terminalPrinter, Path::getPathString, true, false);
     verify(terminalPrinter).print(not(contains("cached")));
   }
 
@@ -174,7 +178,7 @@ public class TestSummaryTest {
   public void testShouldPrintUncachedStatus() throws Exception {
     AnsiTerminalPrinter terminalPrinter = Mockito.mock(AnsiTerminalPrinter.class);
     TestSummary summary = createTestSummary(stubTarget, BlazeTestStatus.PASSED, NOT_CACHED);
-    TestSummaryPrinter.print(summary, terminalPrinter, true, false);
+    TestSummaryPrinter.print(summary, terminalPrinter, Path::getPathString, true, false);
     verify(terminalPrinter).print(not(contains("cached")));
   }
 
@@ -185,7 +189,7 @@ public class TestSummaryTest {
 
     TestSummary summary = createTestSummary(stubTarget, BlazeTestStatus.PASSED, NOT_CACHED);
 
-    TestSummaryPrinter.print(summary, terminalPrinter, true, false);
+    TestSummaryPrinter.print(summary, terminalPrinter, Path::getPathString, true, false);
     terminalPrinter.print(find(expectedString));
   }
 
@@ -218,12 +222,6 @@ public class TestSummaryTest {
     TestSummary sixtyCached = basicBuilder.setNumCached(60).build();
     assertThat(sixtyCached.numCached()).isEqualTo(60);
     assertThat(fiftyCached.numCached()).isEqualTo(50);
-
-    TestSummary failedCacheTemplate = TestSummary.newBuilderFromExisting(fiftyCached)
-        .setStatus(BlazeTestStatus.FAILED)
-        .build();
-    assertThat(failedCacheTemplate.numCached()).isEqualTo(50);
-    assertThat(failedCacheTemplate.getStatus()).isEqualTo(BlazeTestStatus.FAILED);
   }
 
   @Test
@@ -233,7 +231,7 @@ public class TestSummaryTest {
     AnsiTerminalPrinter terminalPrinter = Mockito.mock(AnsiTerminalPrinter.class);
 
     TestSummary summary = basicBuilder.addTestTimes(ImmutableList.of(3412L)).build();
-    TestSummaryPrinter.print(summary, terminalPrinter, true, false);
+    TestSummaryPrinter.print(summary, terminalPrinter, Path::getPathString, true, false);
     terminalPrinter.print(find(expectedString));
   }
 
@@ -244,7 +242,7 @@ public class TestSummaryTest {
     AnsiTerminalPrinter terminalPrinter = Mockito.mock(AnsiTerminalPrinter.class);
 
     TestSummary summary = basicBuilder.addTestTimes(ImmutableList.of(3412L)).build();
-    TestSummaryPrinter.print(summary, terminalPrinter, false, false);
+    TestSummaryPrinter.print(summary, terminalPrinter, Path::getPathString, false, false);
     terminalPrinter.print(find(expectedString));
   }
 
@@ -257,7 +255,7 @@ public class TestSummaryTest {
     TestSummary summary = basicBuilder
         .addTestTimes(ImmutableList.of(1000L, 2000L, 3000L))
         .build();
-    TestSummaryPrinter.print(summary, terminalPrinter, true, false);
+    TestSummaryPrinter.print(summary, terminalPrinter, Path::getPathString, true, false);
     terminalPrinter.print(find(expectedString));
   }
 
@@ -270,7 +268,7 @@ public class TestSummaryTest {
     TestSummary summary = basicBuilder.addCoverageFiles(paths).build();
 
     AnsiTerminalPrinter terminalPrinter = Mockito.mock(AnsiTerminalPrinter.class);
-    TestSummaryPrinter.print(summary, terminalPrinter, true, false);
+    TestSummaryPrinter.print(summary, terminalPrinter, Path::getPathString, true, false);
     verify(terminalPrinter).print(find(ANY_STRING + "INFO" + ANY_STRING + BlazeTestStatus.PASSED));
     verify(terminalPrinter).print(find("  /cov2.dat"));
     verify(terminalPrinter).print(find("  /cov4.dat"));
@@ -287,7 +285,7 @@ public class TestSummaryTest {
         .addPassedLogs(getPathList("/a"))
         .addFailedLogs(getPathList("/b", "/c"))
         .build();
-    TestSummaryPrinter.print(summary, terminalPrinter, true, false);
+    TestSummaryPrinter.print(summary, terminalPrinter, Path::getPathString, true, false);
     terminalPrinter.print(find(expectedString));
   }
 
@@ -302,7 +300,7 @@ public class TestSummaryTest {
         .addPassedLogs(getPathList("/a"))
         .addFailedLogs(getPathList("/b", "/c"))
         .build();
-    TestSummaryPrinter.print(summary, terminalPrinter, true, false);
+    TestSummaryPrinter.print(summary, terminalPrinter, Path::getPathString, true, false);
     terminalPrinter.print(find(expectedString));
   }
 
@@ -319,7 +317,7 @@ public class TestSummaryTest {
 
     // Check that only //package:name is printed.
     AnsiTerminalPrinter printer = Mockito.mock(AnsiTerminalPrinter.class);
-    TestSummaryPrinter.print(summary, printer, true, true);
+    TestSummaryPrinter.print(summary, printer, Path::getPathString, true, true);
     verify(printer).print(contains("//package:name"));
   }
 
@@ -330,7 +328,7 @@ public class TestSummaryTest {
         BlazeTestStatus.FAILED, emptyList, FailedTestCasesStatus.NOT_AVAILABLE);
 
     AnsiTerminalPrinter printer = Mockito.mock(AnsiTerminalPrinter.class);
-    TestSummaryPrinter.print(summary, printer, true, true);
+    TestSummaryPrinter.print(summary, printer, Path::getPathString, true, true);
     verify(printer).print(contains("//package:name"));
     verify(printer).print(contains("not available"));
   }
@@ -343,7 +341,7 @@ public class TestSummaryTest {
         FailedTestCasesStatus.PARTIAL);
 
     AnsiTerminalPrinter printer = Mockito.mock(AnsiTerminalPrinter.class);
-    TestSummaryPrinter.print(summary, printer, true, true);
+    TestSummaryPrinter.print(summary, printer, Path::getPathString, true, true);
     verify(printer).print(contains("//package:name"));
     verify(printer).print(find("FAILED.*orange"));
     verify(printer).print(contains("incomplete"));
@@ -371,11 +369,11 @@ public class TestSummaryTest {
     assertThat(summaryFailed.getStatus()).isEqualTo(BlazeTestStatus.FAILED);
 
     AnsiTerminalPrinter printerPassed = Mockito.mock(AnsiTerminalPrinter.class);
-    TestSummaryPrinter.print(summaryPassed, printerPassed, true, true);
+    TestSummaryPrinter.print(summaryPassed, printerPassed, Path::getPathString, true, true);
     verify(printerPassed).print(contains("//package:name"));
 
     AnsiTerminalPrinter printerFailed = Mockito.mock(AnsiTerminalPrinter.class);
-    TestSummaryPrinter.print(summaryFailed, printerFailed, true, true);
+    TestSummaryPrinter.print(summaryFailed, printerFailed, Path::getPathString, true, true);
     verify(printerFailed).print(contains("//package:name"));
     verify(printerFailed).print(find("FAILED.*orange *\\(1\\.5"));
   }
@@ -410,7 +408,7 @@ public class TestSummaryTest {
 
       // A mock that checks the ordering of method calls
       AnsiTerminalPrinter printer = Mockito.mock(AnsiTerminalPrinter.class);
-      TestSummaryPrinter.print(summary, printer, true, true);
+      TestSummaryPrinter.print(summary, printer, Path::getPathString, true, true);
       InOrder order = Mockito.inOrder(printer);
       order.verify(printer).print(contains("//package:name"));
       order.verify(printer).print(find("FAILED.*apple"));
@@ -449,10 +447,61 @@ public class TestSummaryTest {
         .build();
 
     AnsiTerminalPrinter printer = Mockito.mock(AnsiTerminalPrinter.class);
-    TestSummaryPrinter.print(summary, printer, true, true);
+    TestSummaryPrinter.print(summary, printer, Path::getPathString, true, true);
     verify(printer).print(contains("//package:name"));
     verify(printer).print(find("FAILED.*apple"));
     verify(printer).print(find("ERROR.*cherry"));
+  }
+
+  @Test
+  public void countTotalTestCases() throws Exception {
+    TestCase rootCase =
+        TestCase.newBuilder()
+            .setName("tests")
+            .setRunDurationMillis(5000L)
+            .addChild(newDetail("apple", TestCase.Status.FAILED, 1000L))
+            .addChild(newDetail("banana", TestCase.Status.PASSED, 1000L))
+            .addChild(newDetail("cherry", TestCase.Status.ERROR, 1000L))
+            .build();
+
+    TestSummary summary =
+        getTemplateBuilder()
+            .countTotalTestCases(rootCase)
+            .setStatus(BlazeTestStatus.FAILED)
+            .build();
+
+    assertThat(summary.getTotalTestCases()).isEqualTo(3);
+  }
+
+  @Test
+  public void countTotalTestCasesInNestedTree() throws Exception {
+    TestCase aCase =
+        TestCase.newBuilder()
+            .setName("tests-1")
+            .setRunDurationMillis(5000L)
+            .addChild(newDetail("apple", TestCase.Status.FAILED, 1000L))
+            .addChild(newDetail("banana", TestCase.Status.PASSED, 1000L))
+            .addChild(newDetail("cherry", TestCase.Status.ERROR, 1000L))
+            .build();
+    TestCase anotherCase =
+        TestCase.newBuilder()
+            .setName("tests-2")
+            .setRunDurationMillis(5000L)
+            .addChild(newDetail("apple", TestCase.Status.FAILED, 1000L))
+            .addChild(newDetail("banana", TestCase.Status.PASSED, 1000L))
+            .addChild(newDetail("cherry", TestCase.Status.ERROR, 1000L))
+            .build();
+
+    TestCase rootCase =
+        TestCase.newBuilder().setName("tests").addChild(aCase).addChild(anotherCase).build();
+
+    TestSummary summary =
+        getTemplateBuilder()
+            .countTotalTestCases(rootCase)
+            .setStatus(BlazeTestStatus.FAILED)
+            .build();
+
+    assertThat(summary.getTotalTestCases()).isEqualTo(6);
   }
 
   private ConfiguredTarget target(String path, String targetName) throws Exception {
